@@ -199,14 +199,18 @@ const CODEX_BODY_RECOVERY_RULES = [
   vllmResponsesCompatibilityRule,
 ] as const;
 
-/** Only fall back for the exact dialect mismatches the outgoing normalizer can repair. */
+/** Only fall back for tool item id errors the outgoing normalizer can repair. */
 function isRepairableToolItemIdError(errorText: string): boolean {
   // Codex additionalDetails may contain an escaped JSON error inside another error envelope.
   const text = errorText.replace(/\\+(?=["'])/g, '');
   const match = /Invalid\s+["']input\[\d+\]\.id["']:\s*["'](fc|fco|ctc|ctco)_[^"']+["']\.?\s+Expected an ID that begins with ["'](fc|fco|ctc|ctco)_?["']/i.exec(text);
-  if (!match) return false;
-  return ({ fc: 'ctc', fco: 'ctco', ctc: 'fc', ctco: 'fco' } as Record<string, string>)[match[1]!]
-    === match[2]!;
+  if (match) {
+    return ({ fc: 'ctc', fco: 'ctco', ctc: 'fc', ctco: 'fco' } as Record<string, string>)[match[1]!]
+      === match[2]!;
+  }
+  const overlong = /Invalid\s+["']input\[\d+\]\.id["']:\s*["']((?:ws|tco|fc|fco|ctc|ctco)_[^"']{61,})["']/i.exec(text)?.[1];
+  if (!overlong || overlong.length <= 64) return false;
+  return /string_above_max_length|(?:at most|expected)\D{0,12}64|max(?:imum)?_?length["']?\s*[:=]\s*64/i.test(text);
 }
 
 /**

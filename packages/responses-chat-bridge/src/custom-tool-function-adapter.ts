@@ -1,4 +1,5 @@
 import { Buffer } from 'node:buffer';
+import { createHash } from 'node:crypto';
 import { Transform, type TransformCallback } from 'node:stream';
 import { TextDecoder } from 'node:util';
 
@@ -13,6 +14,8 @@ const MAX_RESPONSE_ARGUMENT_BYTES = 16 * 1024 * 1024;
 // no request that can still be live is evicted, while failed/cancelled requests are eventually
 // reclaimed instead of exhausting the bounded map for the rest of the process lifetime.
 const PENDING_REQUEST_TTL_MS = 15 * 60 * 1000;
+const MAX_RESPONSES_ITEM_ID_LENGTH = 64;
+const SHORT_ITEM_ID_DIGEST_HEX_LENGTH = 24;
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -80,7 +83,19 @@ function adaptItemId(item: Record<string, unknown>): Record<string, unknown> {
   return next;
 }
 
-/** Repair only known dialect mismatches; opaque provider ids and absent ids stay intact.
+/** Keep a replayed tool item id within the Responses limit without changing its dialect prefix. */
+function shortenToolItemId(item: Record<string, unknown>): Record<string, unknown> {
+  const id = item.id;
+  if (typeof item.type !== 'string' || !/(?:_call|_call_output)$/.test(item.type)
+    || typeof id !== 'string' || id.length <= MAX_RESPONSES_ITEM_ID_LENGTH) return item;
+  const prefix = /^[A-Za-z][A-Za-z0-9]*_/.exec(id)?.[0];
+  if (!prefix) return item;
+  const digest = createHash('sha256').update(id).digest('hex').slice(0, SHORT_ITEM_ID_DIGEST_HEX_LENGTH);
+  const retainedLength = MAX_RESPONSES_ITEM_ID_LENGTH - prefix.length - digest.length - 1;
+  return { ...item, id: `${prefix}${id.slice(prefix.length, prefix.length + retainedLength)}_${digest}` };
+}
+
+/** Repair known dialect mismatches and bound replayed tool ids; absent ids stay intact.
  * `call_id` identifies the invocation/result pair and must never be rewritten.
  */
 function normalizeToolItemId(item: Record<string, unknown>): Record<string, unknown> {
@@ -88,8 +103,10 @@ function normalizeToolItemId(item: Record<string, unknown>): Record<string, unkn
     : item.type === 'custom_tool_call_output' ? ['fco_', 'ctco_']
       : item.type === 'function_call' ? ['ctc_', 'fc_']
         : item.type === 'function_call_output' ? ['ctco_', 'fco_'] : null;
-  if (!prefixes || typeof item.id !== 'string' || !item.id.startsWith(prefixes[0])) return item;
-  return { ...item, id: prefixes[1] + item.id.slice(prefixes[0].length) };
+  const dialectNormalized = prefixes && typeof item.id === 'string' && item.id.startsWith(prefixes[0])
+    ? { ...item, id: prefixes[1] + item.id.slice(prefixes[0].length) }
+    : item;
+  return shortenToolItemId(dialectNormalized);
 }
 
 /**

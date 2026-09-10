@@ -2835,12 +2835,16 @@ describe('codex proxy host', () => {
   });
 
   it.each(['shared', 'custom-context', 'control-plane'] as const)(
-    'repairs legacy IDs after a WebSocket rejection on the %s proxy, preserving sibling connections', async (proxyKind) => {
+    'repairs legacy prefixes and overlong IDs after a WebSocket rejection on the %s proxy, preserving sibling connections', async (proxyKind) => {
     const host = await freshCodexProxyHost();
-    const errorMessage = "Invalid 'input[285].id': 'fc_legacy'. Expected an ID that begins with 'ctc'.";
+    const longWsId = 'ws_0cb4cb13-dee8-9afb-aece-c5ec0b3bf2bf_call-94cd3890-d2bb-41ae-8c39-9613c70a322c-24';
+    const longTcoId = 'tco_0cb4cb13-dee8-9afb-aece-c5ec0b3bf2bf_call-94cd3890-d2bb-41ae-8c39-9613c70a322c-24';
+    const errorMessage = `Invalid 'input[285].id': '${longWsId}'. String should have at most 64 characters [type=string_above_max_length]`;
     const legacy = { model: 'gpt-6', input: [
       { type: 'custom_tool_call', id: 'fc_legacy', name: 'exec', call_id: 'call_legacy', input: 'text(1)' },
       { type: 'custom_tool_call_output', id: 'ctco_result', call_id: 'call_legacy', output: '1' },
+      { type: 'web_search_call', id: longWsId, status: 'completed' },
+      { type: 'tool_call_output', id: longTcoId, call_id: 'gateway-call-24', output: 'search result' },
     ] };
     const httpBodies: Array<{ input: typeof legacy.input }> = [];
     const wsBodies: unknown[] = [];
@@ -2849,7 +2853,9 @@ describe('codex proxy host', () => {
       for await (const chunk of req) chunks.push(Buffer.from(chunk));
       const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
       httpBodies.push(body);
-      const valid = body.input[0].id === 'ctc_legacy';
+      const valid = body.input[0].id === 'ctc_legacy'
+        && body.input[2].id.startsWith('ws_') && body.input[2].id.length === 64
+        && body.input[3].id.startsWith('tco_') && body.input[3].id.length === 64;
       res.writeHead(valid ? 200 : 400, { 'content-type': 'application/json' });
       res.end(JSON.stringify(valid ? { output: [] } : { error: { message: errorMessage } }));
     });
@@ -2926,7 +2932,15 @@ describe('codex proxy host', () => {
         expect(code).toBe(200);
       }
       expect(httpBodies).toHaveLength(2);
-      for (const body of httpBodies) expect(body.input).toEqual([{ ...legacy.input[0], id: 'ctc_legacy' }, legacy.input[1]]);
+      for (const body of httpBodies) {
+        expect(body.input.slice(0, 2)).toEqual([{ ...legacy.input[0], id: 'ctc_legacy' }, legacy.input[1]]);
+        expect(body.input[2]).toMatchObject({ type: 'web_search_call', status: 'completed' });
+        expect(body.input[3]).toMatchObject({ type: 'tool_call_output', call_id: 'gateway-call-24', output: 'search result' });
+        expect(body.input[2].id).toMatch(/^ws_/);
+        expect(body.input[3].id).toMatch(/^tco_/);
+        expect(body.input[2].id).toHaveLength(64);
+        expect(body.input[3].id).toHaveLength(64);
+      }
       // Unregister must clear the marker and each owning proxy's successful-WS proof.
       host.unregister('session-bad-ids');
       host.registerComposed('session-bad-ids', 'thread-bad-ids', 'PRODUCT_PROMPT');
@@ -2953,6 +2967,10 @@ describe('codex proxy host', () => {
   it.each([
     ["Invalid 'input[2].id': 'ctc_old'. Expected an ID that begins with 'fc'.", 'tool_item_id'],
     [JSON.stringify({ error: { message: "Invalid \"input[2].id\": \"fco_old\". Expected an ID that begins with \"ctco\"." } }), 'tool_item_id'],
+    ["Invalid 'input[74].id': 'ws_0cb4cb13-dee8-9afb-aece-c5ec0b3bf2bf_call-94cd3890-d2bb-41ae-8c39-9613c70a322c-24'. String should have at most 64 characters [type=string_above_max_length]", 'tool_item_id'],
+    [JSON.stringify({ error: { message: "Invalid 'input[35].id': 'tco_0cb4cb13-dee8-9afb-aece-c5ec0b3bf2bf_call-94cd3890-d2bb-41ae-8c39-9613c70a322c-24'.", type: 'string_above_max_length', max_length: 64 } }), 'tool_item_id'],
+    ["Invalid 'input[2].id': 'ws_short'. String should have at most 64 characters [type=string_above_max_length]", null],
+    ["Invalid 'input[2].id': 'msg_" + "m".repeat(80) + "'. String should have at most 64 characters [type=string_above_max_length]", null],
     ["Invalid 'input[2].call_id': 'fc_old'. Expected an ID that begins with 'ctc'.", null],
     ["Invalid 'input[2].id': 'fc_old'. Expected an ID that begins with 'msg'.", null],
     ["Invalid 'input[2].id': 'unknown_old'. Expected an ID that begins with 'ctc'.", null],

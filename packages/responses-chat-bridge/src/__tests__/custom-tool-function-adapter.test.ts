@@ -59,6 +59,43 @@ describe("legacy Responses tool item ids", () => {
     expect(normalizeResponsesToolItemIds(repaired)).toBeNull();
     expect(normalizeResponsesToolItemIds({ input: "hello" })).toBeNull();
   });
+
+  it("deterministically bounds gateway tool ids while preserving type dialect and call pairing", () => {
+    const ws = "ws_0cb4cb13-dee8-9afb-aece-c5ec0b3bf2bf_call-94cd3890-d2bb-41ae-8c39-9613c70a322c-24";
+    const tco = "tco_0cb4cb13-dee8-9afb-aece-c5ec0b3bf2bf_call-94cd3890-d2bb-41ae-8c39-9613c70a322c-24";
+    const samePrefixDifferentTail = ws.slice(0, -2) + "25";
+    const boundary = "ws_" + "a".repeat(61);
+    const original = { model: "gpt-5.5", input: [
+      { type: "web_search_call", id: ws, status: "completed" },
+      { type: "tool_call_output", id: tco, call_id: "gateway-call-24", output: "result" },
+      { type: "web_search_call", id: samePrefixDifferentTail, status: "completed" },
+      { type: "web_search_call", id: boundary, status: "completed" },
+      { type: "item_reference", id: ws },
+      { type: "message", id: "msg_" + "m".repeat(80), role: "assistant", content: [] },
+      { type: "custom_tool_call", id: "fc_" + "f".repeat(80), call_id: "custom-call", name: "exec", input: "1" },
+    ] };
+    const snapshot = structuredClone(original);
+
+    const normalized = normalizeResponsesToolItemIds(original)!;
+    const items = normalized.input as Array<Record<string, unknown>>;
+    expect(items[0]!.id).toMatch(/^ws_/);
+    expect(items[1]!.id).toMatch(/^tco_/);
+    expect(items[2]!.id).toMatch(/^ws_/);
+    expect(String(items[0]!.id)).toHaveLength(64);
+    expect(String(items[1]!.id)).toHaveLength(64);
+    expect(String(items[2]!.id)).toHaveLength(64);
+    expect(items[0]!.id).not.toBe(items[2]!.id);
+    expect(items[3]!.id).toBe(boundary);
+    expect(items[4]!.id).toBe(ws);
+    expect(items[5]!.id).toBe(snapshot.input[5]!.id);
+    expect(items[6]!.id).toMatch(/^ctc_/);
+    expect(String(items[6]!.id)).toHaveLength(64);
+    expect(items[1]).toMatchObject({ call_id: "gateway-call-24", output: "result" });
+    expect(items[6]).toMatchObject({ call_id: "custom-call", name: "exec", input: "1" });
+    expect(original).toEqual(snapshot);
+    expect(normalizeResponsesToolItemIds(normalized)).toBeNull();
+    expect(normalizeResponsesToolItemIds(structuredClone(original))).toEqual(normalized);
+  });
 });
 
 describe("Responses custom-tool function adapter", () => {
