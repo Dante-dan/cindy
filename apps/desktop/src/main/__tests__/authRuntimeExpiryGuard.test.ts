@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  doesRuntimeRefreshOwnActiveSession,
   removeRejectedRuntimeCredentialCopies,
   runGuardedRuntimeAuthExpiry,
   type RuntimeCompatibilityRemovalResult,
@@ -15,6 +16,56 @@ function deferred<T>() {
 }
 
 describe('runtime auth expiry guard', () => {
+  it('reclaims an empty vault only for a persisted compatibility replacement', () => {
+    const replacement = {
+      requestedTokenStillStored: true,
+      accountKey: 'global:account-a',
+      activeAccountKey: null,
+      allowUnclaimedVault: true,
+      vaultResourceCount: 0,
+      vaultHasSignedOutTombstone: false,
+      accountIsLoggedOut: false,
+    };
+
+    expect(doesRuntimeRefreshOwnActiveSession(replacement)).toBe(true);
+    expect(
+      doesRuntimeRefreshOwnActiveSession({
+        ...replacement,
+        requestedTokenStillStored: false,
+      }),
+    ).toBe(false);
+    expect(
+      doesRuntimeRefreshOwnActiveSession({
+        ...replacement,
+        allowUnclaimedVault: false,
+      }),
+    ).toBe(false);
+    expect(
+      doesRuntimeRefreshOwnActiveSession({
+        ...replacement,
+        vaultResourceCount: 1,
+      }),
+    ).toBe(false);
+    expect(
+      doesRuntimeRefreshOwnActiveSession({
+        ...replacement,
+        activeAccountKey: 'global:account-b',
+      }),
+    ).toBe(false);
+    expect(
+      doesRuntimeRefreshOwnActiveSession({
+        ...replacement,
+        vaultHasSignedOutTombstone: true,
+      }),
+    ).toBe(false);
+    expect(
+      doesRuntimeRefreshOwnActiveSession({
+        ...replacement,
+        accountIsLoggedOut: true,
+      }),
+    ).toBe(false);
+  });
+
   it.each([
     ['same account re-login', { epoch: 2, realm: 'global', userId: 'account-a' }],
     ['different account login', { epoch: 2, realm: 'global', userId: 'account-b' }],

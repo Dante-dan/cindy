@@ -152,6 +152,7 @@ import {
 import { buildSafeStorageIssueMeta } from './safeStorageIssueLog.js';
 import { createCredentialStoreHealth } from './authCredentialStoreHealth';
 import {
+  doesRuntimeRefreshOwnActiveSession,
   removeRejectedRuntimeCredentialCopies,
   runGuardedRuntimeAuthExpiry,
   type RuntimeCredentialRemovalResult,
@@ -1561,14 +1562,15 @@ async function commitDesktopRefreshCredentials(
           vault.resources[key]?.refreshToken === requestedRefreshToken) ||
         (realm === AUTH_REGION &&
           readSafe(LEGACY_RESOURCE_REFRESH_TOKEN_KEY) === requestedRefreshToken);
-      const canClaimUninitializedVault =
-        options.allowUnclaimedVault === true &&
-        vault.activeAccountKey === null &&
-        typeof vault.signedOutAt !== 'number' &&
-        Object.keys(vault.resources).length === 0 &&
-        !loggedOutAccountKeySet(vault).has(key);
-      const stillOwnsActiveSession =
-        requestedTokenStillStored && (vault.activeAccountKey === key || canClaimUninitializedVault);
+      const stillOwnsActiveSession = doesRuntimeRefreshOwnActiveSession({
+        requestedTokenStillStored,
+        accountKey: key,
+        activeAccountKey: vault.activeAccountKey,
+        allowUnclaimedVault: options.allowUnclaimedVault === true,
+        vaultResourceCount: Object.keys(vault.resources).length,
+        vaultHasSignedOutTombstone: typeof vault.signedOutAt === 'number',
+        accountIsLoggedOut: loggedOutAccountKeySet(vault).has(key),
+      });
       const passportId = pair.membership.passportId;
       if (passportId && (stillOwnsActiveSession || vault.resources[key])) {
         // A passive stale refresh may still rotate account A's resource token
@@ -5717,6 +5719,13 @@ export async function refresh(): Promise<boolean> {
         data,
         refreshRealm,
         requestedToken,
+        {
+          // A compatibility-only client can replace AUTH_SESSION_KEY after
+          // expiry CAS removes the rejected vault generation. The persisted
+          // replacement proves ownership, while the empty-vault, logout-
+          // tombstone, and account-tombstone checks keep reclaim fail-closed.
+          allowUnclaimedVault: true,
+        },
       );
       if (credentialCommit !== 'active') {
         log.warn(

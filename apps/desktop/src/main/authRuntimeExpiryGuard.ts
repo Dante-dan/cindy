@@ -7,6 +7,27 @@ export interface RuntimeCredentialVault<Realm extends string = string> {
   resources: Record<string, { realm: Realm; refreshToken: string }>;
 }
 
+export function doesRuntimeRefreshOwnActiveSession(input: {
+  requestedTokenStillStored: boolean;
+  accountKey: string;
+  activeAccountKey: string | null;
+  allowUnclaimedVault: boolean;
+  vaultResourceCount: number;
+  vaultHasSignedOutTombstone: boolean;
+  accountIsLoggedOut: boolean;
+}): boolean {
+  const canClaimUninitializedVault =
+    input.allowUnclaimedVault &&
+    input.activeAccountKey === null &&
+    !input.vaultHasSignedOutTombstone &&
+    input.vaultResourceCount === 0 &&
+    !input.accountIsLoggedOut;
+  return (
+    input.requestedTokenStillStored &&
+    (input.activeAccountKey === input.accountKey || canClaimUninitializedVault)
+  );
+}
+
 function removeRejectedCompatibilityValue(
   expectedValues: readonly string[],
   removeIfUnchanged: (expected: string) => RuntimeCompatibilityRemovalResult,

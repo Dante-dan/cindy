@@ -636,9 +636,9 @@ describe('auth login-flow reset', () => {
       refreshCommitStart,
     );
     const refreshCommitBody = source.slice(refreshCommitStart, refreshCommitEnd);
-    expect(refreshCommitBody).toContain("typeof vault.signedOutAt !== 'number'");
-    expect(refreshCommitBody).toContain('!loggedOutAccountKeySet(vault).has(key)');
-    expect(refreshCommitBody.indexOf('!loggedOutAccountKeySet(vault).has(key)')).toBeGreaterThan(
+    expect(refreshCommitBody).toContain("typeof vault.signedOutAt === 'number'");
+    expect(refreshCommitBody).toContain('loggedOutAccountKeySet(vault).has(key)');
+    expect(refreshCommitBody.indexOf('loggedOutAccountKeySet(vault).has(key)')).toBeGreaterThan(
       refreshCommitBody.indexOf('options.allowUnclaimedVault === true'),
     );
 
@@ -784,6 +784,7 @@ describe('auth login-flow reset', () => {
     expect(runtimePolicyGuard).toBeGreaterThan(-1);
     expect(runtimeRealmActivation).toBeGreaterThan(runtimePolicyGuard);
     expect(refreshBody).toContain('await commitDesktopRefreshCredentials(');
+    expect(refreshBody).toContain('allowUnclaimedVault: true');
     expect(refreshBody).toContain(
       "await expireRuntimeAuth(currentUser.id, 'replaced-elsewhere', {",
     );
@@ -896,8 +897,8 @@ describe('auth login-flow reset', () => {
     const helperBody = source.slice(helperStart, helperEnd);
     expect(helperBody).toContain('vault.activeAccountKey === key');
     expect(helperBody).toContain('options.validateBeforeWrite?.()');
-    expect(helperBody).toContain('canClaimUninitializedVault');
-    expect(helperBody).toContain('Object.keys(vault.resources).length === 0');
+    expect(helperBody).toContain('doesRuntimeRefreshOwnActiveSession');
+    expect(helperBody).toContain('vaultResourceCount: Object.keys(vault.resources).length');
     expect(helperBody).toContain('readSafe(LEGACY_RESOURCE_REFRESH_TOKEN_KEY)');
     expect(helperBody).toContain('markActive: stillOwnsActiveSession');
     expect(helperBody).toContain("if (commit === 'active') {");
