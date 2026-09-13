@@ -39,6 +39,42 @@ describe('buildSelectableMarkdownHtml 渲染态行定位', () => {
   });
 });
 
+describe('buildSelectableMarkdownHtml Mermaid 渲染', () => {
+  const diagram = ['```mermaid', 'graph TD', 'A --> B', '```'].join('\n');
+
+  it('仅含 Mermaid 时注入随包 runtime，并在成功后原位替换源码占位', () => {
+    const html = buildSelectableMarkdownHtml(diagram);
+    expect(html).toContain('data-mermaid-source="graph TD\nA --&gt; B"');
+    expect(html).toContain("document.querySelectorAll('[data-mermaid-source]')");
+    expect(html).toContain("replacement.className = 'xdt-mermaid'");
+    expect(html).toContain('__esbuild_esm_mermaid_nm');
+  });
+
+  it('无 Mermaid 的文档不承担 runtime 体积', () => {
+    const html = buildSelectableMarkdownHtml('普通文档');
+    expect(html).not.toContain('__esbuild_esm_mermaid_nm');
+    expect(html).not.toContain('renderMermaidNodes');
+  });
+
+  it('渲染失败路径不移除源码，并保留 targetLine 外层定位容器', () => {
+    const html = buildSelectableMarkdownHtml(diagram, { targetLine: 1 });
+    expect(html).toContain('<div data-src-line="0"><pre><code data-mermaid-source=');
+    expect(html).toContain('/* 保留源码占位 */');
+    expect(html).toContain("if (pre) pre.replaceWith(replacement)");
+    expect(html).toContain("dispatchEvent(new Event('cindy-mermaid-settled'))");
+    expect(html).toContain("addEventListener('cindy-mermaid-settled',scroll)");
+  });
+
+  it('按阅读器主题初始化 Mermaid，并限制宽图布局', () => {
+    const light = buildSelectableMarkdownHtml(diagram);
+    const dark = buildSelectableMarkdownHtml(diagram, { dark: true });
+    expect(light).toContain("theme: 'default'");
+    expect(dark).toContain("theme: 'dark'");
+    expect(dark).toMatch(/\.xdt-mermaid \{[^}]*overflow-x:\s*auto/s);
+    expect(dark).toMatch(/\.xdt-mermaid svg \{[^}]*min-width:\s*100%[^}]*width:\s*auto/s);
+  });
+});
+
 /**
  * 代码块语法着色的 WebView 输出。
  *
