@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { buildSelectableMarkdownHtml } from '@/session/selectableMarkdownHtml';
 
@@ -42,6 +42,47 @@ describe('buildSelectableMarkdownHtml 渲染态行定位', () => {
 describe('buildSelectableMarkdownHtml Mermaid 渲染', () => {
   const diagram = ['```mermaid', 'graph TD', 'A --> B', '```'].join('\n');
 
+  function runGeneratedMermaidRenderer(
+    html: string,
+    attributes: Record<string, string>,
+    mermaid: {
+      initialize: ReturnType<typeof vi.fn>;
+      parse: ReturnType<typeof vi.fn>;
+      render: ReturnType<typeof vi.fn>;
+    },
+  ): {
+    state: { replacement: { className: string; innerHTML: string } | null };
+    dispatchEvent: ReturnType<typeof vi.fn>;
+  } {
+    const start = html.indexOf('function renderMermaidNodes()');
+    const invocation = 'renderMermaidNodes();';
+    const end = html.indexOf(invocation, start) + invocation.length;
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const state: { replacement: { className: string; innerHTML: string } | null } = { replacement: null };
+    const dispatchEvent = vi.fn();
+    const sourceNode = {
+      getAttribute: (name: string): string | null => attributes[name] ?? null,
+      closest: (): { replaceWith: (next: { className: string; innerHTML: string }) => void } => ({
+        replaceWith: (next) => { state.replacement = next; },
+      }),
+    };
+    const testDocument = {
+      querySelectorAll: (): readonly [typeof sourceNode] => [sourceNode],
+      createElement: (): { className: string; innerHTML: string } => ({ className: '', innerHTML: '' }),
+      dispatchEvent,
+    };
+    class TestEvent {
+      constructor(readonly type: string) {}
+    }
+    Function('window', 'document', 'Event', html.slice(start, end))(
+      { mermaid },
+      testDocument,
+      TestEvent,
+    );
+    return { state, dispatchEvent };
+  }
+
   it('仅含 Mermaid 时注入随包 runtime，并在成功后原位替换源码占位', () => {
     const html = buildSelectableMarkdownHtml(diagram);
     expect(html).toContain('data-mermaid-source="graph TD\nA --&gt; B"');
@@ -72,6 +113,52 @@ describe('buildSelectableMarkdownHtml Mermaid 渲染', () => {
     expect(dark).toContain("theme: 'dark'");
     expect(dark).toMatch(/\.xdt-mermaid \{[^}]*overflow-x:\s*auto/s);
     expect(dark).toMatch(/\.xdt-mermaid svg \{[^}]*min-width:\s*100%[^}]*width:\s*auto/s);
+  });
+
+  it('执行生成脚本后把成功渲染的源码占位替换为图形', async () => {
+    const parse = vi.fn().mockResolvedValue(undefined);
+    const render = vi.fn().mockResolvedValue({ svg: '<svg data-rendered="1"></svg>' });
+    const { state } = runGeneratedMermaidRenderer(
+      buildSelectableMarkdownHtml(diagram),
+      { 'data-mermaid-source': 'graph TD; A-->B' },
+      { initialize: vi.fn(), parse, render },
+    );
+
+    await vi.waitFor(() => expect(state.replacement?.className).toBe('xdt-mermaid'));
+    expect(parse).toHaveBeenCalledWith('graph TD; A-->B');
+    expect(state.replacement?.innerHTML).toBe('<svg data-rendered="1"></svg>');
+  });
+
+  it('执行生成脚本时原文失败会重试修复源码', async () => {
+    const parse = vi.fn()
+      .mockRejectedValueOnce(new Error('broken'))
+      .mockResolvedValueOnce(undefined);
+    const render = vi.fn().mockResolvedValue({ svg: '<svg data-fixed="1"></svg>' });
+    const { state } = runGeneratedMermaidRenderer(
+      buildSelectableMarkdownHtml(diagram),
+      { 'data-mermaid-source': 'broken', 'data-mermaid-repaired-source': 'fixed' },
+      { initialize: vi.fn(), parse, render },
+    );
+
+    await vi.waitFor(() => expect(state.replacement?.innerHTML).toContain('data-fixed="1"'));
+    expect(parse).toHaveBeenNthCalledWith(1, 'broken');
+    expect(parse).toHaveBeenNthCalledWith(2, 'fixed');
+  });
+
+  it('执行生成脚本时两次失败仍保留源码，并发出 settled 事件', async () => {
+    const { state, dispatchEvent } = runGeneratedMermaidRenderer(
+      buildSelectableMarkdownHtml(diagram),
+      { 'data-mermaid-source': 'broken', 'data-mermaid-repaired-source': 'still-broken' },
+      {
+        initialize: vi.fn(),
+        parse: vi.fn().mockRejectedValue(new Error('invalid')),
+        render: vi.fn(),
+      },
+    );
+
+    await vi.waitFor(() => expect(dispatchEvent).toHaveBeenCalledOnce());
+    expect(dispatchEvent.mock.calls[0]?.[0]).toMatchObject({ type: 'cindy-mermaid-settled' });
+    expect(state.replacement).toBeNull();
   });
 });
 
