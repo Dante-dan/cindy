@@ -5722,8 +5722,9 @@ export async function refresh(): Promise<boolean> {
         {
           // A compatibility-only client can replace AUTH_SESSION_KEY after
           // expiry CAS removes the rejected vault generation. The persisted
-          // replacement proves ownership, while the empty-vault, logout-
+          // replacement proves ownership, while the active-owner, logout-
           // tombstone, and account-tombstone checks keep reclaim fail-closed.
+          // Other inactive account resources do not own the active session.
           allowUnclaimedVault: true,
         },
       );

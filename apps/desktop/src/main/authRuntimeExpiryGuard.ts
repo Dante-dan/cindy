@@ -16,15 +16,14 @@ export function doesRuntimeRefreshOwnActiveSession(input: {
   vaultHasSignedOutTombstone: boolean;
   accountIsLoggedOut: boolean;
 }): boolean {
-  const canClaimUninitializedVault =
+  const canClaimUnownedVault =
     input.allowUnclaimedVault &&
     input.activeAccountKey === null &&
     !input.vaultHasSignedOutTombstone &&
-    input.vaultResourceCount === 0 &&
     !input.accountIsLoggedOut;
   return (
     input.requestedTokenStillStored &&
-    (input.activeAccountKey === input.accountKey || canClaimUninitializedVault)
+    (input.activeAccountKey === input.accountKey || canClaimUnownedVault)
   );
 }
 

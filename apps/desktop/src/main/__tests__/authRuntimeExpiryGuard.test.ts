@@ -16,54 +16,53 @@ function deferred<T>() {
 }
 
 describe('runtime auth expiry guard', () => {
-  it('reclaims an empty vault only for a persisted compatibility replacement', () => {
-    const replacement = {
-      requestedTokenStillStored: true,
-      accountKey: 'global:account-a',
-      activeAccountKey: null,
-      allowUnclaimedVault: true,
-      vaultResourceCount: 0,
-      vaultHasSignedOutTombstone: false,
-      accountIsLoggedOut: false,
+  const persistedCompatibilityReplacement = {
+    requestedTokenStillStored: true,
+    accountKey: 'global:account-a',
+    activeAccountKey: null,
+    allowUnclaimedVault: true,
+    vaultResourceCount: 0,
+    vaultHasSignedOutTombstone: false,
+    accountIsLoggedOut: false,
+  };
+
+  it('reclaims an unowned target while preserving unrelated inactive account resources', () => {
+    const replacementWithInactiveAccounts = {
+      ...persistedCompatibilityReplacement,
+      // The expiry CAS removed account A, but account B remains inactive.
+      vaultResourceCount: 1,
     };
 
-    expect(doesRuntimeRefreshOwnActiveSession(replacement)).toBe(true);
+    expect(doesRuntimeRefreshOwnActiveSession(replacementWithInactiveAccounts)).toBe(true);
+  });
+
+  it.each([
+    ['the replacement is no longer persisted', { requestedTokenStillStored: false }],
+    ['reclaim was not explicitly enabled', { allowUnclaimedVault: false }],
+    ['a newer account owns the vault', { activeAccountKey: 'global:account-b' }],
+    ['the vault has a signed-out tombstone', { vaultHasSignedOutTombstone: true }],
+    ['the target account has a logout tombstone', { accountIsLoggedOut: true }],
+  ])('does not let a stale refresh reclaim when %s', (_label, override) => {
     expect(
       doesRuntimeRefreshOwnActiveSession({
-        ...replacement,
-        requestedTokenStillStored: false,
+        ...persistedCompatibilityReplacement,
+        ...override,
       }),
     ).toBe(false);
-    expect(
-      doesRuntimeRefreshOwnActiveSession({
-        ...replacement,
-        allowUnclaimedVault: false,
-      }),
-    ).toBe(false);
-    expect(
-      doesRuntimeRefreshOwnActiveSession({
-        ...replacement,
-        vaultResourceCount: 1,
-      }),
-    ).toBe(false);
-    expect(
-      doesRuntimeRefreshOwnActiveSession({
-        ...replacement,
-        activeAccountKey: 'global:account-b',
-      }),
-    ).toBe(false);
-    expect(
-      doesRuntimeRefreshOwnActiveSession({
-        ...replacement,
-        vaultHasSignedOutTombstone: true,
-      }),
-    ).toBe(false);
-    expect(
-      doesRuntimeRefreshOwnActiveSession({
-        ...replacement,
-        accountIsLoggedOut: true,
-      }),
-    ).toBe(false);
+  });
+
+  it('keeps ownership for the currently active target account', () => {
+    const activeReplacement = {
+      requestedTokenStillStored: true,
+      accountKey: 'global:account-a',
+      activeAccountKey: 'global:account-a',
+      allowUnclaimedVault: false,
+      vaultResourceCount: 1,
+      vaultHasSignedOutTombstone: true,
+      accountIsLoggedOut: true,
+    };
+
+    expect(doesRuntimeRefreshOwnActiveSession(activeReplacement)).toBe(true);
   });
 
   it.each([
