@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest';
 
 import { buildSelectableMarkdownHtml } from '@/session/selectableMarkdownHtml';
@@ -51,7 +52,16 @@ describe('buildSelectableMarkdownHtml Mermaid 渲染', () => {
       render: ReturnType<typeof vi.fn>;
     },
   ): {
-    state: { replacement: { className: string; innerHTML: string } | null };
+    state: {
+      replacement: {
+        className: string;
+        innerHTML: string;
+        svg: {
+          attributes: Record<string, string>;
+          style: Record<string, string>;
+        };
+      } | null;
+    };
     dispatchEvent: ReturnType<typeof vi.fn>;
   } {
     const start = html.indexOf('function renderMermaidNodes()');
@@ -59,17 +69,50 @@ describe('buildSelectableMarkdownHtml Mermaid 渲染', () => {
     const end = html.indexOf(invocation, start) + invocation.length;
     expect(start).toBeGreaterThanOrEqual(0);
     expect(end).toBeGreaterThan(start);
-    const state: { replacement: { className: string; innerHTML: string } | null } = { replacement: null };
+    const state: {
+      replacement: {
+        className: string;
+        innerHTML: string;
+        svg: {
+          attributes: Record<string, string>;
+          style: Record<string, string>;
+        };
+      } | null;
+    } = { replacement: null };
     const dispatchEvent = vi.fn();
+    const svg = {
+      attributes: { viewBox: '0 0 960 540', width: '100%' } as Record<string, string>,
+      style: { maxWidth: '640px' },
+      getAttribute(name: string): string | null {
+        return this.attributes[name] ?? null;
+      },
+      setAttribute(name: string, value: string): void {
+        this.attributes[name] = value;
+      },
+    };
     const sourceNode = {
       getAttribute: (name: string): string | null => attributes[name] ?? null,
-      closest: (): { replaceWith: (next: { className: string; innerHTML: string }) => void } => ({
-        replaceWith: (next) => { state.replacement = next; },
+      closest: (): {
+        replaceWith: (next: NonNullable<typeof state.replacement>) => void;
+      } => ({
+        replaceWith: (next) => {
+          state.replacement = next;
+        },
       }),
     };
     const testDocument = {
       querySelectorAll: (): readonly [typeof sourceNode] => [sourceNode],
-      createElement: (): { className: string; innerHTML: string } => ({ className: '', innerHTML: '' }),
+      createElement: (): {
+        className: string;
+        innerHTML: string;
+        svg: typeof svg;
+        querySelector: (selector: string) => typeof svg | null;
+      } => ({
+        className: '',
+        innerHTML: '',
+        svg,
+        querySelector: (selector) => (selector === 'svg' ? svg : null),
+      }),
       dispatchEvent,
     };
     class TestEvent {
@@ -97,6 +140,36 @@ describe('buildSelectableMarkdownHtml Mermaid 渲染', () => {
     expect(html).not.toContain('renderMermaidNodes');
   });
 
+  it('在 DOM 中执行随包 Mermaid runtime 并产出真实 SVG', async () => {
+    const frame = document.createElement('iframe');
+    document.body.append(frame);
+    const frameWindow = frame.contentWindow;
+    const frameDocument = frame.contentDocument;
+    expect(frameWindow).not.toBeNull();
+    expect(frameDocument).not.toBeNull();
+    const frameSvgElement = frameWindow as unknown as { SVGElement: typeof SVGElement };
+    Object.defineProperties(frameSvgElement.SVGElement.prototype, {
+      getBBox: { value: () => ({ x: 0, y: 0, width: 120, height: 40 }) },
+      getComputedTextLength: { value: () => 40 },
+    });
+
+    try {
+      frameDocument!.open();
+      frameDocument!.write(buildSelectableMarkdownHtml(diagram));
+      frameDocument!.close();
+      await vi.waitFor(
+        () => {
+          const rendered = frameDocument!.querySelector('.xdt-mermaid > svg');
+          expect(rendered).not.toBeNull();
+          expect(rendered?.getAttribute('role')).toBe('graphics-document document');
+        },
+        { timeout: 10_000 },
+      );
+    } finally {
+      frame.remove();
+    }
+  }, 15_000);
+
   it('渲染失败路径不移除源码，并保留 targetLine 外层定位容器', () => {
     const html = buildSelectableMarkdownHtml(diagram, { targetLine: 1 });
     expect(html).toContain('<div data-src-line="0"><pre><code data-mermaid-source=');
@@ -116,17 +189,46 @@ describe('buildSelectableMarkdownHtml Mermaid 渲染', () => {
   });
 
   it('执行生成脚本后把成功渲染的源码占位替换为图形', async () => {
+    const initialize = vi.fn();
     const parse = vi.fn().mockResolvedValue(undefined);
     const render = vi.fn().mockResolvedValue({ svg: '<svg data-rendered="1"></svg>' });
     const { state } = runGeneratedMermaidRenderer(
       buildSelectableMarkdownHtml(diagram),
       { 'data-mermaid-source': 'graph TD; A-->B' },
-      { initialize: vi.fn(), parse, render },
+      { initialize, parse, render },
     );
 
     await vi.waitFor(() => expect(state.replacement?.className).toBe('xdt-mermaid'));
+    expect(initialize).toHaveBeenCalledWith(
+      expect.objectContaining({
+        startOnLoad: false,
+        securityLevel: 'strict',
+        theme: 'default',
+      }),
+    );
     expect(parse).toHaveBeenCalledWith('graph TD; A-->B');
     expect(state.replacement?.innerHTML).toBe('<svg data-rendered="1"></svg>');
+  });
+
+  it('从 viewBox 恢复所有图型的固有宽度，使宽图产生横向滚动', async () => {
+    const { state } = runGeneratedMermaidRenderer(
+      buildSelectableMarkdownHtml(['```mermaid', 'gitGraph', 'commit', '```'].join('\n')),
+      { 'data-mermaid-source': 'gitGraph\ncommit' },
+      {
+        initialize: vi.fn(),
+        parse: vi.fn().mockResolvedValue(undefined),
+        render: vi.fn().mockResolvedValue({
+          svg: '<svg width="100%" style="max-width: 640px" viewBox="0 0 960 540"></svg>',
+        }),
+      },
+    );
+
+    await vi.waitFor(() => expect(state.replacement).not.toBeNull());
+    expect(state.replacement?.svg.attributes.width).toBe('960');
+    expect(state.replacement?.svg.style).toMatchObject({
+      width: 'auto',
+      maxWidth: 'none',
+    });
   });
 
   it('执行生成脚本时原文失败会重试修复源码', async () => {

@@ -141,6 +141,21 @@ function renderMermaidNodes() {
       var replacement = document.createElement('div');
       replacement.className = 'xdt-mermaid';
       replacement.innerHTML = rendered.svg;
+      // Several Mermaid diagram families ignore the per-family useMaxWidth
+      // options above and emit width="100%" plus an inline max-width. Restore
+      // the viewBox's intrinsic width so every wide diagram can overflow this
+      // container instead of being compressed to the phone viewport.
+      var svg = replacement.querySelector('svg');
+      if (svg) {
+        var viewBox = svg.getAttribute('viewBox') || '';
+        var viewBoxParts = viewBox.trim().split(/[\\s,]+/);
+        var intrinsicWidth = Number(viewBoxParts[2]);
+        if (viewBoxParts.length === 4 && isFinite(intrinsicWidth) && intrinsicWidth > 0) {
+          svg.setAttribute('width', String(intrinsicWidth));
+          svg.style.width = 'auto';
+          svg.style.maxWidth = 'none';
+        }
+      }
       var pre = node.closest('pre');
       if (pre) pre.replaceWith(replacement);
     }).catch(function () { /* 保留源码占位 */ }).then(function () {
