@@ -211,6 +211,7 @@ export function ModelAdvancedDrawer({
   const locale = i18n.resolvedLanguage ?? i18n.language ?? 'en';
   const [priceDialogOpen, setPriceDialogOpen] = useState(false);
   const [protocolSaving, setProtocolSaving] = useState(false);
+  const providerSaveRef = useRef(false);
   const titleRef = useRef<HTMLHeadingElement>(null);
   // 开关/档位写的是 renderer 本地存储，订阅 version 才能在写后重渲染。
   useModelVisibilityVersion();
@@ -257,7 +258,7 @@ export function ModelAdvancedDrawer({
   );
   const ctx = useModelContextLimit(open ? contextTarget : null);
   const setModelApi = async (agent: AgentKind, api: PiModelApi) => {
-    if (protocolSaving || provider.source !== 'user' || provider.auth?.native || !row?.byAgent[agent]) return;
+    if (providerSaveRef.current || provider.source !== 'user' || provider.auth?.native || !row?.byAgent[agent]) return;
     const config = providerViewToCustomProviderConfig(provider);
     const runtime = config.runtimes[agent];
     const model = runtime?.models.find(m => m.id === row.byAgent[agent]!.id);
@@ -273,13 +274,33 @@ export function ModelAdvancedDrawer({
       baseUrl: providerBaseUrlForApi(model.route?.baseUrl ?? runtime.baseUrl, api),
       wireProtocol: wire,
     };
+    providerSaveRef.current = true;
     setProtocolSaving(true);
     try {
       const result = await updateCustomProvider(config, {}, { source: 'manual-settings' });
       if (!result.ok) toast.error(t('settings.providers.custom.toast.saveFailed'));
     }
     catch { toast.error(t('settings.providers.custom.toast.saveFailed')); }
-    finally { setProtocolSaving(false); }
+    finally { providerSaveRef.current = false; setProtocolSaving(false); }
+  };
+
+
+  const setImageInput = async (value: boolean | undefined) => {
+    if (providerSaveRef.current || provider.source !== 'user' || provider.auth?.native || !row?.byAgent.pi) return;
+    const config = providerViewToCustomProviderConfig(provider);
+    const model = config.runtimes.pi?.models.find(model => model.id === row.byAgent.pi!.id);
+    if (!model) return;
+    // Keep discovery/defaults separate: removing the field restores inheritance.
+    if (value === undefined) delete model.supportsImageInput;
+    else model.supportsImageInput = value;
+    providerSaveRef.current = true;
+    setProtocolSaving(true);
+    try {
+      const result = await updateCustomProvider(config, {}, { source: 'manual-settings' });
+      if (!result.ok) toast.error(t('settings.providers.custom.toast.saveFailed'));
+    }
+    catch { toast.error(t('settings.providers.custom.toast.saveFailed')); }
+    finally { providerSaveRef.current = false; setProtocolSaving(false); }
   };
 
 
@@ -629,6 +650,32 @@ export function ModelAdvancedDrawer({
                             if (!await resetModelVisibilities(provider.id, visibilityTargets))
                               toast.error(t('settings.providers.models.visibilityWriteFailed'));
                           }}
+                          className="mt-2 rounded-full px-2 py-1 text-12 text-[var(--text-secondary)] hover:bg-[var(--surface-chip)]"
+                        >
+                          {t('settings.providers.models.advanced.restoreDefault')}
+                        </button>
+                      )}
+                    </Section>
+                  )}
+
+                  {provider.source === 'user' && !provider.auth?.native && row.byAgent.pi && conversational && (
+                    <Section title={`Pi · ${t('settings.providers.custom.fields.modelSupportsImageInput')}`}>
+                      <div className="flex min-h-8 items-center justify-between gap-4">
+                        <p className="text-12 text-[var(--form-field-hint)]">
+                          {t('settings.providers.custom.fields.modelSupportsImageInputHelp')}
+                        </p>
+                        <Switch
+                          checked={row.byAgent.pi.supportsImageInput === true}
+                          disabled={protocolSaving || paymentRequired}
+                          onCheckedChange={(value) => void setImageInput(value)}
+                          aria-label={`Pi · ${t('settings.providers.custom.fields.modelSupportsImageInput')}`}
+                        />
+                      </div>
+                      {row.byAgent.pi.userModelConfig?.supportsImageInput !== undefined && (
+                        <button
+                          type="button"
+                          disabled={protocolSaving || paymentRequired}
+                          onClick={() => void setImageInput(undefined)}
                           className="mt-2 rounded-full px-2 py-1 text-12 text-[var(--text-secondary)] hover:bg-[var(--surface-chip)]"
                         >
                           {t('settings.providers.models.advanced.restoreDefault')}

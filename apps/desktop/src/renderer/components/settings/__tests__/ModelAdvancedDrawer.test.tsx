@@ -2,7 +2,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BUNDLED_CATALOG, buildUserProvider } from '@cindy/model-providers';
-import type { CatalogModel, ProviderView } from '@cindy/model-providers';
+import type { CatalogModel, CustomProviderConfig, ProviderView } from '@cindy/model-providers';
 
 const mocks = vi.hoisted(() => ({
   setLimit: vi.fn(async () => {}),
@@ -100,6 +100,53 @@ beforeEach(() => {
 });
 
 describe('model advanced editor', () => {
+  it.each([undefined, true, false])('persists a Pi image override from %s without changing other models or engines', async (supportsImageInput) => {
+    const update = vi.fn(async (..._args: unknown[]) => ({ ok: true }));
+    const previous = window.electronAPI;
+    Object.defineProperty(window, 'electronAPI', { configurable: true, value: { maker: { updateCustomProvider: update } } });
+    const config: CustomProviderConfig = {
+      id: 'deepseek-custom', name: 'DeepSeek API', runtimes: {
+        pi: { baseUrl: 'https://api.deepseek.com/v1', wireProtocol: 'openai-chat', models: [
+          { id: 'deepseek-flash', name: 'DeepSeek Flash', ...(supportsImageInput !== undefined ? { supportsImageInput } : {}) },
+          { id: 'text-only', name: 'Text only', supportsImageInput: false },
+        ] },
+        codex: { baseUrl: 'https://api.deepseek.com/v1', wireProtocol: 'openai-chat', models: [
+          { id: 'deepseek-flash', name: 'DeepSeek Flash', supportsImageInput: false },
+        ] },
+      },
+    };
+    const view = (saved: CustomProviderConfig) => {
+      const source = { ...buildUserProvider(saved), connected: true } as ProviderView;
+      const primary = source.models.pi![0];
+      return <ModelAdvancedDrawer provider={source} row={{ id: primary.id, name: primary.name, avail: ['pi'], byAgent: { pi: primary } }} open onOpenChange={vi.fn()} pricePresentationOf={() => null} onDisable={vi.fn()} disabled={false} paymentRequired={false} />;
+    };
+    try {
+      const rendered = render(view(config));
+      const label = 'Pi · settings.providers.custom.fields.modelSupportsImageInput';
+      expect(screen.getByRole('switch', { name: label }).getAttribute('aria-checked')).toBe(String(supportsImageInput === true));
+      expect(update).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole('switch', { name: label }));
+      await waitFor(() => expect(update).toHaveBeenCalledTimes(1));
+      const saved = update.mock.calls[0]![0] as CustomProviderConfig;
+      expect(saved.runtimes.pi!.models[0]).toEqual({ ...config.runtimes.pi!.models[0], supportsImageInput: supportsImageInput !== true });
+      expect(saved.runtimes.pi!.models[1]).toEqual(config.runtimes.pi!.models[1]);
+      expect(saved.runtimes.codex).toEqual(config.runtimes.codex);
+      rendered.rerender(view(saved));
+      expect(screen.getByRole('switch', { name: label }).getAttribute('aria-checked')).toBe(String(supportsImageInput !== true));
+      fireEvent.click(screen.getByRole('button', { name: 'settings.providers.models.advanced.restoreDefault' }));
+      await waitFor(() => expect(update).toHaveBeenCalledTimes(2));
+      const restored = update.mock.calls[1]![0] as CustomProviderConfig;
+      expect(restored.runtimes.pi!.models[0]).not.toHaveProperty('supportsImageInput');
+      rendered.rerender(view(restored));
+      expect(screen.getByRole('switch', { name: label }).getAttribute('aria-checked')).toBe('false');
+    } finally { Object.defineProperty(window, 'electronAPI', { configurable: true, value: previous }); }
+  });
+
+  it('keeps built-in capability metadata read-only', () => {
+    draw();
+    expect(screen.queryByRole('switch', { name: /modelSupportsImageInput/ })).toBeNull();
+  });
+
   it('shows the imported API as a label rather than offering unrelated supplier transports', () => {
     const source = { ...buildUserProvider({ id: 'nous-test', name: 'Hermes', runtimes: {
       pi: { catalogPresetId: 'nous', baseUrl: 'https://inference-api.nousresearch.com/v1', wireProtocol: 'openai-chat', models: [{ id: 'gpt-6', name: 'GPT-6' }] },
