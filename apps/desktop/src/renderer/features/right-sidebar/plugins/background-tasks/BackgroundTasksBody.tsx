@@ -61,6 +61,7 @@ import {
   listSessionBackgroundTasksFor,
 } from '@/lib/makerTransport';
 import { formatCompactTokens } from '@/lib/usageFormat';
+import { clearSystemSessionAttention } from '@/lib/sessionAttentionStore';
 import type { Message } from '@/lib/ccAgent.types';
 import type { WorkflowProgress } from '../../../../../shared/workflow-progress';
 import type { TabKindHostContext } from '../../types';
@@ -331,6 +332,7 @@ function TaskRow({
     item.kind === 'workflow' ||
     (Boolean(sessionId) && Boolean(item.toolCallClientId) && !isSidebarWindow());
   const handleClick = useCallback(() => {
+    if (sessionId) clearSystemSessionAttention(sessionId, 'explicit');
     if (item.kind === 'workflow') {
       onOpenWorkflow(item.key);
       return;
