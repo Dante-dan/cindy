@@ -94,6 +94,7 @@ export interface RuntimeAuthExpiryCommitGuards {
   validateBeforeCommit: () => boolean;
   shouldClearOnFailure: () => boolean;
   markSelfCleared: () => void;
+  markTeardownStarted: () => void;
 }
 
 /**
@@ -107,7 +108,12 @@ export async function runGuardedRuntimeAuthExpiry(input: {
   isRetryableError?: (error: unknown) => boolean;
   commit: (guards: RuntimeAuthExpiryCommitGuards) => Promise<void>;
 }): Promise<
-  'expired' | 'retry' | 'stale-credential' | 'stale-credential-after-teardown' | 'superseded'
+  | 'expired'
+  | 'retry'
+  | 'retry-after-teardown'
+  | 'stale-credential'
+  | 'stale-credential-after-teardown'
+  | 'superseded'
 > {
   if (!input.isCurrent()) return 'superseded';
   if (input.removeRejectedCredentials) {
@@ -130,19 +136,23 @@ export async function runGuardedRuntimeAuthExpiry(input: {
   let selfCleared = false;
   let teardownStarted = false;
   try {
-    teardownStarted = true;
     await input.commit({
       validateBeforeCommit: isExpiryStillCurrent,
       shouldClearOnFailure: () => selfCleared || isExpiryStillCurrent(),
       markSelfCleared: () => {
         selfCleared = true;
       },
+      markTeardownStarted: () => {
+        teardownStarted = true;
+      },
     });
   } catch (error) {
     if (persistedCredentialSuperseded) {
       return teardownStarted ? 'stale-credential-after-teardown' : 'stale-credential';
     }
-    if (!selfCleared && input.isRetryableError?.(error)) return 'retry';
+    if (!selfCleared && input.isRetryableError?.(error)) {
+      return teardownStarted ? 'retry-after-teardown' : 'retry';
+    }
     throw error;
   }
   return 'expired';

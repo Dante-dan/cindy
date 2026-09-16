@@ -130,6 +130,7 @@ describe('runtime auth expiry guard', () => {
       isPersistedCredentialCurrent: () => persistedGeneration === 'rejected',
       removeRejectedCredentials: async () => 'removed',
       commit: async (guards) => {
+        guards.markTeardownStarted();
         teardownStarted.resolve();
         await replacementWritten.promise;
         if (!guards.validateBeforeCommit()) throw new Error('superseded before commit');
@@ -161,13 +162,34 @@ describe('runtime auth expiry guard', () => {
         removeRejectedCredentials: async () => 'removed',
         isRetryableError: (error) => error === credentialStoreUnavailable,
         commit: async (guards) => {
+          guards.markTeardownStarted();
           if (!guards.validateBeforeCommit()) throw new Error('superseded before commit');
           commitApplied();
         },
       }),
-    ).resolves.toBe('retry');
+    ).resolves.toBe('retry-after-teardown');
     expect(persistedChecks).toBe(2);
     expect(commitApplied).not.toHaveBeenCalled();
+  });
+
+  it('does not request runtime restoration when retry happens before teardown', async () => {
+    const credentialStoreUnavailable = new Error('credential store unavailable');
+    let persistedChecks = 0;
+
+    await expect(
+      runGuardedRuntimeAuthExpiry({
+        isCurrent: () => true,
+        isPersistedCredentialCurrent: () => {
+          persistedChecks += 1;
+          if (persistedChecks === 1) return true;
+          throw credentialStoreUnavailable;
+        },
+        isRetryableError: (error) => error === credentialStoreUnavailable,
+        commit: async (guards) => {
+          guards.validateBeforeCommit();
+        },
+      }),
+    ).resolves.toBe('retry');
   });
 
   it('keeps the clear-on-failure fallback for the expiry transition own epoch bump', async () => {

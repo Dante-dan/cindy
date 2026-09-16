@@ -2486,6 +2486,7 @@ async function withAccountFreeOwnerCommit(opts: {
   shouldClearOnFailure?: () => boolean;
   markPassiveLocalSignOut?: boolean;
   onAuthCleared?: () => void;
+  onTeardownStarted?: () => void;
 }): Promise<void> {
   let authCleared = opts.authAlreadyCleared ?? false;
   let releaseBoundary: (() => void) | null = null;
@@ -2536,12 +2537,14 @@ async function withAccountFreeOwnerCommit(opts: {
           if (!authSessionTeardown) {
             throw new Error('account-free owner transition requires a teardown hook');
           }
+          opts.onTeardownStarted?.();
           await authSessionTeardown(opts.reason);
         } else {
           if (!projectionRepairTeardown) {
             throw new Error('account-free projection repair requires a teardown hook');
           }
           forceBumpGeneration = true;
+          opts.onTeardownStarted?.();
           await projectionRepairTeardown(opts.reason);
         }
       },
@@ -3811,7 +3814,12 @@ async function expireRuntimeAuth(
             },
           }
         : {}),
-      commit: ({ validateBeforeCommit, shouldClearOnFailure, markSelfCleared }) =>
+      commit: ({
+        validateBeforeCommit,
+        shouldClearOnFailure,
+        markSelfCleared,
+        markTeardownStarted,
+      }) =>
         withAccountFreeOwnerCommit({
           reason,
           nextMode: 'signed-out',
@@ -3823,6 +3831,7 @@ async function expireRuntimeAuth(
           clearOnFailure: true,
           markPassiveLocalSignOut: true,
           onAuthCleared: markSelfCleared,
+          onTeardownStarted: markTeardownStarted,
           validateBeforeCommit,
           shouldClearOnFailure: () => {
             const shouldClear = shouldClearOnFailure();
@@ -3840,7 +3849,8 @@ async function expireRuntimeAuth(
       scheduleRefreshRetryAfterTransientFailure();
       return;
     }
-    if (outcome === 'retry') {
+    if (outcome === 'retry' || outcome === 'retry-after-teardown') {
+      restoreRetainedRuntime = outcome === 'retry-after-teardown';
       log.warn(
         'runtime auth expiry could not recheck persisted credentials; preserving the in-memory session and retrying later',
       );
