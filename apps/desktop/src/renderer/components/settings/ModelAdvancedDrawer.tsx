@@ -23,7 +23,7 @@ import { AlertTriangle, Check, ChevronDown, CircleHelp, Minus, Trash2, X } from 
 import { useTranslation } from 'react-i18next';
 
 import { cn } from '@/lib/utils';
-import { providerViewToCustomProviderConfig, updateCustomProvider } from '@/lib/customProviders';
+import { piCatalogProviderIdAfterRouteEdit, providerViewToCustomProviderConfig, updateCustomProvider } from '@/lib/customProviders';
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem } from '@/components/ui/dropdown-menu';
 import { MODEL_HARNESS_COLOR } from '@/lib/modelHarnessPresentation';
 import { ModelCompatibilityNotice } from '@/components/new-chat/ModelCompatibilityNotice';
@@ -52,6 +52,7 @@ import {
 import { EFFORT_TIER_COLORS } from '@/themes/effortTierColors';
 
 import {
+  buildUserProvider,
   classifyVisionCapability,
   providerWireProtocolForApi,
   providerBaseUrlForApi,
@@ -217,17 +218,45 @@ export function ModelAdvancedDrawer({
     isApplied: (snapshot: ProviderView) => boolean;
   } | null>(null);
   const providerSaveRef = useRef(providerSave);
+  // A successful write remains the edit baseline even if catalog enrichment fails.
+  const savedProviderRef = useRef<{
+    providerId: string;
+    config: CustomProviderConfig;
+    edits: Map<string, (snapshot: ProviderView) => boolean>;
+    isApplied: (snapshot: ProviderView) => boolean;
+  } | null>(null);
   const protocolSaving = providerSave !== null;
   useEffect(() => {
+    const saved = savedProviderRef.current;
+    if (saved && (saved.providerId !== provider.id || saved.isApplied(provider))) {
+      savedProviderRef.current = null;
+    }
     if (!providerSave) return;
     if (providerSave.providerId !== provider.id || (providerSave.persisted && providerSave.isApplied(provider))) {
       providerSaveRef.current = null;
       setProviderSave(null);
     }
   }, [provider, providerSave]);
+  useEffect(() => {
+    if (!providerSave?.persisted) return;
+    // Catalog refresh is best-effort after persistence. Bound the UI wait while
+    // retaining the acknowledged configuration for subsequent full-config saves.
+    const timer = setTimeout(() => {
+      if (providerSaveRef.current !== providerSave) return;
+      providerSaveRef.current = null;
+      setProviderSave(null);
+    }, 5000);
+    return () => clearTimeout(timer);
+  }, [providerSave]);
+  const providerConfigForEdit = () => savedProviderRef.current?.providerId === provider.id
+    ? structuredClone(savedProviderRef.current.config)
+    : providerViewToCustomProviderConfig(provider);
 
-  const saveProviderConfig = async (config: CustomProviderConfig, isApplied: (snapshot: ProviderView) => boolean) => {
-    const pending = { providerId: provider.id, persisted: false, isApplied };
+  const saveProviderConfig = async (config: CustomProviderConfig, editKey: string, isApplied: (snapshot: ProviderView) => boolean) => {
+    const edits = new Map(savedProviderRef.current?.providerId === provider.id ? savedProviderRef.current.edits : []);
+    edits.set(editKey, isApplied);
+    const allApplied = (snapshot: ProviderView) => [...edits.values()].every(matches => matches(snapshot));
+    const pending = { providerId: provider.id, persisted: false, isApplied: allApplied };
     providerSaveRef.current = pending;
     setProviderSave(pending);
     try {
@@ -235,7 +264,8 @@ export function ModelAdvancedDrawer({
       if (providerSaveRef.current !== pending) return;
       if (result.ok) {
         // The mutation acknowledgement can precede the provider snapshot. Keep
-        // both controls locked until that snapshot includes this exact edit.
+        // both controls locked until confirmation or the bounded retry deadline.
+        savedProviderRef.current = { providerId: provider.id, config, edits, isApplied: allApplied };
         const confirmed = { ...pending, persisted: true };
         providerSaveRef.current = confirmed;
         setProviderSave(confirmed);
@@ -296,7 +326,8 @@ export function ModelAdvancedDrawer({
   const ctx = useModelContextLimit(open ? contextTarget : null);
   const setModelApi = async (agent: AgentKind, api: PiModelApi) => {
     if (providerSaveRef.current || provider.source !== 'user' || provider.auth?.native || !row?.byAgent[agent]) return;
-    const config = providerViewToCustomProviderConfig(provider);
+    const config = providerConfigForEdit();
+    const previousPi = config.runtimes.pi && structuredClone(config.runtimes.pi);
     const runtime = config.runtimes[agent];
     const model = runtime?.models.find(m => m.id === row.byAgent[agent]!.id);
     if (!runtime || !model) return;
@@ -311,7 +342,10 @@ export function ModelAdvancedDrawer({
       baseUrl: providerBaseUrlForApi(model.route?.baseUrl ?? runtime.baseUrl, api),
       wireProtocol: wire,
     };
-    await saveProviderConfig(config, snapshot => {
+    if (agent === 'pi' && previousPi && config.runtimes.pi) {
+      config.runtimes.pi.piCatalogProviderId = piCatalogProviderIdAfterRouteEdit('pi', previousPi, config.runtimes.pi);
+    }
+    await saveProviderConfig(config, `${agent}:${model.id}:protocol`, snapshot => {
       const saved = providerViewToCustomProviderConfig(snapshot).runtimes[agent]?.models.find(candidate => candidate.id === model.id);
       return saved?.api === api
         && (agent !== 'pi' || saved.piApi === api)
@@ -324,13 +358,13 @@ export function ModelAdvancedDrawer({
 
   const setImageInput = async (value: boolean | undefined) => {
     if (providerSaveRef.current || provider.source !== 'user' || provider.auth?.native || !row?.byAgent.pi) return;
-    const config = providerViewToCustomProviderConfig(provider);
+    const config = providerConfigForEdit();
     const model = config.runtimes.pi?.models.find(model => model.id === row.byAgent.pi!.id);
     if (!model) return;
     // Keep discovery/defaults separate: removing the field restores inheritance.
     if (value === undefined) delete model.supportsImageInput;
     else model.supportsImageInput = value;
-    await saveProviderConfig(config, snapshot => {
+    await saveProviderConfig(config, `pi:${model.id}:image`, snapshot => {
       const saved = providerViewToCustomProviderConfig(snapshot).runtimes.pi?.models.find(candidate => candidate.id === model.id);
       return saved !== undefined && saved.supportsImageInput === value;
     });
@@ -424,7 +458,16 @@ export function ModelAdvancedDrawer({
   );
   const description = localizedModelDescription(primaryModel, t);
   const price = pricePresentationOf(primaryAgent, primaryModel);
-  const protocols = modelProtocolComparison(provider, row.byAgent);
+  const acknowledgedProvider = savedProviderRef.current?.providerId === provider.id
+    ? buildUserProvider(savedProviderRef.current.config)
+    : null;
+  const acknowledgedModels = { ...row.byAgent };
+  for (const agent of row.avail) {
+    const saved = acknowledgedProvider?.models[agent]?.find(model => model.id === row.byAgent[agent]?.id);
+    if (saved) acknowledgedModels[agent] = saved;
+  }
+  const protocols = modelProtocolComparison(provider, acknowledgedModels);
+  const imageInputModel = acknowledgedModels.pi;
   const protocolLabel = (api: PiModelApi | null) =>
     api ? MODEL_PROTOCOL_LABEL[api] ?? null : t('settings.providers.models.advanced.undeclared');
   const displayedLimit = ctxDirtyRef.current
@@ -698,13 +741,13 @@ export function ModelAdvancedDrawer({
                           {t('settings.providers.custom.fields.modelSupportsImageInputHelp')}
                         </p>
                         <Switch
-                          checked={row.byAgent.pi.supportsImageInput === true}
+                          checked={imageInputModel?.supportsImageInput === true}
                           disabled={protocolSaving || paymentRequired}
                           onCheckedChange={(value) => void setImageInput(value)}
                           aria-label={`Pi · ${t('settings.providers.custom.fields.modelSupportsImageInput')}`}
                         />
                       </div>
-                      {row.byAgent.pi.userModelConfig?.supportsImageInput !== undefined && (
+                      {imageInputModel?.userModelConfig?.supportsImageInput !== undefined && (
                         <button
                           type="button"
                           disabled={protocolSaving || paymentRequired}

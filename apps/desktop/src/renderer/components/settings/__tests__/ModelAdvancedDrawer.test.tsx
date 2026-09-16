@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BUNDLED_CATALOG, buildUserProvider } from '@cindy/model-providers';
 import type { CatalogModel, CustomProviderConfig, ProviderView } from '@cindy/model-providers';
@@ -133,6 +133,7 @@ describe('model advanced editor', () => {
       expect(saved.runtimes.codex).toEqual(config.runtimes.codex);
       rendered.rerender(view(saved));
       expect(screen.getByRole('switch', { name: label }).getAttribute('aria-checked')).toBe(String(supportsImageInput !== true));
+      await waitFor(() => expect(screen.getByRole('switch', { name: label }).hasAttribute('disabled')).toBe(false));
       fireEvent.click(screen.getByRole('button', { name: 'settings.providers.models.advanced.restoreDefault' }));
       await waitFor(() => expect(update).toHaveBeenCalledTimes(2));
       const restored = update.mock.calls[1]![0] as CustomProviderConfig;
@@ -177,6 +178,48 @@ describe('model advanced editor', () => {
       rendered.rerender(view(imageConfig));
       await waitFor(() => expect(protocol().hasAttribute('disabled')).toBe(false));
     } finally { Object.defineProperty(window, 'electronAPI', { configurable: true, value: previous }); }
+  });
+
+  it('allows retry after a missing snapshot without discarding the acknowledged protocol', async () => {
+    const update = vi.fn(async (..._args: unknown[]) => ({ ok: true }));
+    const previous = window.electronAPI;
+    Object.defineProperty(window, 'electronAPI', { configurable: true, value: { maker: { updateCustomProvider: update } } });
+    const initial: CustomProviderConfig = { id: 'fixture', name: 'Fixture', runtimes: {
+      pi: { baseUrl: 'https://supplier.example/v1', wireProtocol: 'openai-chat', models: [{ id: 'custom-model', name: 'Custom model' }] },
+    } };
+    const view = (config: CustomProviderConfig) => {
+      const source = { ...buildUserProvider(config), connected: true } as ProviderView;
+      const primary = source.models.pi![0];
+      return <ModelAdvancedDrawer provider={source} row={{ id: primary.id, name: primary.name, avail: ['pi'], byAgent: { pi: primary } }} open onOpenChange={vi.fn()} pricePresentationOf={() => null} onDisable={vi.fn()} disabled={false} paymentRequired={false} />;
+    };
+    try {
+      const rendered = render(view(initial));
+      const image = () => screen.getByRole('switch', { name: 'Pi · settings.providers.custom.fields.modelSupportsImageInput' });
+      const protocol = () => screen.getByRole('button', { name: 'Pi · settings.providers.custom.fields.wireProtocol' });
+      fireEvent.keyDown(protocol(), { key: 'ArrowDown' });
+      const option = await screen.findByRole('menuitemradio', { name: 'Responses' });
+      vi.useFakeTimers();
+      await act(async () => { fireEvent.click(option); });
+      expect(update).toHaveBeenCalledTimes(1);
+      // Even a fresh object carrying the stale snapshot must not unlock saves.
+      rendered.rerender(view(initial));
+      expect(image().hasAttribute('disabled')).toBe(true);
+      fireEvent.click(image());
+      expect(update).toHaveBeenCalledTimes(1);
+      await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+      expect(image().hasAttribute('disabled')).toBe(false);
+      await act(async () => { fireEvent.click(image()); });
+      expect(update).toHaveBeenCalledTimes(2);
+      const imageConfig = update.mock.calls[1]![0] as CustomProviderConfig;
+      expect(imageConfig.runtimes.pi!.models[0]).toMatchObject({ api: 'openai-responses', piApi: 'openai-responses', supportsImageInput: true });
+      expect(protocol().hasAttribute('disabled')).toBe(true);
+      const partial = structuredClone(initial);
+      partial.runtimes.pi!.models[0].supportsImageInput = true;
+      rendered.rerender(view(partial));
+      expect(protocol().hasAttribute('disabled')).toBe(true);
+      rendered.rerender(view(imageConfig));
+      expect(protocol().hasAttribute('disabled')).toBe(false);
+    } finally { vi.useRealTimers(); Object.defineProperty(window, 'electronAPI', { configurable: true, value: previous }); }
   });
 
   it('keeps built-in capability metadata read-only', () => {
