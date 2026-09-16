@@ -3870,6 +3870,14 @@ async function expireRuntimeAuth(
         });
       } catch (error) {
         log.error('failed to restore retained auth runtime after stale expiry teardown', error);
+      } finally {
+        // prepareTransition already published the account-free boundary snapshot.
+        // The credential replacement kept this process authenticated, so always
+        // republish that retained state after the recovery attempt. A failed
+        // runtime restart remains logged above, but must not strand renderers on
+        // the login screen while Main still owns the valid account.
+        notifyRenderer();
+        notifyAuthListeners();
       }
     }
     if (expiryCommitted || expiryClearedOnFailure) {

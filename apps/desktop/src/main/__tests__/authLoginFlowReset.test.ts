@@ -970,6 +970,9 @@ describe('auth login-flow reset', () => {
     expect(helperBody).toContain("if (outcome === 'superseded') return;");
     expect(helperBody).toContain("outcome === 'stale-credential-after-teardown'");
     expect(helperBody).toContain("reason: 'stale-runtime-expiry'");
+    expect(helperBody).toContain('failed to restore retained auth runtime after stale expiry teardown');
+    expect(helperBody).toContain('notifyRenderer();');
+    expect(helperBody).toContain('notifyAuthListeners();');
     expect(helperBody).toContain('preservePersistedRefreshToken: true');
     expect(helperBody).toContain('withAccountFreeOwnerCommit({');
     expect(helperBody).toContain('validateBeforeCommit,');
@@ -1003,7 +1006,15 @@ describe('auth login-flow reset', () => {
     expect(bootstrapSource).toContain(
       'authManager.setAuthSessionRestore(restoreRetainedAuthAccountRuntime);',
     );
+    expect(restoreBody).toContain('if (accountBoundaryAbortedMidTeardown !== null) {');
+    expect(restoreBody).toContain('const releaseBoundary = beginAppSessionBoundary();');
+    expect(restoreBody).toContain(
+      "await teardownAuthAccountBoundary(`${input.reason}-complete-teardown`);",
+    );
     expect(restoreBody).toContain('await ensureRegisteredLocalDbOwnerReady(input.ownerId);');
+    expect(restoreBody.indexOf('await teardownAuthAccountBoundary(')).toBeLessThan(
+      restoreBody.indexOf('await ensureRegisteredLocalDbOwnerReady(input.ownerId);'),
+    );
     expect(restoreBody).toContain('await runBootstrapStableOwnerPostCommitTask({');
 
     const refreshStart = source.indexOf('export async function refresh(): Promise<boolean> {');

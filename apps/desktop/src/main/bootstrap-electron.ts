@@ -2495,11 +2495,14 @@ async function runBootstrapStableOwnerPostCommitTask({
 
 /**
  * Rebuild every owner-scoped runtime torn down by an expiry that a shared
- * userData writer superseded before the signed-out commit. Reusing the LocalDB
- * owner-ready coordinator restores the DB, Maker/provider readiness, IM,
- * scheduler, embedding, input slots and Learn; the stable-owner task restores
- * the Ghost projection and its owner-scoped follow-ups even though the app
- * session generation itself did not change.
+ * userData writer superseded before the signed-out commit. A PI teardown abort
+ * can leave the same-owner DB alive after provider readiness and the other
+ * owner runtimes have already stopped. Complete that interrupted teardown under
+ * a fresh boundary before reusing the normal LocalDB owner-ready coordinator;
+ * this forces a new DB lifecycle and therefore re-arms Maker/provider
+ * readiness, IM, scheduler, embedding, input slots and Learn. The stable-owner
+ * task then restores the Ghost projection and its owner-scoped follow-ups even
+ * though the app session generation itself did not change.
  */
 async function restoreRetainedAuthAccountRuntime(input: {
   ownerId: string;
@@ -2512,6 +2515,24 @@ async function restoreRetainedAuthAccountRuntime(input: {
     session.dataOwnerId !== input.ownerId
   ) {
     throw new Error('retained auth owner changed before runtime restoration');
+  }
+
+  if (accountBoundaryAbortedMidTeardown !== null) {
+    const retainedScopeKey = activeOwnerScopeKey();
+    const releaseBoundary = beginAppSessionBoundary();
+    try {
+      await teardownAuthAccountBoundary(`${input.reason}-complete-teardown`);
+    } finally {
+      releaseBoundary();
+    }
+    const retainedSession = getActiveAppSession();
+    if (
+      retainedScopeKey !== activeOwnerScopeKey() ||
+      retainedSession.mode !== 'cloud' ||
+      retainedSession.dataOwnerId !== input.ownerId
+    ) {
+      throw new Error('retained auth owner changed while completing runtime teardown');
+    }
   }
 
   const dbReady = await ensureRegisteredLocalDbOwnerReady(input.ownerId);
