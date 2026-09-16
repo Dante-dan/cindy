@@ -64,6 +64,7 @@ import {
 import type {
   AgentKind,
   CatalogModel,
+  CustomProviderConfig,
   Effort,
   PiModelApi,
   ProviderView,
@@ -210,8 +211,44 @@ export function ModelAdvancedDrawer({
   const selectionAvailable = provider.connected && !provider.suspended;
   const locale = i18n.resolvedLanguage ?? i18n.language ?? 'en';
   const [priceDialogOpen, setPriceDialogOpen] = useState(false);
-  const [protocolSaving, setProtocolSaving] = useState(false);
-  const providerSaveRef = useRef(false);
+  const [providerSave, setProviderSave] = useState<{
+    providerId: string;
+    persisted: boolean;
+    isApplied: (snapshot: ProviderView) => boolean;
+  } | null>(null);
+  const providerSaveRef = useRef(providerSave);
+  const protocolSaving = providerSave !== null;
+  useEffect(() => {
+    if (!providerSave) return;
+    if (providerSave.providerId !== provider.id || (providerSave.persisted && providerSave.isApplied(provider))) {
+      providerSaveRef.current = null;
+      setProviderSave(null);
+    }
+  }, [provider, providerSave]);
+
+  const saveProviderConfig = async (config: CustomProviderConfig, isApplied: (snapshot: ProviderView) => boolean) => {
+    const pending = { providerId: provider.id, persisted: false, isApplied };
+    providerSaveRef.current = pending;
+    setProviderSave(pending);
+    try {
+      const result = await updateCustomProvider(config, {}, { source: 'manual-settings' });
+      if (providerSaveRef.current !== pending) return;
+      if (result.ok) {
+        // The mutation acknowledgement can precede the provider snapshot. Keep
+        // both controls locked until that snapshot includes this exact edit.
+        const confirmed = { ...pending, persisted: true };
+        providerSaveRef.current = confirmed;
+        setProviderSave(confirmed);
+        return;
+      }
+      toast.error(t('settings.providers.custom.toast.saveFailed'));
+    }
+    catch { toast.error(t('settings.providers.custom.toast.saveFailed')); }
+    if (providerSaveRef.current === pending) {
+      providerSaveRef.current = null;
+      setProviderSave(null);
+    }
+  };
   const titleRef = useRef<HTMLHeadingElement>(null);
   // 开关/档位写的是 renderer 本地存储，订阅 version 才能在写后重渲染。
   useModelVisibilityVersion();
@@ -274,14 +311,14 @@ export function ModelAdvancedDrawer({
       baseUrl: providerBaseUrlForApi(model.route?.baseUrl ?? runtime.baseUrl, api),
       wireProtocol: wire,
     };
-    providerSaveRef.current = true;
-    setProtocolSaving(true);
-    try {
-      const result = await updateCustomProvider(config, {}, { source: 'manual-settings' });
-      if (!result.ok) toast.error(t('settings.providers.custom.toast.saveFailed'));
-    }
-    catch { toast.error(t('settings.providers.custom.toast.saveFailed')); }
-    finally { providerSaveRef.current = false; setProtocolSaving(false); }
+    await saveProviderConfig(config, snapshot => {
+      const saved = providerViewToCustomProviderConfig(snapshot).runtimes[agent]?.models.find(candidate => candidate.id === model.id);
+      return saved?.api === api
+        && (agent !== 'pi' || saved.piApi === api)
+        && saved.route?.baseUrl === model.route?.baseUrl
+        && saved.route?.wireProtocol === wire
+        && saved.route?.requestPath === undefined;
+    });
   };
 
 
@@ -293,14 +330,10 @@ export function ModelAdvancedDrawer({
     // Keep discovery/defaults separate: removing the field restores inheritance.
     if (value === undefined) delete model.supportsImageInput;
     else model.supportsImageInput = value;
-    providerSaveRef.current = true;
-    setProtocolSaving(true);
-    try {
-      const result = await updateCustomProvider(config, {}, { source: 'manual-settings' });
-      if (!result.ok) toast.error(t('settings.providers.custom.toast.saveFailed'));
-    }
-    catch { toast.error(t('settings.providers.custom.toast.saveFailed')); }
-    finally { providerSaveRef.current = false; setProtocolSaving(false); }
+    await saveProviderConfig(config, snapshot => {
+      const saved = providerViewToCustomProviderConfig(snapshot).runtimes.pi?.models.find(candidate => candidate.id === model.id);
+      return saved !== undefined && saved.supportsImageInput === value;
+    });
   };
 
 
