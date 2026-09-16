@@ -53,7 +53,7 @@ describe('active catalog revision', () => {
   it.each(['preset', 'registry'])('projects acknowledged configs using current %s defaults without changing the active snapshot', (source) => {
     const catalog = structuredClone(BUNDLED_CATALOG);
     catalog.modelRegistry = { schemaVersion: 5, updatedAt: '2099-09-17T00:00:00Z', models: [],
-      baseModels: [{ id: 'new-live-model', name: 'Live model', aliases: [], defaults: source === 'registry' ? { supportsImageInput: true } : {} }],
+      baseModels: [{ id: 'new-live-model', aliases: [], defaults: source === 'registry' ? { name: 'Live model', supportsImageInput: true } : { name: 'Live model' } }],
     };
     catalog.presets = [{ id: 'live', name: 'Live', runtimes: { pi: {
       baseUrl: 'https://live.example/v1', wireProtocol: 'openai-chat',

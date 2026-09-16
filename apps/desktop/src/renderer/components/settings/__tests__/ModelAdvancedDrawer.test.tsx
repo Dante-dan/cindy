@@ -241,9 +241,11 @@ describe('model advanced editor', () => {
       render(<ModelAdvancedDrawer provider={source} row={{ id: primary.id, name: primary.name, avail: ['pi'], byAgent: { pi: primary } }} open onOpenChange={vi.fn()} pricePresentationOf={() => null} onDisable={vi.fn()} disabled={false} paymentRequired={false} />);
       const image = () => screen.getByRole('switch', { name: 'Pi · settings.providers.custom.fields.modelSupportsImageInput' });
       expect(image().getAttribute('aria-checked')).toBe('false');
+      expect(screen.getByText('settings.providers.models.advanced.vision.no-vision')).toBeTruthy();
       vi.useFakeTimers();
       await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'settings.providers.models.advanced.restoreDefault' })); });
       expect((update.mock.calls[0]![0] as CustomProviderConfig).runtimes.pi!.models[0]).not.toHaveProperty('supportsImageInput');
+      expect(screen.getByText('settings.providers.models.advanced.vision.vision')).toBeTruthy();
       await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
       expect(image().hasAttribute('disabled')).toBe(false);
       expect(image().getAttribute('aria-checked')).toBe('true');

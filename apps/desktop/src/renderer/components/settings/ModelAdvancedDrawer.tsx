@@ -417,16 +417,26 @@ export function ModelAdvancedDrawer({
     );
   }
 
+  const acknowledgedModelsByAgent = savedProviderRef.current?.providerId === provider.id
+    ? savedProviderRef.current.models
+    : undefined;
+  const acknowledgedModels = { ...row.byAgent };
+  for (const agent of row.avail) {
+    const saved = acknowledgedModelsByAgent?.[agent]?.find(model => model.id === row.byAgent[agent]?.id);
+    if (saved) acknowledgedModels[agent] = saved;
+  }
+  const imageInputModel = acknowledgedModels.pi;
+  const visionModel = primaryAgent === 'pi' ? imageInputModel ?? primaryModel : primaryModel;
   const vision =
-    primaryModel.supportsImageInput !== undefined
-      ? primaryModel.supportsImageInput
+    visionModel.supportsImageInput !== undefined
+      ? visionModel.supportsImageInput
         ? 'vision'
         : 'no-vision'
-      : primaryModel.modalities
-        ? primaryModel.modalities.input.includes('image')
+      : visionModel.modalities
+        ? visionModel.modalities.input.includes('image')
           ? 'vision'
           : 'no-vision'
-        : classifyVisionCapability(primaryModel.id);
+        : classifyVisionCapability(visionModel.id);
   const conversational = isAgentSelectableModel(primaryModel, {
     userProvider: provider.source === 'user',
   });
@@ -458,16 +468,7 @@ export function ModelAdvancedDrawer({
   );
   const description = localizedModelDescription(primaryModel, t);
   const price = pricePresentationOf(primaryAgent, primaryModel);
-  const acknowledgedModelsByAgent = savedProviderRef.current?.providerId === provider.id
-    ? savedProviderRef.current.models
-    : undefined;
-  const acknowledgedModels = { ...row.byAgent };
-  for (const agent of row.avail) {
-    const saved = acknowledgedModelsByAgent?.[agent]?.find(model => model.id === row.byAgent[agent]?.id);
-    if (saved) acknowledgedModels[agent] = saved;
-  }
   const protocols = modelProtocolComparison(provider, acknowledgedModels);
-  const imageInputModel = acknowledgedModels.pi;
   const protocolLabel = (api: PiModelApi | null) =>
     api ? MODEL_PROTOCOL_LABEL[api] ?? null : t('settings.providers.models.advanced.undeclared');
   const displayedLimit = ctxDirtyRef.current
@@ -925,7 +926,7 @@ export function ModelAdvancedDrawer({
                     <Row label={t('settings.providers.models.advanced.imageInput')}>
                       <span
                         title={
-                          primaryModel.modalities || primaryModel.supportsImageInput !== undefined
+                          visionModel.modalities || visionModel.supportsImageInput !== undefined
                             ? t('settings.providers.models.advanced.catalogCapabilities')
                             : t(`settings.providers.models.advanced.visionSource.${vision}`)
                         }
