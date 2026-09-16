@@ -11746,6 +11746,10 @@ function reconcileRemoteMessages(sessionId: string, opts?: {
   const view = getRemoteHistoryView(sessionId);
   if (view && (view.getSnapshot().ready || opts?.freshHistory || opts?.repair)) {
     const runHistoryView = (flight?: HistoryViewForceFlight) => {
+      // Only a fresh read can certify a receipt queued after an older page
+      // started. Resume repairs deliberately reuse their in-flight page.
+      const fresh = opts?.freshHistory ?? opts?.force;
+      const syncToken = fresh ? noteRemoteSessionSyncStarted(sessionId) : undefined;
       const rowsAtStart = new Map((sessions.get(sessionId)?.messages ?? []).map((row) => [row.clientId, row]));
       const epochAtStart = _messagesEpoch.get(sessionId) ?? 0;
       const noteHydration = (before: readonly ChatMessage[], after: readonly ChatMessage[]) => {
@@ -11762,7 +11766,7 @@ function reconcileRemoteMessages(sessionId: string, opts?: {
       // Force needs a post-signal page, even when a normal repair is in flight.
       // Keep this view and its expansion state instead of falling back to raw history.
       return Promise.all([
-        view.refresh(false, opts?.freshHistory ?? opts?.force),
+        view.refresh(false, fresh),
         reconcilePendingInteractions(sessionId),
       ]).then(async () => {
         if (getRemoteHistoryView(sessionId) !== view || !view.isActive()) return false;
@@ -11816,6 +11820,9 @@ function reconcileRemoteMessages(sessionId: string, opts?: {
             noteHydration(state.messages, messages);
             return messages === state.messages ? state : { ...state, messages };
           });
+        }
+        if (snapshot.ready && syncToken !== undefined) {
+          noteRemoteSessionSyncCompleted(sessionId, syncToken);
         }
         return snapshot.ready;
       });
