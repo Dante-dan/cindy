@@ -27,6 +27,7 @@ import { getDbClient } from '../client/current';
 import * as currentDb from '../client/current';
 import type { DbClient } from '../client/DbClient';
 import { sessions, messages } from '../schema';
+import { clearSessionAttention } from '../../appBadgeService';
 import { commitBotProfileDeletion } from '../botProfileDeletionStore.js';
 import {
   LIST_PREVIEW_EXTRACT_SQL,
@@ -1913,6 +1914,9 @@ export async function updateSessionInDb(
       row.summary = null;
     }
     const updated = sessionToCamel(row);
+    if (updated.status === 'deleted' && isOwnerScopeCurrent(ownerScope)) {
+      clearSessionAttention(sid, 'explicit');
+    }
     const projectTargetChanged = p.workspaceKind !== undefined || p.workingDir !== undefined;
     const settingsChanged = Object.keys(p).some((key) => REMOTE_PERSIST_FIELDS.has(key));
     const titleChanged = p.title !== undefined;
@@ -2056,6 +2060,9 @@ export async function patchSessionMetaInDb(
     cleanupSessionRuntimeForTerminalStatus(sessionId, patch.status);
     return { updated: sessionToCamel(row), source: row.source };
   });
+  if (updated.status === 'deleted' && isOwnerScopeCurrent(ownerScope)) {
+    clearSessionAttention(sessionId, 'explicit');
+  }
   if (
     (patch.status === 'deleted' || patch.status === 'archived') &&
     updated.workspaceKind === 'project' &&
@@ -2367,6 +2374,9 @@ export async function deleteBotProfileAndDetachSessionsInDb(
   const committedSessionIds = [...new Set(committed.sessionIds)];
 
   for (const id of committedSessionIds) {
+    if (status === 'deleted' && isOwnerScopeCurrent(ownerScope)) {
+      clearSessionAttention(id, 'explicit');
+    }
     notifyAgentIslandSessionPatch(id, { status });
     broadcastSessionPatched(id, { status, source: 'desktop' }, ownerScope);
     notifyGhostSessionStatusChange(id, status, null);
