@@ -101,7 +101,7 @@ beforeEach(() => {
 
 describe('model advanced editor', () => {
   it.each([undefined, true, false])('persists a Pi image override from %s without changing other models or engines', async (supportsImageInput) => {
-    const update = vi.fn(async (..._args: unknown[]) => ({ ok: true }));
+    const update = vi.fn(async (...args: unknown[]) => ({ ok: true, models: buildUserProvider(args[0] as CustomProviderConfig).models }));
     const previous = window.electronAPI;
     Object.defineProperty(window, 'electronAPI', { configurable: true, value: { maker: { updateCustomProvider: update } } });
     const config: CustomProviderConfig = {
@@ -144,7 +144,7 @@ describe('model advanced editor', () => {
   });
 
   it('waits for the saved protocol snapshot before allowing image edits', async () => {
-    const update = vi.fn(async (..._args: unknown[]) => ({ ok: true }));
+    const update = vi.fn(async (...args: unknown[]) => ({ ok: true, models: buildUserProvider(args[0] as CustomProviderConfig).models }));
     const previous = window.electronAPI;
     Object.defineProperty(window, 'electronAPI', { configurable: true, value: { maker: { updateCustomProvider: update } } });
     const initial: CustomProviderConfig = { id: 'fixture', name: 'Fixture', runtimes: {
@@ -181,7 +181,7 @@ describe('model advanced editor', () => {
   });
 
   it('allows retry after a missing snapshot without discarding the acknowledged protocol', async () => {
-    const update = vi.fn(async (..._args: unknown[]) => ({ ok: true }));
+    const update = vi.fn(async (...args: unknown[]) => ({ ok: true, models: buildUserProvider(args[0] as CustomProviderConfig).models }));
     const previous = window.electronAPI;
     Object.defineProperty(window, 'electronAPI', { configurable: true, value: { maker: { updateCustomProvider: update } } });
     const initial: CustomProviderConfig = { id: 'fixture', name: 'Fixture', runtimes: {
@@ -222,6 +222,38 @@ describe('model advanced editor', () => {
     } finally { vi.useRealTimers(); Object.defineProperty(window, 'electronAPI', { configurable: true, value: previous }); }
   });
 
+  it('restores inherited image support after a missing catalog snapshot', async () => {
+    const presets = [{ id: 'supplier', name: 'Supplier', runtimes: { pi: {
+      baseUrl: 'https://supplier.example/v1', wireProtocol: 'openai-chat' as const,
+      models: [{ id: 'live-model', name: 'Live model', supportsImageInput: true }],
+    } } }];
+    const initial: CustomProviderConfig = { id: 'fixture', name: 'Fixture', runtimes: { pi: {
+      catalogPresetId: 'supplier', baseUrl: 'https://supplier.example/v1', wireProtocol: 'openai-chat',
+      models: [{ id: 'live-model', name: 'Live model', supportsImageInput: false }],
+    } } };
+    const project = (config: CustomProviderConfig) => buildUserProvider(config, { presets });
+    const update = vi.fn(async (...args: unknown[]) => ({ ok: true, models: project(args[0] as CustomProviderConfig).models }));
+    const previous = window.electronAPI;
+    Object.defineProperty(window, 'electronAPI', { configurable: true, value: { maker: { updateCustomProvider: update } } });
+    try {
+      const source = { ...project(initial), connected: true } as ProviderView;
+      const primary = source.models.pi![0];
+      render(<ModelAdvancedDrawer provider={source} row={{ id: primary.id, name: primary.name, avail: ['pi'], byAgent: { pi: primary } }} open onOpenChange={vi.fn()} pricePresentationOf={() => null} onDisable={vi.fn()} disabled={false} paymentRequired={false} />);
+      const image = () => screen.getByRole('switch', { name: 'Pi · settings.providers.custom.fields.modelSupportsImageInput' });
+      expect(image().getAttribute('aria-checked')).toBe('false');
+      vi.useFakeTimers();
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'settings.providers.models.advanced.restoreDefault' })); });
+      expect((update.mock.calls[0]![0] as CustomProviderConfig).runtimes.pi!.models[0]).not.toHaveProperty('supportsImageInput');
+      await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+      expect(image().hasAttribute('disabled')).toBe(false);
+      expect(image().getAttribute('aria-checked')).toBe('true');
+      expect(screen.queryByRole('button', { name: 'settings.providers.models.advanced.restoreDefault' })).toBeNull();
+      // The next deliberate toggle disables the inherited capability; it does not turn it on again.
+      await act(async () => { fireEvent.click(image()); });
+      expect((update.mock.calls[1]![0] as CustomProviderConfig).runtimes.pi!.models[0].supportsImageInput).toBe(false);
+    } finally { vi.useRealTimers(); Object.defineProperty(window, 'electronAPI', { configurable: true, value: previous }); }
+  });
+
   it('keeps built-in capability metadata read-only', () => {
     draw();
     expect(screen.queryByRole('switch', { name: /modelSupportsImageInput/ })).toBeNull();
@@ -238,7 +270,7 @@ describe('model advanced editor', () => {
   });
 
   it('saves protocol selection to the selected engine and model without writing derived model limits', async () => {
-    const update = vi.fn(async (..._args: unknown[]) => ({ ok: true }));
+    const update = vi.fn(async (...args: unknown[]) => ({ ok: true, models: buildUserProvider(args[0] as CustomProviderConfig).models }));
     const previous = window.electronAPI;
     Object.defineProperty(window, 'electronAPI', { configurable: true, value: { maker: { updateCustomProvider: update } } });
     const source = { ...buildUserProvider({ id: 'fixture', name: 'Fixture', runtimes: {
@@ -260,7 +292,7 @@ describe('model advanced editor', () => {
   });
 
   it('saves Google selection with its matching wire and official endpoint', async () => {
-    const update = vi.fn(async (..._args: unknown[]) => ({ ok: true }));
+    const update = vi.fn(async (...args: unknown[]) => ({ ok: true, models: buildUserProvider(args[0] as CustomProviderConfig).models }));
     const previous = window.electronAPI;
     Object.defineProperty(window, 'electronAPI', { configurable: true, value: { maker: { updateCustomProvider: update } } });
     const source = { ...buildUserProvider({ id: 'fixture', name: 'Fixture', runtimes: {

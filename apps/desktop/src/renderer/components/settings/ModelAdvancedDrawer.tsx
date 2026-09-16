@@ -52,7 +52,6 @@ import {
 import { EFFORT_TIER_COLORS } from '@/themes/effortTierColors';
 
 import {
-  buildUserProvider,
   classifyVisionCapability,
   providerWireProtocolForApi,
   providerBaseUrlForApi,
@@ -222,6 +221,7 @@ export function ModelAdvancedDrawer({
   const savedProviderRef = useRef<{
     providerId: string;
     config: CustomProviderConfig;
+    models?: ProviderView['models'];
     edits: Map<string, (snapshot: ProviderView) => boolean>;
     isApplied: (snapshot: ProviderView) => boolean;
   } | null>(null);
@@ -265,7 +265,7 @@ export function ModelAdvancedDrawer({
       if (result.ok) {
         // The mutation acknowledgement can precede the provider snapshot. Keep
         // both controls locked until confirmation or the bounded retry deadline.
-        savedProviderRef.current = { providerId: provider.id, config, edits, isApplied: allApplied };
+        savedProviderRef.current = { providerId: provider.id, config, models: result.models, edits, isApplied: allApplied };
         const confirmed = { ...pending, persisted: true };
         providerSaveRef.current = confirmed;
         setProviderSave(confirmed);
@@ -458,12 +458,12 @@ export function ModelAdvancedDrawer({
   );
   const description = localizedModelDescription(primaryModel, t);
   const price = pricePresentationOf(primaryAgent, primaryModel);
-  const acknowledgedProvider = savedProviderRef.current?.providerId === provider.id
-    ? buildUserProvider(savedProviderRef.current.config)
-    : null;
+  const acknowledgedModelsByAgent = savedProviderRef.current?.providerId === provider.id
+    ? savedProviderRef.current.models
+    : undefined;
   const acknowledgedModels = { ...row.byAgent };
   for (const agent of row.avail) {
-    const saved = acknowledgedProvider?.models[agent]?.find(model => model.id === row.byAgent[agent]?.id);
+    const saved = acknowledgedModelsByAgent?.[agent]?.find(model => model.id === row.byAgent[agent]?.id);
     if (saved) acknowledgedModels[agent] = saved;
   }
   const protocols = modelProtocolComparison(provider, acknowledgedModels);
