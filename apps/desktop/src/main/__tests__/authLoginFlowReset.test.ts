@@ -961,6 +961,8 @@ describe('auth login-flow reset', () => {
     expect(helperBody).toContain('await runGuardedRuntimeAuthExpiry({');
     expect(helperBody).toContain('const expiryEpoch = authStateEpoch;');
     expect(helperBody).toContain('validateBeforeWrite: assertExpiryStillCurrent');
+    expect(helperBody).toContain('isPersistedCredentialCurrent: () =>');
+    expect(helperBody).toContain('isPersistedRuntimeExpiryGenerationCurrent({');
     expect(helperBody).toContain("if (outcome === 'superseded') return;");
     expect(helperBody).toContain('preservePersistedRefreshToken: true');
     expect(helperBody).toContain('withAccountFreeOwnerCommit({');
@@ -981,6 +983,7 @@ describe('auth login-flow reset', () => {
     expect(ownerCommitBody).toContain('notifyRendererAuthBoundaryPending();');
     expect(ownerCommitBody).toContain('await accountSwitchTeardown');
     expect(ownerCommitBody).toContain('await authSessionTeardown(opts.reason);');
+    expect(ownerCommitBody.match(/opts\.validateBeforeCommit\(\)/g)).toHaveLength(3);
     expect(ownerCommitBody).toContain('notifyAuthListeners();');
 
     const refreshStart = source.indexOf('export async function refresh(): Promise<boolean> {');

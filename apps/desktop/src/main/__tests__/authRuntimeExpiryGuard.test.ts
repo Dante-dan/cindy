@@ -120,6 +120,31 @@ describe('runtime auth expiry guard', () => {
     expect(clearOnFailure).toBe(false);
   });
 
+  it('does not commit expiry when a shared-userData client replaces credentials during teardown', async () => {
+    let persistedGeneration: 'rejected' | 'replacement' = 'rejected';
+    const teardownStarted = deferred<void>();
+    const replacementWritten = deferred<void>();
+    const commitApplied = vi.fn();
+    const run = runGuardedRuntimeAuthExpiry({
+      isCurrent: () => true,
+      isPersistedCredentialCurrent: () => persistedGeneration === 'rejected',
+      removeRejectedCredentials: async () => 'removed',
+      commit: async (guards) => {
+        teardownStarted.resolve();
+        await replacementWritten.promise;
+        if (!guards.validateBeforeCommit()) throw new Error('superseded before commit');
+        commitApplied();
+      },
+    });
+
+    await teardownStarted.promise;
+    persistedGeneration = 'replacement';
+    replacementWritten.resolve();
+
+    await expect(run).resolves.toBe('stale-credential');
+    expect(commitApplied).not.toHaveBeenCalled();
+  });
+
   it('keeps the clear-on-failure fallback for the expiry transition own epoch bump', async () => {
     let epoch = 1;
     let clearOnFailure = false;

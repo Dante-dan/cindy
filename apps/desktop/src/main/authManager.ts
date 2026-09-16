@@ -1697,6 +1697,58 @@ async function removeRejectedRuntimeCredentials(input: {
   });
 }
 
+/**
+ * Recheck every shared-userData projection immediately before expiry commits.
+ * Another client can rotate credentials after the cleanup CAS without changing
+ * this process's auth epoch, so any generation beyond the rejected set makes
+ * the pending expiry stale.
+ */
+function isPersistedRuntimeExpiryGenerationCurrent(input: {
+  realm: AuthRegion;
+  rejectedRefreshTokens: readonly string[];
+}): boolean {
+  const rejectedRefreshTokens = new Set(input.rejectedRefreshTokens);
+  const vault = readAuthAccountVault();
+  const activeResource = vault.activeAccountKey
+    ? vault.resources[vault.activeAccountKey]
+    : undefined;
+  if (
+    activeResource &&
+    (activeResource.realm !== input.realm ||
+      !rejectedRefreshTokens.has(activeResource.refreshToken))
+  ) {
+    return false;
+  }
+
+  const persistedSession = readSafe(AUTH_SESSION_KEY);
+  if (persistedSession === null && !isPersistedSecretAbsent(AUTH_SESSION_KEY)) {
+    throw new AuthApiError(
+      'CREDENTIAL_STORE_UNAVAILABLE',
+      503,
+      'Persisted auth session could not be rechecked before expiry',
+    );
+  }
+  if (
+    persistedSession !== null &&
+    !input.rejectedRefreshTokens.some(
+      (token) => persistedSession === serializeAuthSessionRecord(input.realm, token),
+    )
+  ) {
+    return false;
+  }
+
+  if (input.realm !== AUTH_REGION) return true;
+  const legacyRefreshToken = readSafe(LEGACY_RESOURCE_REFRESH_TOKEN_KEY);
+  if (legacyRefreshToken === null && !isPersistedSecretAbsent(LEGACY_RESOURCE_REFRESH_TOKEN_KEY)) {
+    throw new AuthApiError(
+      'CREDENTIAL_STORE_UNAVAILABLE',
+      503,
+      'Legacy auth session could not be rechecked before expiry',
+    );
+  }
+  return legacyRefreshToken === null || rejectedRefreshTokens.has(legacyRefreshToken);
+}
+
 function bindResourcePairToSavedAccount(
   pair: AuthTokenPair,
   realm: AuthRegion,
@@ -2501,6 +2553,16 @@ async function withAccountFreeOwnerCommit(opts: {
         }
       },
       commit: () => {
+        // prepareCommit follows an await boundary. Recheck synchronously at the
+        // actual commit point so a shared-userData writer that lands in that
+        // final gap cannot make this process publish a stale expiry.
+        if (opts.validateBeforeCommit && !opts.validateBeforeCommit()) {
+          throw new AuthApiError(
+            'AUTH_FLOW_SUPERSEDED',
+            409,
+            'Account-free owner transition was superseded at commit',
+          );
+        }
         if (!authCleared) {
           clearAuth({
             notify: false,
@@ -3709,6 +3771,15 @@ async function expireRuntimeAuth(
   try {
     const outcome = await runGuardedRuntimeAuthExpiry({
       isCurrent: isExpiryStillCurrent,
+      ...(!opts.preservePersistedRefreshToken
+        ? {
+            isPersistedCredentialCurrent: () =>
+              isPersistedRuntimeExpiryGenerationCurrent({
+                realm: opts.rejectedRealm,
+                rejectedRefreshTokens: opts.rejectedRefreshTokens,
+              }),
+          }
+        : {}),
       ...(!opts.preservePersistedRefreshToken && !isPassiveSharedUserDataInstance()
         ? {
             removeRejectedCredentials: async () => {

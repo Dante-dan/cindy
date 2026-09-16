@@ -102,6 +102,7 @@ export interface RuntimeAuthExpiryCommitGuards {
  */
 export async function runGuardedRuntimeAuthExpiry(input: {
   isCurrent: () => boolean;
+  isPersistedCredentialCurrent?: () => boolean;
   removeRejectedCredentials?: () => Promise<RuntimeCredentialRemovalResult>;
   commit: (guards: RuntimeAuthExpiryCommitGuards) => Promise<void>;
 }): Promise<'expired' | 'stale-credential' | 'superseded'> {
@@ -112,13 +113,29 @@ export async function runGuardedRuntimeAuthExpiry(input: {
     if (removal === 'stale') return 'stale-credential';
   }
   if (!input.isCurrent()) return 'superseded';
+  let persistedCredentialSuperseded = false;
+  const isExpiryStillCurrent = (): boolean => {
+    if (!input.isCurrent()) return false;
+    if (!input.isPersistedCredentialCurrent) return true;
+    const isCurrent = input.isPersistedCredentialCurrent();
+    if (!isCurrent) persistedCredentialSuperseded = true;
+    return isCurrent;
+  };
+  if (!isExpiryStillCurrent()) {
+    return persistedCredentialSuperseded ? 'stale-credential' : 'superseded';
+  }
   let selfCleared = false;
-  await input.commit({
-    validateBeforeCommit: input.isCurrent,
-    shouldClearOnFailure: () => selfCleared || input.isCurrent(),
-    markSelfCleared: () => {
-      selfCleared = true;
-    },
-  });
+  try {
+    await input.commit({
+      validateBeforeCommit: isExpiryStillCurrent,
+      shouldClearOnFailure: () => selfCleared || isExpiryStillCurrent(),
+      markSelfCleared: () => {
+        selfCleared = true;
+      },
+    });
+  } catch (error) {
+    if (persistedCredentialSuperseded) return 'stale-credential';
+    throw error;
+  }
   return 'expired';
 }
