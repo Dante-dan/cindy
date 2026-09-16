@@ -7,6 +7,9 @@ import { BackgroundTasksBody } from '../BackgroundTasksBody';
 
 const mocks = vi.hoisted(() => ({
   clearAttention: vi.fn(),
+  attentionKind: undefined as 'done' | 'error' | 'awaiting' | undefined,
+  remotePhase: 'completed' as 'completed' | 'error' | 'needs-interaction',
+  reconcile: vi.fn(async () => true),
   focusTask: vi.fn(),
   sidebarWindow: false,
   items: [] as SessionTaskItem[],
@@ -16,6 +19,10 @@ const mocks = vi.hoisted(() => ({
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 vi.mock('@/lib/sessionAttentionStore', () => ({
   clearSystemSessionAttention: mocks.clearAttention,
+  getSessionAttentionKind: () => mocks.attentionKind,
+}));
+vi.mock('@/features/device-link/remoteSessionActivityStore', () => ({
+  getRemoteSessionActivity: () => ({ phase: mocks.remotePhase }),
 }));
 vi.mock('@/lib/sidebarWindow', () => ({ isSidebarWindow: () => mocks.sidebarWindow }));
 vi.mock('@/features/device-link/remoteProjectsStore', () => ({
@@ -29,6 +36,7 @@ vi.mock('@/lib/makerChatStore', () => ({
     getSnapshot: () => mocks.snapshot,
     enterView: () => () => {},
     ensureInitialMessages: vi.fn(),
+    reconcileRemoteMessages: mocks.reconcile,
   },
 }));
 vi.mock('@/lib/makerTransport', () => ({
@@ -37,7 +45,10 @@ vi.mock('@/lib/makerTransport', () => ({
   getWorkflowProgressFor: async () => null,
 }));
 vi.mock('../listSessionTasks', () => ({
-  listSessionTasks: () => ({ running: [], completed: mocks.items }),
+  listSessionTasks: () => ({
+    running: mocks.items.filter((item) => item.status === 'running'),
+    completed: mocks.items.filter((item) => item.status !== 'running'),
+  }),
 }));
 vi.mock('../chatTaskFocusIntent', () => ({ requestChatTaskFocus: mocks.focusTask }));
 vi.mock('../WorkflowProgressTree', () => ({ WorkflowProgressTree: () => null }));
@@ -55,6 +66,8 @@ const ctx: TabKindHostContext = {
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.sidebarWindow = false;
+  mocks.attentionKind = 'done';
+  mocks.remotePhase = 'completed';
   mocks.items = [{
     key: 'task',
     kind: 'workflow',
@@ -68,13 +81,14 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('background task row attention', () => {
-  it('acknowledges the session explicitly when opening workflow details', () => {
+  it('requests a protected navigation receipt when opening workflow details', () => {
     render(<BackgroundTasksBody state={{}} ctx={ctx} />);
     expect(mocks.clearAttention).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole('button', { name: /Completed task/ }));
 
-    expect(mocks.clearAttention).toHaveBeenCalledExactlyOnceWith('remote-session', 'explicit');
+    expect(mocks.clearAttention).toHaveBeenCalledExactlyOnceWith('remote-session', 'passive');
+    expect(mocks.reconcile).toHaveBeenCalledExactlyOnceWith('remote-session', { force: true });
     expect(screen.getByRole('button', { name: 'rightSidebar.backgroundTasks.back' })).toBeTruthy();
     expect(mocks.focusTask).not.toHaveBeenCalled();
   });
@@ -85,8 +99,31 @@ describe('background task row attention', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Completed task/ }));
 
-    expect(mocks.clearAttention).toHaveBeenCalledExactlyOnceWith('remote-session', 'explicit');
+    expect(mocks.clearAttention).toHaveBeenCalledExactlyOnceWith('remote-session', 'passive');
     expect(mocks.focusTask).toHaveBeenCalledExactlyOnceWith('remote-session', 'tool-call');
+  });
+
+  it.each(['workflow', 'agent'] as const)('opens a running %s without acknowledging another completed task', (kind) => {
+    mocks.items.push({ ...mocks.items[0], key: 'running-task', title: 'Running task', kind, status: 'running' });
+    render(<BackgroundTasksBody state={{}} ctx={ctx} />);
+    fireEvent.click(screen.getByRole('button', { name: /Running task/ }));
+    expect(mocks.clearAttention).not.toHaveBeenCalled();
+    expect(mocks.reconcile).not.toHaveBeenCalled();
+  });
+
+  it.each(['error', 'awaiting'] as const)('retains current %s attention when opening an older completed task', (kind) => {
+    mocks.attentionKind = kind;
+    render(<BackgroundTasksBody state={{}} ctx={ctx} />);
+    fireEvent.click(screen.getByRole('button', { name: /Completed task/ }));
+    expect(mocks.clearAttention).not.toHaveBeenCalled();
+  });
+
+  it.each(['error', 'needs-interaction'] as const)('retains remote %s attention missing from the local map', (phase) => {
+    mocks.attentionKind = undefined;
+    mocks.remotePhase = phase;
+    render(<BackgroundTasksBody state={{}} ctx={ctx} />);
+    fireEvent.click(screen.getByRole('button', { name: /Completed task/ }));
+    expect(mocks.clearAttention).not.toHaveBeenCalled();
   });
 
   it('does not acknowledge non-actionable chat rows in a detached sidebar', () => {
