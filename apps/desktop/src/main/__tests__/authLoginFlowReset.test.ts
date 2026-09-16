@@ -22,6 +22,10 @@ describe('auth login-flow reset', () => {
     resolve(process.cwd(), 'src/main/hook-control/ipc.ts'),
     'utf8',
   ).replace(/\r\n/g, '\n');
+  const bootstrapSource = readFileSync(
+    resolve(process.cwd(), 'src/main/bootstrap-electron.ts'),
+    'utf8',
+  ).replace(/\r\n/g, '\n');
 
   it('clears renderer state, provider cache, and private tickets whenever auth is cleared', () => {
     const resetStart = source.indexOf('function resetLoginFlowState(): void {');
@@ -964,6 +968,8 @@ describe('auth login-flow reset', () => {
     expect(helperBody).toContain('isPersistedCredentialCurrent: () =>');
     expect(helperBody).toContain('isPersistedRuntimeExpiryGenerationCurrent({');
     expect(helperBody).toContain("if (outcome === 'superseded') return;");
+    expect(helperBody).toContain("outcome === 'stale-credential-after-teardown'");
+    expect(helperBody).toContain("reason: 'stale-runtime-expiry'");
     expect(helperBody).toContain('preservePersistedRefreshToken: true');
     expect(helperBody).toContain('withAccountFreeOwnerCommit({');
     expect(helperBody).toContain('validateBeforeCommit,');
@@ -985,6 +991,20 @@ describe('auth login-flow reset', () => {
     expect(ownerCommitBody).toContain('await authSessionTeardown(opts.reason);');
     expect(ownerCommitBody.match(/opts\.validateBeforeCommit\(\)/g)).toHaveLength(3);
     expect(ownerCommitBody).toContain('notifyAuthListeners();');
+
+    const restoreStart = bootstrapSource.indexOf(
+      'async function restoreRetainedAuthAccountRuntime(',
+    );
+    const restoreEnd = bootstrapSource.indexOf(
+      '\n}\n\nauthManager.setStableOwnerPostCommitTask',
+      restoreStart,
+    );
+    const restoreBody = bootstrapSource.slice(restoreStart, restoreEnd);
+    expect(bootstrapSource).toContain(
+      'authManager.setAuthSessionRestore(restoreRetainedAuthAccountRuntime);',
+    );
+    expect(restoreBody).toContain('await ensureRegisteredLocalDbOwnerReady(input.ownerId);');
+    expect(restoreBody).toContain('await runBootstrapStableOwnerPostCommitTask({');
 
     const refreshStart = source.indexOf('export async function refresh(): Promise<boolean> {');
     const refreshEnd = source.indexOf('\n}\n\nexport async function logout()', refreshStart);

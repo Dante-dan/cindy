@@ -335,10 +335,12 @@ type AccountSwitchTeardown = (context: {
 
 /** Releases every account-scoped runtime before terminal local sign-out. */
 type AuthSessionTeardown = (reason: string) => void | Promise<void>;
+type AuthSessionRestore = (context: { ownerId: string; reason: string }) => void | Promise<void>;
 type ProjectionRepairTeardown = (reason: string) => void | Promise<void>;
 
 let accountSwitchTeardown: AccountSwitchTeardown | null = null;
 let authSessionTeardown: AuthSessionTeardown | null = null;
+let authSessionRestore: AuthSessionRestore | null = null;
 let projectionRepairTeardown: ProjectionRepairTeardown | null = null;
 
 const stableOwnerPostCommitCoordinator = new StableOwnerPostCommitCoordinator({
@@ -2862,6 +2864,10 @@ export function setAuthSessionTeardown(teardown: AuthSessionTeardown | null): vo
   authSessionTeardown = teardown;
 }
 
+export function setAuthSessionRestore(restore: AuthSessionRestore | null): void {
+  authSessionRestore = restore;
+}
+
 export function setProjectionRepairTeardown(teardown: ProjectionRepairTeardown | null): void {
   projectionRepairTeardown = teardown;
 }
@@ -3768,6 +3774,7 @@ async function expireRuntimeAuth(
   const releaseBoundary = beginAppSessionBoundary();
   let expiryCommitted = false;
   let expiryClearedOnFailure = false;
+  let restoreRetainedRuntime = false;
   try {
     const outcome = await runGuardedRuntimeAuthExpiry({
       isCurrent: isExpiryStillCurrent,
@@ -3825,7 +3832,8 @@ async function expireRuntimeAuth(
         }),
     });
     if (outcome === 'superseded') return;
-    if (outcome === 'stale-credential') {
+    if (outcome === 'stale-credential' || outcome === 'stale-credential-after-teardown') {
+      restoreRetainedRuntime = outcome === 'stale-credential-after-teardown';
       log.warn(
         'runtime auth expiry found a newer active credential generation; keeping the replacement and retrying later',
       );
@@ -3851,6 +3859,19 @@ async function expireRuntimeAuth(
     log.error('runtime auth expiry owner transition failed', err);
   } finally {
     releaseBoundary();
+    if (restoreRetainedRuntime) {
+      try {
+        if (!authSessionRestore) {
+          throw new Error('runtime auth restore hook is not registered');
+        }
+        await authSessionRestore({
+          ownerId: expiryUserId,
+          reason: 'stale-runtime-expiry',
+        });
+      } catch (error) {
+        log.error('failed to restore retained auth runtime after stale expiry teardown', error);
+      }
+    }
     if (expiryCommitted || expiryClearedOnFailure) {
       notifyRenderer();
       notifyAuthListeners();

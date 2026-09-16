@@ -141,7 +141,7 @@ describe('runtime auth expiry guard', () => {
     persistedGeneration = 'replacement';
     replacementWritten.resolve();
 
-    await expect(run).resolves.toBe('stale-credential');
+    await expect(run).resolves.toBe('stale-credential-after-teardown');
     expect(commitApplied).not.toHaveBeenCalled();
   });
 
