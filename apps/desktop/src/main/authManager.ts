@@ -3778,6 +3778,8 @@ async function expireRuntimeAuth(
                 realm: opts.rejectedRealm,
                 rejectedRefreshTokens: opts.rejectedRefreshTokens,
               }),
+            isRetryableError: (error: unknown) =>
+              error instanceof AuthApiError && error.code === 'CREDENTIAL_STORE_UNAVAILABLE',
           }
         : {}),
       ...(!opts.preservePersistedRefreshToken && !isPassiveSharedUserDataInstance()
@@ -3826,6 +3828,13 @@ async function expireRuntimeAuth(
     if (outcome === 'stale-credential') {
       log.warn(
         'runtime auth expiry found a newer active credential generation; keeping the replacement and retrying later',
+      );
+      scheduleRefreshRetryAfterTransientFailure();
+      return;
+    }
+    if (outcome === 'retry') {
+      log.warn(
+        'runtime auth expiry could not recheck persisted credentials; preserving the in-memory session and retrying later',
       );
       scheduleRefreshRetryAfterTransientFailure();
       return;

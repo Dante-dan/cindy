@@ -104,8 +104,9 @@ export async function runGuardedRuntimeAuthExpiry(input: {
   isCurrent: () => boolean;
   isPersistedCredentialCurrent?: () => boolean;
   removeRejectedCredentials?: () => Promise<RuntimeCredentialRemovalResult>;
+  isRetryableError?: (error: unknown) => boolean;
   commit: (guards: RuntimeAuthExpiryCommitGuards) => Promise<void>;
-}): Promise<'expired' | 'stale-credential' | 'superseded'> {
+}): Promise<'expired' | 'retry' | 'stale-credential' | 'superseded'> {
   if (!input.isCurrent()) return 'superseded';
   if (input.removeRejectedCredentials) {
     const removal = await input.removeRejectedCredentials();
@@ -135,6 +136,7 @@ export async function runGuardedRuntimeAuthExpiry(input: {
     });
   } catch (error) {
     if (persistedCredentialSuperseded) return 'stale-credential';
+    if (!selfCleared && input.isRetryableError?.(error)) return 'retry';
     throw error;
   }
   return 'expired';

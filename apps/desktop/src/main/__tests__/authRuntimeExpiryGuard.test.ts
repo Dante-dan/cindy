@@ -145,6 +145,31 @@ describe('runtime auth expiry guard', () => {
     expect(commitApplied).not.toHaveBeenCalled();
   });
 
+  it('retries when the persisted credential recheck becomes unavailable during teardown', async () => {
+    const credentialStoreUnavailable = new Error('credential store unavailable');
+    let persistedChecks = 0;
+    const commitApplied = vi.fn();
+
+    await expect(
+      runGuardedRuntimeAuthExpiry({
+        isCurrent: () => true,
+        isPersistedCredentialCurrent: () => {
+          persistedChecks += 1;
+          if (persistedChecks === 1) return true;
+          throw credentialStoreUnavailable;
+        },
+        removeRejectedCredentials: async () => 'removed',
+        isRetryableError: (error) => error === credentialStoreUnavailable,
+        commit: async (guards) => {
+          if (!guards.validateBeforeCommit()) throw new Error('superseded before commit');
+          commitApplied();
+        },
+      }),
+    ).resolves.toBe('retry');
+    expect(persistedChecks).toBe(2);
+    expect(commitApplied).not.toHaveBeenCalled();
+  });
+
   it('keeps the clear-on-failure fallback for the expiry transition own epoch bump', async () => {
     let epoch = 1;
     let clearOnFailure = false;
