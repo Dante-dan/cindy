@@ -265,7 +265,20 @@ export function ModelAdvancedDrawer({
       if (result.ok) {
         // The mutation acknowledgement can precede the provider snapshot. Keep
         // both controls locked until confirmation or the bounded retry deadline.
-        savedProviderRef.current = { providerId: provider.id, config, models: result.models, edits, isApplied: allApplied };
+        const confirmedConfig = structuredClone(config);
+        // Main may discard route-bound discovery fields during persistence. Use
+        // its raw model configs, not effective defaults or the submitted draft,
+        // as the baseline if the later catalog refresh never arrives.
+        for (const agent of Object.keys(confirmedConfig.runtimes) as AgentKind[]) {
+          const runtime = confirmedConfig.runtimes[agent];
+          if (!runtime) continue;
+          const confirmedModels = new Map(result.models?.[agent]?.map(model => [model.id, model.userModelConfig]));
+          runtime.models = runtime.models.map(model => {
+            const confirmedModel = confirmedModels.get(model.id);
+            return confirmedModel ? structuredClone(confirmedModel) : model;
+          });
+        }
+        savedProviderRef.current = { providerId: provider.id, config: confirmedConfig, models: result.models, edits, isApplied: allApplied };
         const confirmed = { ...pending, persisted: true };
         providerSaveRef.current = confirmed;
         setProviderSave(confirmed);

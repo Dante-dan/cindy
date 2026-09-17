@@ -181,11 +181,16 @@ describe('model advanced editor', () => {
   });
 
   it('allows retry after a missing snapshot without discarding the acknowledged protocol', async () => {
-    const update = vi.fn(async (...args: unknown[]) => ({ ok: true, models: buildUserProvider(args[0] as CustomProviderConfig).models }));
+    const update = vi.fn(async (...args: unknown[]) => {
+      const committed = structuredClone(args[0] as CustomProviderConfig);
+      // Main invalidates the old route's discovered price on the first save.
+      if (update.mock.calls.length === 1) delete committed.runtimes.pi!.models[0].discoveredCost;
+      return { ok: true, models: buildUserProvider(committed).models };
+    });
     const previous = window.electronAPI;
     Object.defineProperty(window, 'electronAPI', { configurable: true, value: { maker: { updateCustomProvider: update } } });
     const initial: CustomProviderConfig = { id: 'fixture', name: 'Fixture', runtimes: {
-      pi: { baseUrl: 'https://supplier.example/v1', wireProtocol: 'openai-chat', models: [{ id: 'custom-model', name: 'Custom model' }] },
+      pi: { baseUrl: 'https://supplier.example/v1', wireProtocol: 'openai-chat', models: [{ id: 'custom-model', name: 'Custom model', discoveredCost: { input: 1, output: 2 } }] },
     } };
     const view = (config: CustomProviderConfig) => {
       const source = { ...buildUserProvider(config), connected: true } as ProviderView;
@@ -201,6 +206,7 @@ describe('model advanced editor', () => {
       vi.useFakeTimers();
       await act(async () => { fireEvent.click(option); });
       expect(update).toHaveBeenCalledTimes(1);
+      expect((update.mock.calls[0]![0] as CustomProviderConfig).runtimes.pi!.models[0].discoveredCost).toEqual({ input: 1, output: 2 });
       // Even a fresh object carrying the stale snapshot must not unlock saves.
       rendered.rerender(view(initial));
       expect(image().hasAttribute('disabled')).toBe(true);
@@ -211,6 +217,7 @@ describe('model advanced editor', () => {
       await act(async () => { fireEvent.click(image()); });
       expect(update).toHaveBeenCalledTimes(2);
       const imageConfig = update.mock.calls[1]![0] as CustomProviderConfig;
+      expect(imageConfig.runtimes.pi!.models[0]).not.toHaveProperty('discoveredCost');
       expect(imageConfig.runtimes.pi!.models[0]).toMatchObject({ api: 'openai-responses', piApi: 'openai-responses', supportsImageInput: true });
       expect(protocol().hasAttribute('disabled')).toBe(true);
       const partial = structuredClone(initial);
