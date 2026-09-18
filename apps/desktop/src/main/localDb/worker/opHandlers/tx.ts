@@ -79,6 +79,12 @@ export function tx(db: Database.Database, args: unknown): unknown {
       return sessionsRenameTitles(db, txArgs);
     case 'sessions.setStatus':
       return sessionsSetStatus(db, txArgs);
+    case 'recentWorkdirs.mergeWindowsIdentity':
+      return recentWorkdirsMergeWindowsIdentity(db, txArgs);
+    case 'recentWorkdirs.removeWindowsIdentity':
+      return recentWorkdirsRemoveWindowsIdentity(db, txArgs);
+    case 'projectAliases.replaceIdentity':
+      return projectAliasesReplaceIdentity(db, txArgs);
     case 'toolResults.compactSession':
       return compactSessionToolResults(db, txArgs);
     case 'session.agentSwitchFallback':
@@ -174,6 +180,75 @@ export function tx(db: Database.Database, args: unknown): unknown {
     default:
       throw Object.assign(new Error(`unknown tx: ${name}`), { code: 'UNKNOWN_TX' });
   }
+}
+
+function recentWorkdirsMergeWindowsIdentity(db: Database.Database, args: unknown): void {
+  const payload = asRecord(args, 'recentWorkdirs.mergeWindowsIdentity args');
+  const path = expectString(payload.path, 'path');
+  const lastUsedAt = expectNumber(payload.lastUsedAt, 'lastUsedAt');
+  db.transaction(() => {
+    const matches = recentWorkdirWindowsIdentityRows(db, path);
+    const representative = matches
+      .slice()
+      .sort((a, b) => b.lastUsedAt - a.lastUsedAt || a.rowid - b.rowid)[0];
+    const representativePath = representative?.path ?? path;
+    const newestTimestamp = Math.max(lastUsedAt, ...matches.map((row) => row.lastUsedAt));
+    db.prepare(
+      `INSERT INTO recent_workdirs (path, last_used_at) VALUES (?, ?)
+       ON CONFLICT(path) DO UPDATE SET
+         last_used_at = MAX(recent_workdirs.last_used_at, excluded.last_used_at)`,
+    ).run(representativePath, newestTimestamp);
+    const removeVariant = db.prepare('DELETE FROM recent_workdirs WHERE path = ?');
+    for (const row of matches) {
+      if (row.path !== representativePath) removeVariant.run(row.path);
+    }
+  })();
+}
+
+function recentWorkdirsRemoveWindowsIdentity(db: Database.Database, args: unknown): { changes: number } {
+  const payload = asRecord(args, 'recentWorkdirs.removeWindowsIdentity args');
+  const path = expectString(payload.path, 'path');
+  return db.transaction(() => {
+    const matches = recentWorkdirWindowsIdentityRows(db, path);
+    const removeVariant = db.prepare('DELETE FROM recent_workdirs WHERE path = ?');
+    let changes = 0;
+    for (const row of matches) changes += removeVariant.run(row.path).changes;
+    return { changes };
+  })();
+}
+
+function recentWorkdirWindowsIdentityRows(
+  db: Database.Database,
+  path: string,
+): Array<{ rowid: number; path: string; lastUsedAt: number }> {
+  const identity = path.toLowerCase();
+  const rows = db
+    .prepare('SELECT rowid, path, last_used_at AS lastUsedAt FROM recent_workdirs')
+    .all() as Array<{ rowid: number; path: string; lastUsedAt: number }>;
+  return rows.filter((row) => row.path.toLowerCase() === identity);
+}
+
+function projectAliasesReplaceIdentity(
+  db: Database.Database,
+  args: unknown,
+): { projectKey: string; alias: string; updatedAt: number } | null {
+  const payload = asRecord(args, 'projectAliases.replaceIdentity args');
+  const projectKey = expectString(payload.projectKey, 'projectKey');
+  const comparisonKey = expectString(payload.comparisonKey, 'comparisonKey');
+  if (typeof payload.foldCase !== 'boolean') throw invalidArgs('foldCase must be a boolean');
+  const alias = nullableString(payload.alias);
+  const updatedAt = expectNumber(payload.updatedAt, 'updatedAt');
+  return db.transaction(() => {
+    const rows = db.prepare('SELECT project_key AS projectKey FROM project_aliases').all() as Array<{ projectKey: string }>;
+    const removeAlias = db.prepare('DELETE FROM project_aliases WHERE project_key = ?');
+    for (const row of rows) {
+      const identity = payload.foldCase ? row.projectKey.toLowerCase() : row.projectKey;
+      if (identity === comparisonKey) removeAlias.run(row.projectKey);
+    }
+    if (alias == null) return null;
+    db.prepare('INSERT INTO project_aliases (project_key, alias, updated_at) VALUES (?, ?, ?)').run(projectKey, alias, updatedAt);
+    return { projectKey, alias, updatedAt };
+  })();
 }
 
 function botsCreateProfile(db: Database.Database, args: unknown): void {
@@ -657,7 +732,7 @@ function insertBotSession(db: Database.Database, s: Record<string, unknown>): vo
 function botsFinishDelegation(
   db: Database.Database,
   args: unknown,
-): { id: string; parentSessionId: string | null; childSessionId: string | null; status: string } | null {
+): { id: string; parentSessionId: string | null; childSessionId: string | null; targetBotId: string | null; runSequence: number; status: string } | null {
   const p = asRecord(args, 'bots.finishDelegation args');
   return db.transaction(() => {
     const values: unknown[] = [
@@ -668,22 +743,28 @@ function botsFinishDelegation(
     if (p.tokensUsed !== undefined) values.push(expectNumber(p.tokensUsed, 'tokensUsed'));
     const completedAt = expectNumber(p.completedAt, 'completedAt');
     values.push(completedAt, completedAt, expectString(p.delegationId, 'delegationId'));
+    let receiptGuard = '';
+    if (p.expectedRunSequence !== undefined) {
+      receiptGuard += ' AND run_sequence = ?';
+      values.push(expectNumber(p.expectedRunSequence, 'expectedRunSequence'));
+    }
+    if (p.expectedExecution !== undefined) {
+      const receipt = asRecord(p.expectedExecution, 'expectedExecution');
+      receiptGuard += " AND json_extract(permission_snapshot_json, '$.taskExecution.runSequence') = run_sequence AND json_extract(permission_snapshot_json, '$.taskExecution.instanceId') = ? AND json_extract(permission_snapshot_json, '$.taskExecution.generation') = ?";
+      values.push(expectString(receipt.instanceId, 'instanceId'), expectNumber(receipt.generation, 'generation'));
+    }
     const row = db.prepare(`UPDATE bot_delegations SET status = ?, result_summary = ?, output_artifacts_json = ?, last_error = ?
       ${tokenSet}, pending_interaction_json = NULL, completed_at = ?, completion_delivered_at = NULL, updated_at = ?
-      WHERE id = ? AND status IN ('queued','running','waiting')
-      RETURNING id, parent_session_id AS parentSessionId, child_session_id AS childSessionId, status`)
+      WHERE id = ? AND status IN ('queued','running','waiting') ${receiptGuard}
+      RETURNING id, parent_session_id AS parentSessionId, child_session_id AS childSessionId, target_bot_id AS targetBotId, run_sequence AS runSequence, status`)
       .get(...values) as
-      | { id: string; parentSessionId: string | null; childSessionId: string | null; status: string }
+      | { id: string; parentSessionId: string | null; childSessionId: string | null; targetBotId: string | null; runSequence: number; status: string }
       | undefined;
     if (!row) return null;
-    if (row.childSessionId) {
-      // The delegation terminal transition owns its child task's terminal
-      // archive: `sessions.setStatus` refuses `source = 'bot'` rows on purpose
-      // (generic UI archive must not bypass Bot lifecycle bookkeeping), so the
-      // archive has to happen in this very transaction. Doing it anywhere else
-      // (a follow-up generic write that can also be swallowed) leaves the
-      // child task `active` forever and the guardian reports a supervision
-      // anomaly (PR #2829 QA).
+    if (row.childSessionId && row.targetBotId !== null) {
+      // Only legacy Bot-to-Bot execution containers have this archive lifecycle.
+      // An independent Session (target_bot_id IS NULL) outlives a turn, including
+      // failure/cancellation: visibility and explicit archive belong to its user.
       db.prepare(`UPDATE sessions SET status = 'archived', updated_at = ?
         WHERE id = ? AND status = 'active'`)
         .run(completedAt, row.childSessionId);
@@ -793,13 +874,14 @@ function botsReopenDelegation(
   return db.transaction(() => {
     const current = db.prepare(`SELECT requesting_bot_id AS requestingBotId,
       target_bot_id AS targetBotId, target_profile_version AS targetProfileVersion,
-      parent_session_id AS parentSessionId, status
+      parent_session_id AS parentSessionId, child_session_id AS childSessionId, status
       FROM bot_delegations WHERE id = ?`).get(delegationId) as
       | {
           requestingBotId: string;
           targetBotId: string | null;
           targetProfileVersion: number | null;
           parentSessionId: string | null;
+          childSessionId: string | null;
           status: string;
         }
       | undefined;
@@ -817,9 +899,20 @@ function botsReopenDelegation(
       .get(requestingBotId, delegationId) as { count: number };
     if (count.count >= maxActiveChildren) throw new Error('BOT_DELEGATION_CONCURRENCY_LIMIT');
 
-    const session = asRecord(p.session, 'session');
-    insertBotSession(db, session);
     const childSessionId = expectString(p.childSessionId, 'childSessionId');
+    if (targetBotId === null) {
+      // Recheck in the transaction, after any asynchronous worktree lookup.
+      // Never resurrect an explicitly archived/deleted task or replace history.
+      const child = db.prepare('SELECT status FROM sessions WHERE id = ?').get(childSessionId) as
+        { status: string } | undefined;
+      if (current.childSessionId !== childSessionId || child?.status !== 'active') {
+        return { reopened: false, previousParentSessionId: current.parentSessionId };
+      }
+      db.prepare('UPDATE sessions SET parent_session_id = ?, updated_at = ? WHERE id = ?')
+        .run(expectString(p.parentSessionId, 'parentSessionId'), reopenedAt, childSessionId);
+    } else {
+      insertBotSession(db, asRecord(p.session, 'session'));
+    }
     if (p.worktreePath != null) {
       db.prepare('UPDATE sessions SET worktree_path = ? WHERE id = ?')
         .run(expectString(p.worktreePath, 'worktreePath'), childSessionId);
@@ -1719,6 +1812,8 @@ function sessionsSetStatus(db: Database.Database, args: unknown): Array<{
   title: string | null;
   workingDir: string | null;
   workspaceKind: string | null;
+  remoteHostId: string | null;
+  source: string | null;
   status: 'active' | 'archived';
 }> {
   const payload = asRecord(args, 'sessions.setStatus args');
@@ -1733,7 +1828,7 @@ function sessionsSetStatus(db: Database.Database, args: unknown): Array<{
     'SELECT id, title, working_dir AS workingDir, workspace_kind AS workspaceKind, status, source FROM sessions WHERE id = ? LIMIT 1',
   );
   const updateSession = db.prepare(
-    'UPDATE sessions SET status = ?, updated_at = ? WHERE id = ? RETURNING id, title, working_dir AS workingDir, workspace_kind AS workspaceKind',
+    'UPDATE sessions SET status = ?, updated_at = ? WHERE id = ? RETURNING id, title, working_dir AS workingDir, workspace_kind AS workspaceKind, remote_host_id AS remoteHostId, source',
   );
   const transaction = db.transaction(() => {
     const applied: Array<{
@@ -1741,6 +1836,8 @@ function sessionsSetStatus(db: Database.Database, args: unknown): Array<{
       title: string | null;
       workingDir: string | null;
       workspaceKind: string | null;
+      remoteHostId: string | null;
+      source: string | null;
       status: 'active' | 'archived';
     }> = [];
     const now = Date.now();
@@ -1760,7 +1857,7 @@ function sessionsSetStatus(db: Database.Database, args: unknown): Array<{
         });
       }
       const updated = updateSession.get(status, now, sessionId) as
-        | { id: string; title: string | null; workingDir: string | null; workspaceKind: string | null }
+        | { id: string; title: string | null; workingDir: string | null; workspaceKind: string | null; remoteHostId: string | null; source: string | null }
         | undefined;
       if (!updated) {
         throw Object.assign(new Error(`Session 不存在: ${sessionId}`), { code: 'NOT_FOUND' });
@@ -1770,6 +1867,8 @@ function sessionsSetStatus(db: Database.Database, args: unknown): Array<{
         title: updated.title,
         workingDir: updated.workingDir,
         workspaceKind: updated.workspaceKind,
+        remoteHostId: updated.remoteHostId,
+        source: updated.source,
         status,
       });
     }
@@ -1780,6 +1879,8 @@ function sessionsSetStatus(db: Database.Database, args: unknown): Array<{
     title: string | null;
     workingDir: string | null;
     workspaceKind: string | null;
+    remoteHostId: string | null;
+    source: string | null;
     status: 'active' | 'archived';
   }>;
 }
@@ -2076,6 +2177,9 @@ function rewindCommit(db: Database.Database, args: unknown): void {
   const sdkSessionId =
     typeof payload.sdkSessionId === 'string' && payload.sdkSessionId ? payload.sdkSessionId : null;
   const requireLatestUser = payload.requireLatestUser === true;
+  const nativeForkAnchorSessionMap = normalizeNativeForkAnchorSessionMap(
+    payload.nativeForkAnchorSessionMap,
+  );
   const now = expectNumber(payload.now, 'now');
   const rows = db
     .prepare(
@@ -2130,8 +2234,19 @@ function rewindCommit(db: Database.Database, args: unknown): void {
             AND started_at >= ?`,
       )
     : null;
+  const updateAgentMeta = db.prepare('UPDATE messages SET agent_meta = ? WHERE id = ?');
   const transaction = db.transaction(() => {
     for (const id of idsToRewind) updateMessage.run(now, id);
+    // 保留下来的消息若持有旧 thread 的原生 turn 锚点,随 thread 替换一起重映射
+    // (与 fork.session 复制消息时的处理一致),软删与重映射同一事务。
+    if (nativeForkAnchorSessionMap.size > 0) {
+      const rewoundIds = new Set(idsToRewind);
+      for (const row of rows) {
+        if (rewoundIds.has(row.id) || !row.agent_meta) continue;
+        const remapped = remapNativeForkAnchorSession(row.agent_meta, nativeForkAnchorSessionMap);
+        if (remapped !== row.agent_meta) updateAgentMeta.run(remapped, row.id);
+      }
+    }
     if (rewindSubagentByParent && rewindParentlessSubagentTail) {
       const rewoundIds = new Set(idsToRewind);
       const parentToolUseIds = new Set(
@@ -3358,6 +3473,29 @@ function remapForkedAgentMeta(
     if (mapped) next.nativeForkAnchor = { ...nativeForkAnchor, sdkSessionId: mapped };
   }
   return JSON.stringify(next);
+}
+
+/** 只重映射 nativeForkAnchor.sdkSessionId,不动 uuid / parent 链(rewind 不复制消息)。 */
+function remapNativeForkAnchorSession(raw: string, map: Map<string, string>): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+  if (!isRecord(parsed)) return raw;
+  const nativeForkAnchor = parsed.nativeForkAnchor;
+  if (
+    !isRecord(nativeForkAnchor) ||
+    nativeForkAnchor.agentKind !== 'codex' ||
+    nativeForkAnchor.kind !== 'turn' ||
+    typeof nativeForkAnchor.sdkSessionId !== 'string'
+  ) {
+    return raw;
+  }
+  const mapped = map.get(nativeForkAnchor.sdkSessionId);
+  if (!mapped || mapped === nativeForkAnchor.sdkSessionId) return raw;
+  return JSON.stringify({ ...parsed, nativeForkAnchor: { ...nativeForkAnchor, sdkSessionId: mapped } });
 }
 
 function normalizeStringSet(value: unknown, label: string): Set<string> {

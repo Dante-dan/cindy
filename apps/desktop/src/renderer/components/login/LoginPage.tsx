@@ -354,7 +354,8 @@ export function LoginPage({
   }, [reportLoginPanelMounted, reportLoginPanelUnmounted]);
   // 「跳过登录」常驻入口在面板内(identifier 视图 SKIP_ENTRY 文字链);footer 仅保留
   // error 步的逃生入口——登录服务不可用时用户仍能进入本地模式(既有产品保证)。
-  const showLocalModeFooter = !isAddAccount && loginState?.step === 'error';
+  const showLocalModeFooter =
+    !isAddAccount && loginState?.step === 'error' && loginState.code !== 'CREDENTIAL_STORE_UNAVAILABLE';
   // 面板底部预留恒取全流程最大值(footer 124;协议行 48 被其覆盖):step 切换时
   // 面板/品牌层零跳位(规则 7,codex 审查 P1)。browser-redirect/completed 维持 0,
   // 与迁移前 main 口径一致(该两步由品牌 overlay/跳转态接管)。
@@ -1293,7 +1294,12 @@ export function LoginPage({
               label={t('login.back')}
               onClick={reset}
             />
-            <LoginTitleBlock title={t('login.unavailable')} subtitle={t('login.errors.fallback')} />
+            <LoginTitleBlock
+              title={t(loginState.code === 'CREDENTIAL_STORE_UNAVAILABLE'
+                ? 'credentialStore.dialog.title' : 'login.unavailable')}
+              subtitle={t(loginState.code === 'CREDENTIAL_STORE_UNAVAILABLE'
+                ? 'login.savedLoginPreserved' : 'login.errors.fallback')}
+            />
             <LoginPrimaryButton
               disabled={isLoading}
               loading={isLoading}
@@ -1485,14 +1491,19 @@ export function LoginPage({
       )}
       {realmConfirmation && (
         <LoginConsentDialog
-          title={t('login.realmConsent.title')}
+          title={t(realmConfirmation.personalLoginAvailable
+            ? 'login.realmConsent.personalTitle' : 'login.realmConsent.title')}
           body={t(
-            realmConfirmation.targetRegion === 'cn'
-              ? 'login.realmConsent.bodyCn'
-              : 'login.realmConsent.bodyGlobal',
+            realmConfirmation.personalLoginAvailable
+              ? (realmConfirmation.targetRegion === 'cn'
+                ? 'login.realmConsent.personalBodyCn' : 'login.realmConsent.personalBodyGlobal')
+              : (realmConfirmation.targetRegion === 'cn'
+                ? 'login.realmConsent.bodyCn' : 'login.realmConsent.bodyGlobal'),
           )}
-          agreeLabel={t('login.realmConsent.agree')}
-          disagreeLabel={t('login.realmConsent.disagree')}
+          agreeLabel={t(realmConfirmation.personalLoginAvailable
+            ? 'login.realmConsent.enterpriseLogin' : 'login.realmConsent.agree')}
+          disagreeLabel={t(realmConfirmation.personalLoginAvailable
+            ? 'login.realmConsent.continuePersonal' : 'login.realmConsent.disagree')}
           onAgree={() => void dispatch({ type: 'confirm-sso-realm' })}
           onDisagree={() => void dispatch({ type: 'cancel-sso-realm' })}
           onOpenTerms={() => undefined}
