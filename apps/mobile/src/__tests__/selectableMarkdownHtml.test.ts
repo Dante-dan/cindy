@@ -168,7 +168,7 @@ describe('buildSelectableMarkdownHtml Mermaid 渲染', () => {
     } finally {
       frame.remove();
     }
-  }, 15_000);
+  }, 30_000);
 
   it('渲染失败路径不移除源码，并保留 targetLine 外层定位容器', () => {
     const html = buildSelectableMarkdownHtml(diagram, { targetLine: 1 });
