@@ -1033,7 +1033,7 @@ describe('pickNewSessionDefaultDevice', () => {
 // 避免锚点(如 deps 数组)变化时 indexOf 失效产生误导性报错。
 describe('new session default device follows the home device filter', () => {
   it('sends deviceExplicit for a home device filter or a checked recommendation target', () => {
-    const homeSource = readTextLf(resolve(process.cwd(), 'app/devices/index.tsx'), 'utf8');
+    const homeSource = readTextLf(resolve(process.cwd(), 'src/session/HomeSurface.tsx'), 'utf8');
     // 筛选电脑或推荐指定电脑时带显式标记;普通新建保留记忆回落。
     expect(homeSource).toContain("...(selectedDeviceId || explicitDeviceId ? { deviceExplicit: '1' } : {})");
   });
@@ -1658,7 +1658,7 @@ describe('new session composer surface', () => {
     expect(newComposerSource).toContain('selectionColor={colors.inputCaret}');
     expect(newComposerSource).toContain('inputRef={firstMessageInputRef}');
     expect(newComposerSource).toContain('inputOverlay={renderComposerInputOverlay()}');
-    expect(newComposerSource).toContain('inputStyle={voiceIsListening ? styles.inputVoiceHidden : undefined}');
+    expect(newComposerSource).toContain("inputStyle={voiceIsListening && Platform.OS !== 'ios' ? styles.inputVoiceHidden : undefined}");
     expect(newComposerSource).toContain('setFirstMessageDraft(text);');
     expect(newComposerSource).toContain('onContentSizeChange={handleFirstMessageInputContentSizeChange}');
     expect(newComposerSource).toContain("placeholder={voiceIsListening ? '' : composerPlaceholder}");
@@ -1811,7 +1811,7 @@ describe('new session composer surface', () => {
     expect(newSource).toContain('testID="newSession.voiceStatus"');
     expect(newSource).toContain('testID="newSession.voiceSettingsButton"');
     expect(newSource).toContain('testID="newSession.voiceMicCaret"');
-    expect(newSource).toContain('const renderComposerInputOverlay = () => voiceIsListening ? (');
+    expect(newSource).toContain("const renderComposerInputOverlay = () => voiceIsListening && Platform.OS !== 'ios' ? (");
     expect(newSource).toContain("import { buildSessionComposerLayout } from '@/session/sessionComposerLayout';");
     expect(newSource).toContain('const composerListeningPlaceholder = buildSessionComposerLayout({');
     expect(newSource).toContain('<Text style={styles.voiceDraftListeningText}>{composerListeningPlaceholder}</Text>');
