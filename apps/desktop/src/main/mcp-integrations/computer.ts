@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { desktopInputRevision, hasRemoteDesktopInput, isHumanDesktopInputActive, withAgentDesktopInput } from '../remote-desktop/inputOwnership';
+import { agentDesktopInputRevision, desktopInputRevision, hasRemoteDesktopInput, isAgentDesktopInputActive, isHumanDesktopInputActive, withAgentDesktopInput } from '../remote-desktop/inputOwnership';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -10,6 +10,8 @@ import { hasProxyEnvConfig, parseOutboundProxyUrl } from '@cindy/anthropic-compa
 import { BRAND_NAME } from '@cindy/maker-shared/branding';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { AjvJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/ajv';
+import type { JsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/index.js';
 import type {
   ComputerMcpCallContext,
   ComputerDriverPermissionGrant,
@@ -24,6 +26,7 @@ import { outboundFetch } from '../maker-host/outbound-fetch.js';
 import { resolveDesktopOutboundProxy } from '../maker-host/outbound-proxy-resolver.js';
 import { adaptComputerDriverArgs, type ComputerDriverToolSchema } from './computer-contract.js';
 import { computerResultOutcome, getComputerTool, isUnavailableWindowObservation } from '@cindy/mcps/computer';
+import { callComputerToolWithOutputValidation } from './computer-output.js';
 
 const logger = createLogger('mcp/cindy_computer');
 const DRIVER_COMMAND = 'cua-driver';
@@ -288,6 +291,7 @@ interface CuaMcpSessionEntry {
   ready: Promise<void>;
   driverSessionId: string;
   toolSchemas: Map<string, ComputerDriverToolSchema>;
+  outputValidators: Map<string, JsonSchemaValidator<unknown>>;
   cursorSetup: {
     motion: CursorSetupState;
     style: CursorSetupState;
@@ -2123,19 +2127,31 @@ function createCuaMcpSession(sessionId: string): CuaMcpSessionEntry {
     transport,
     driverSessionId: getDriverSessionId(sessionId),
     toolSchemas: new Map(),
+    outputValidators: new Map(),
     cursorSetup: {
       motion: capabilities?.motion === 'unavailable' ? 'unavailable' : 'pending',
       style: capabilities?.style === 'unavailable' ? 'unavailable' : 'pending',
     },
     ready: withTimeout(
       client.connect(transport).then(async () => {
+        const outputValidator = new AjvJsonSchemaValidator();
         let cursor: string | undefined;
         const seen = new Set<string>();
         do {
           const page = await client.listTools(cursor ? { cursor } : undefined);
-          for (const tool of page.tools) entry.toolSchemas.set(tool.name, tool.inputSchema as ComputerDriverToolSchema);
+          for (const tool of page.tools) {
+            entry.toolSchemas.set(tool.name, tool.inputSchema as ComputerDriverToolSchema);
+            // Required-task tools must stay on SDK callTool's task protocol guard.
+            if (tool.outputSchema && tool.execution?.taskSupport !== 'required') {
+              entry.outputValidators.set(
+                tool.name,
+                outputValidator.getValidator(tool.outputSchema),
+              );
+            }
+          }
           cursor = page.nextCursor;
-          if (cursor && (seen.has(cursor) || seen.size >= 20)) throw new ComputerDriverError('Driver tools/list pagination did not terminate.');
+          if (cursor && (seen.has(cursor) || seen.size >= 20))
+            throw new ComputerDriverError('Driver tools/list pagination did not terminate.');
           if (cursor) seen.add(cursor);
         } while (cursor);
       }),
@@ -2207,20 +2223,48 @@ async function callCuaMcpTool(
   signal?: AbortSignal,
 ): Promise<unknown> {
   signal?.throwIfAborted();
+  if (
+    name === 'drag' &&
+    process.platform === 'darwin' &&
+    args.delivery_mode === undefined &&
+    Object.hasOwn(entry.toolSchemas.get(name)?.properties ?? {}, 'delivery_mode')
+  ) {
+    // Never implicitly take foreground input from the person using this Mac.
+    // Older drivers may not accept delivery_mode; adapt only advertised capabilities.
+    args = { ...args, delivery_mode: 'background' };
+  }
   const driverArgs = adaptComputerDriverArgs(name, args, entry.toolSchemas);
   const result = await withTimeout(
-    entry.client.callTool({
-      name,
-      arguments: driverArgs,
-    }, undefined, { signal }),
+    callComputerToolWithOutputValidation(
+      entry.client,
+      {
+        name,
+        arguments: driverArgs,
+      },
+      entry.outputValidators.get(name),
+      getComputerTool(name)?.readOnly === true,
+      signal,
+    ),
     timeoutMs,
     `cua-driver mcp tool ${name}`,
   );
   if ((result as { isError?: unknown }).isError) {
     const text = firstTextFromMcpResult(result);
     const details = objectValue(parseMcpToolResult(result));
-    throw new ComputerDriverError(text ?? `cua-driver mcp tool ${name} returned an error`,
-      typeof details?.code === 'string' ? details.code : 'COMPUTER_DRIVER_ERROR');
+    throw new ComputerDriverError(
+      typeof details?.message === 'string'
+        ? details.message
+        : (text ?? `cua-driver mcp tool ${name} returned an error`),
+      typeof details?.code === 'string'
+        ? details.code
+        : typeof details?.error === 'string' && /^[A-Z][A-Z0-9_]+$/.test(details.error)
+          ? details.error
+          : 'COMPUTER_DRIVER_ERROR',
+      getComputerTool(name)?.readOnly !== true && (
+        details?.effect === 'partial' || details?.effect === 'unverifiable' ||
+        details?.code === 'type_text_incomplete'
+      ),
+    );
   }
   const parsed = parseMcpToolResult(result);
   if (typeof parsed === 'string' && STALE_CUA_SESSION_MARKER_RE.test(parsed)) {
@@ -2237,23 +2281,26 @@ async function callCuaMcpToolWithTypeTextChunks(
   signal?: AbortSignal,
   assertActive: () => void = () => {},
   settleFailedInput: () => Promise<void> = async () => {},
+  onDispatch: () => void = () => {},
 ): Promise<unknown> {
   signal?.throwIfAborted();
   assertActive();
-  const dispatch = (input: Record<string, unknown>) => getComputerTool(name)?.readOnly === true
-    ? callCuaMcpTool(entry, name, input, timeoutMs, signal)
-    : withAgentDesktopInput(async () => {
-      try {
-        return await callCuaMcpTool(entry, name, input, timeoutMs, signal);
-      } catch (error) {
-        // Cancellation/timeout is not proof that native input stopped. Keep
-        // remote input waiting through the existing driver-session teardown.
-        if (signal?.aborted || shouldCleanupCuaMcpSessionAfterError(error)) {
-          await settleFailedInput();
-        }
-        throw error;
+  const dispatch = async (input: Record<string, unknown>) => {
+    signal?.throwIfAborted();
+    assertActive();
+    onDispatch();
+    try {
+      return await callCuaMcpTool(entry, name, input, timeoutMs, signal);
+    } catch (error) {
+      // Cancellation/timeout is not proof that native input stopped. Keep
+      // all competing input waiting through the existing driver-session teardown.
+      if (getComputerTool(name)?.readOnly !== true
+        && (signal?.aborted || shouldCleanupCuaMcpSessionAfterError(error))) {
+        await settleFailedInput();
       }
-    });
+      throw error;
+    }
+  };
   if (name !== 'type_text' || typeof args.text !== 'string') {
     return dispatch(args);
   }
@@ -2272,9 +2319,24 @@ async function callCuaMcpToolWithTypeTextChunks(
   let processedChunks = 0;
   for (let index = 0; index < chunks.length; index += 1) {
     const chunk = chunks[index];
-    signal?.throwIfAborted();
-    assertActive();
-    lastResult = await dispatch({ ...args, text: chunk });
+    let attempted = false;
+    try {
+      signal?.throwIfAborted();
+      assertActive();
+      attempted = true;
+      lastResult = await dispatch({ ...args, text: chunk });
+    } catch (error) {
+      // A completed prefix must survive cancellation/yield/transport errors.
+      // Never encourage replay of the whole string or guess the in-flight chunk.
+      throw Object.assign(error instanceof Error ? error : new Error(String(error)), {
+        outcomeUnknown: attempted || inserted > 0,
+        inputProgress: {
+          completed_chars: inserted,
+          attempted_chars: attempted ? Array.from(chunk).length : 0,
+          remaining_chars: Array.from(chunks.slice(index + (attempted ? 1 : 0)).join('')).length,
+        },
+      });
+    }
     const resultObject = objectValue(lastResult);
     processedChunks += 1;
     const outcome = computerResultOutcome(name, lastResult);
@@ -3377,9 +3439,9 @@ export async function grantComputerDriverPermissions(
   };
 }
 
-// Remote input invalidates previously observed targets even after its short
-// ownership window ends. Never resume typing into a stale focus implicitly.
-const inputObservations = new Map<string, { windows: Map<string, number> }>();
+// Human input and other tasks invalidate observed targets after ownership ends.
+// Own sequential primitives retain their observations; overlapping reads do not.
+const inputObservations = new Map<string, { windows: Map<string, number | symbol>; requiresObservation: boolean }>();
 
 export async function callComputerDriverTool(
   name: ComputerMcpToolName,
@@ -3390,25 +3452,37 @@ export async function callComputerDriverTool(
   const revision = desktopInputRevision();
   let observations = sessionId ? inputObservations.get(sessionId) : undefined;
   if (sessionId && !observations) {
-    observations = { windows: new Map() };
+    observations = { windows: new Map(), requiresObservation: agentDesktopInputRevision() > 0 };
     inputObservations.set(sessionId, observations);
   }
   const window = `${args.pid}:${args.window_id}`;
   if (getComputerTool(name)?.readOnly === true) {
-    const startedIdle = !isHumanDesktopInputActive();
+    const agentRevision = agentDesktopInputRevision();
+    const startedIdle = !isHumanDesktopInputActive() && !isAgentDesktopInputActive();
+    const explicitObservation = name === 'get_window_state' && context?.observationPurpose !== 'recovery';
+    const observation = Symbol('pending observation');
+    const app = `${args.pid}:undefined`;
+    if (explicitObservation) {
+      if (observations) observations.requiresObservation = true;
+      // Revoke old permission and prevent an older concurrent read from
+      // restoring it after this read fails or is cancelled.
+      observations?.windows.set(window, observation);
+      observations?.windows.set(app, observation);
+    }
     const result = await callComputerDriverToolImpl(name, args, context);
-    if (name === 'get_window_state' && startedIdle && computerResultOutcome(name, result).ok
-      && !isUnavailableWindowObservation(result, args)
-      && revision === desktopInputRevision() && !isHumanDesktopInputActive()) {
-      observations?.windows.set(window, revision);
+    if (explicitObservation && startedIdle && !context?.signal?.aborted
+      && !isUnavailableWindowObservation(result, args) && computerResultOutcome(name, result).ok
+      && revision === desktopInputRevision() && !isHumanDesktopInputActive()
+      && agentRevision === agentDesktopInputRevision() && !isAgentDesktopInputActive()) {
+      if (observations?.windows.get(window) === observation) observations.windows.set(window, revision);
       // App-scoped actions may omit window_id; a successful observation of
       // that app also refreshes its focus, without refreshing other windows.
-      observations?.windows.set(`${args.pid}:undefined`, revision);
+      if (observations?.windows.get(app) === observation) observations.windows.set(app, revision);
     }
     return result;
   }
   // Preparation can be slow and does not inject input. Reserve ownership only
-  // around each driver primitive, and recheck this observation before dispatch.
+  // around the logical input, and recheck this observation after queue admission.
   const assertCurrent = () => {
     if (desktopInputRevision() !== revision) {
       throw new ComputerDriverError('Remote desktop input arrived. Agent yielded before further input; previous input may have completed. Get fresh window state before continuing.', 'DESKTOP_INPUT_YIELDED');
@@ -3416,12 +3490,12 @@ export async function callComputerDriverTool(
     if (isHumanDesktopInputActive()) {
       throw new ComputerDriverError('Remote desktop input is active. Yield briefly, then get fresh window state before retrying; the remote connection can stay open.', 'DESKTOP_INPUT_BUSY');
     }
+    if (args.pid !== undefined && observations && (revision > 0 || observations.requiresObservation)
+      && observations.windows.get(window) !== revision) {
+      throw new ComputerDriverError('Desktop input or a newer observation invalidated this target. Get fresh state for this window before acting again.', 'STALE_SNAPSHOT');
+    }
   };
   assertCurrent();
-  if (args.pid !== undefined && observations && revision > 0
-    && observations.windows.get(window) !== revision) {
-    throw new ComputerDriverError('Remote desktop input changed the desktop. Get fresh state for this window before acting again.', 'STALE_SNAPSHOT');
-  }
   return callComputerDriverToolImpl(name, args, context, assertCurrent);
 }
 
@@ -3462,10 +3536,20 @@ async function callComputerDriverToolImpl(
   const entry = await getCuaMcpSession(sessionId, signal);
   const driverArgs = applyDriverSessionArgs(name, normalizedArgs, entry.driverSessionId, entry.toolSchemas);
   const timeoutMs = getCuaMcpToolTimeoutMs(name);
+  let inputDispatched = false;
   try {
     await initializeDefaultCursorStyle(name, driverArgs, entry, entry.driverSessionId, sessionCloseVersion, signal, assertActive);
-    const result = await callCuaMcpToolWithTypeTextChunks(entry, name, driverArgs, timeoutMs, signal, assertActive,
-      () => cleanupCuaMcpSessionAfterError(sessionId, entry));
+    const invoke = () => callCuaMcpToolWithTypeTextChunks(entry, name, driverArgs, timeoutMs, signal, assertActive,
+      () => cleanupCuaMcpSessionAfterError(sessionId, entry), () => { inputDispatched = true; });
+    const result = getComputerTool(name)?.readOnly === true ? await invoke()
+      : await withAgentDesktopInput(() => {
+        for (const [otherSessionId, observation] of inputObservations) {
+          if (otherSessionId === sessionId) continue;
+          observation.requiresObservation = true;
+          observation.windows.clear();
+        }
+        return invoke();
+      }, { signal, assertCurrent: assertActive });
     return name === 'list_windows' ? enrichAndFilterListWindowsResult(result, rawArgs) : result;
   } catch (err) {
     logger.warn('cua-driver MCP tool call failed', {
@@ -3475,14 +3559,19 @@ async function callComputerDriverToolImpl(
       error: err instanceof Error ? err.message : String(err),
     });
     if (signal?.aborted) {
-      await cleanupCuaMcpSessionAfterError(sessionId, entry).catch(() => undefined);
-      throw new ComputerDriverError('Computer Use cancelled. An action already dispatched may have taken effect; observe before acting again.', 'REQUEST_CANCELLED', getComputerTool(name)?.readOnly !== true);
+      if (inputDispatched) await cleanupCuaMcpSessionAfterError(sessionId, entry).catch(() => undefined);
+      throw Object.assign(new ComputerDriverError(
+        inputDispatched ? 'Computer Use cancelled. An action already dispatched may have taken effect; observe before acting again.'
+          : 'Computer Use cancelled before dispatch; no input was sent.',
+        'REQUEST_CANCELLED', inputDispatched && getComputerTool(name)?.readOnly !== true),
+      { inputProgress: (err as { inputProgress?: unknown })?.inputProgress });
     }
     if (shouldCleanupCuaMcpSessionAfterError(err)) {
       const cleanup = cleanupCuaMcpSessionAfterError(sessionId, entry);
       if (getComputerTool(name)?.readOnly !== true) {
         await cleanup.catch(() => undefined);
-        throw new ComputerDriverError('Driver connection failed during an action. Its outcome is unknown; the action was not replayed. Take fresh state before continuing.', 'ACTION_OUTCOME_UNKNOWN', true);
+        throw Object.assign(new ComputerDriverError('Driver connection failed during an action. Its outcome is unknown; the action was not replayed. Take fresh state before continuing.', 'ACTION_OUTCOME_UNKNOWN', true),
+          { inputProgress: (err as { inputProgress?: unknown })?.inputProgress });
       }
       if (shouldUseCliFallbackAfterError(name, err)) {
         try {
