@@ -82,7 +82,13 @@ describe('desktop auth session-expiry detection', () => {
 
     // 加密不可用不判缺席;existsSync 对 EPERM/EACCES 也返回 false,必须用
     // accessSync 并只认 ENOENT 为真缺席,其它错误一律按瞬时故障。
-    expect(body).toContain('if (!safeStorage.isEncryptionAvailable()) return false;');
+    expect(body).toContain('if (!isCredentialEncryptionAvailable()) return false;');
+    const probe = authSource.slice(
+      authSource.indexOf('function isCredentialEncryptionAvailable()'),
+      authSource.indexOf('/** Main-process recovery signal'),
+    );
+    expect(probe).toContain('const available = safeStorage.isEncryptionAvailable();');
+    expect(probe).toContain('return available;');
     expect(body).toContain('fs.accessSync(');
     expect(body).toContain("=== 'ENOENT'");
     expect(body).not.toContain('existsSync');

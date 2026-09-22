@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  commitRuntimeAuthExpiryInCredentialBoundary,
   doesRuntimeRefreshOwnActiveSession,
   removeRejectedRuntimeCredentialCopies,
   runGuardedRuntimeAuthExpiry,
@@ -25,6 +26,48 @@ describe('runtime auth expiry guard', () => {
     vaultHasSignedOutTombstone: false,
     accountIsLoggedOut: false,
   };
+
+  it('keeps final credential validation and expiry commit inside one boundary', async () => {
+    const order: string[] = [];
+    let current = true;
+    const run = commitRuntimeAuthExpiryInCredentialBoundary({
+      withCredentialBoundary: async (operation) => {
+        order.push('lock');
+        await operation();
+        order.push('unlock');
+      },
+      validateBeforeCommit: () => {
+        order.push('validate');
+        return current;
+      },
+      commit: async () => {
+        order.push('commit');
+      },
+    });
+
+    await expect(run).resolves.toBe('committed');
+    expect(order).toEqual(['lock', 'validate', 'commit', 'unlock']);
+
+    current = false;
+    order.length = 0;
+    await expect(
+      commitRuntimeAuthExpiryInCredentialBoundary({
+        withCredentialBoundary: async (operation) => {
+          order.push('lock');
+          await operation();
+          order.push('unlock');
+        },
+        validateBeforeCommit: () => {
+          order.push('validate');
+          return current;
+        },
+        commit: async () => {
+          order.push('commit');
+        },
+      }),
+    ).resolves.toBe('stale');
+    expect(order).toEqual(['lock', 'validate', 'unlock']);
+  });
 
   it('reclaims an unowned target while preserving unrelated inactive account resources', () => {
     const replacementWithInactiveAccounts = {

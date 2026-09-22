@@ -98,6 +98,26 @@ export interface RuntimeAuthExpiryCommitGuards {
 }
 
 /**
+ * Keep the final persisted-generation check and the destructive expiry commit
+ * inside the same cross-process credential boundary. Current credential writers
+ * join this boundary, so a replacement cannot land between the last check and
+ * the owner/session commit.
+ */
+export async function commitRuntimeAuthExpiryInCredentialBoundary(input: {
+  withCredentialBoundary: (operation: () => Promise<void>) => Promise<void>;
+  validateBeforeCommit: () => boolean;
+  commit: () => Promise<void>;
+}): Promise<'committed' | 'stale'> {
+  let outcome: 'committed' | 'stale' = 'stale';
+  await input.withCredentialBoundary(async () => {
+    if (!input.validateBeforeCommit()) return;
+    await input.commit();
+    outcome = 'committed';
+  });
+  return outcome;
+}
+
+/**
  * Keep a definitive refresh failure attached to the auth identity that
  * observed it across credential-store and owner-teardown awaits.
  */

@@ -73,6 +73,7 @@ import { createAckReactions, type AckReactionTask } from './ackReactions.js';
 import type { HookConnectionConfig } from './store.js';
 import type { HookBindingStore } from './bindings.js';
 import { terminalDeliveryExpired } from './requestLedger.js';
+import { composeXPrompt } from './xPrompt.js';
 import type { HookRequestLedger, HookTerminalRecord } from './requestLedger.js';
 
 /** 会话执行器抽象 —— 生产实现 session-runner.ts(包 maker), 测试注入假的。 */
@@ -290,7 +291,7 @@ export interface HookDispatcherDeps {
    * 分配独立子目录。
    * 未注入时 chat 别名按 unknown_workspace 拒绝(纯逻辑测试 / 旧行为默认)。
    */
-  dialogue?: { rootDir: () => string; allocateDir: (sessionId: string) => Promise<string> };
+  dialogue?: { rootDir: () => string; rootDirs?: () => string[]; allocateDir: (sessionId: string) => Promise<string> };
   /**
    * 可选: 中断某 session 正在跑的 turn(task.cancel 用; 生产为
    * maker.getSession(id)?.abort())。未注入时 cancel 只能收口排队中的任务。
@@ -495,7 +496,16 @@ export function normalizeTaskSource(source: TaskSource): TaskSource {
   const channelName = boundedNullable(source.channelName, SOURCE_CHANNEL_NAME_MAX);
   const teamId = boundedNullable(source.teamId, SOURCE_TEAM_ID_MAX);
   const teamName = boundedNullable(source.teamName, SOURCE_TEAM_NAME_MAX);
-  const threadContext = source.threadContext?.slice(0, SOURCE_THREAD_CONTEXT_MAX).map((entry) => ({
+  // The X wire chain includes the trigger for prompt assembly. Display it only
+  // as userText, not again among referenced messages. Match the original ID
+  // before bounding the snapshot; legacy entries without IDs stay untouched.
+  const displayContext = source.im === 'x' && source.triggerMessageId && source.userText?.trim()
+    ? source.threadContext?.filter((entry) => entry.messageId !== source.triggerMessageId)
+    : source.threadContext;
+  const threadContext = displayContext?.slice(0, SOURCE_THREAD_CONTEXT_MAX).map((entry) => ({
+    ...(entry.messageId !== undefined ? { messageId: entry.messageId.slice(0, SOURCE_TRIGGER_MESSAGE_ID_MAX) } : {}),
+    ...(entry.authorId !== undefined ? { authorId: entry.authorId.slice(0, SOURCE_THREAD_AUTHOR_MAX) } : {}),
+    ...(entry.replyToMessageId !== undefined ? { replyToMessageId: entry.replyToMessageId?.slice(0, SOURCE_TRIGGER_MESSAGE_ID_MAX) ?? null } : {}),
     author: entry.author.slice(0, SOURCE_THREAD_AUTHOR_MAX),
     text: entry.text.slice(0, SOURCE_THREAD_TEXT_MAX),
     ...(entry.isBot === true ? { isBot: true } : {}),
@@ -503,6 +513,11 @@ export function normalizeTaskSource(source: TaskSource): TaskSource {
 
   return {
     im: source.im,
+    ...(source.xContext ? { xContext: {
+      requesterId: source.xContext.requesterId.slice(0, SOURCE_THREAD_AUTHOR_MAX),
+      ...(source.xContext.requesterName !== undefined ? { requesterName: source.xContext.requesterName.slice(0, SOURCE_THREAD_AUTHOR_MAX) } : {}),
+      truncated: source.xContext.truncated,
+    } } : {}),
     ...(channelName !== undefined ? { channelName } : {}),
     ...(teamId !== undefined ? { teamId } : {}),
     ...(teamName !== undefined ? { teamName } : {}),
@@ -1732,7 +1747,8 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
     // 排队中的任务同样不能因为"目录还在映射里"就照跑(PR #733 review 指出)。
     if (!config || !config.enabled) return false;
     if (Object.values(config.workspaces).some((root) => isPathWithin(root, dir))) return true;
-    return dialogue !== undefined && isPathWithin(dialogue.rootDir(), dir);
+    return dialogue !== undefined && (dialogue.rootDirs?.() ?? [dialogue.rootDir()])
+      .some((root) => isPathWithin(root, dir));
   }
 
   function startExecution(task: PendingTask): void {
@@ -1830,7 +1846,8 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
       );
     /** app 托管对话目录(dialogues 根)内的路径 —— chat 伪目录会话的白名单等价物。 */
     const inDialogueRoot = (dir: string | null): boolean =>
-      dir !== null && dialogue !== undefined && isPathWithin(dialogue.rootDir(), dir);
+      dir !== null && dialogue !== undefined && (dialogue.rootDirs?.() ?? [dialogue.rootDir()])
+        .some((root) => isPathWithin(root, dir));
     // 显式接管的目标失效时会从旧目录 / 本次别名提示里挑一个安全落点, 然后
     // 复用下方的新建路径。普通派发仍原样使用 payload.workspace。
     let effectiveWorkspace = payload.workspace;
@@ -2227,7 +2244,11 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
     if (!accountActive) return;
     const admittedGeneration = accountGeneration;
     const source = payload.source === undefined ? undefined : normalizeTaskSource(payload.source);
-    const dispatchPayload = source === undefined ? payload : { ...payload, source };
+    const dispatchPayload = {
+      ...payload,
+      ...(source === undefined ? {} : { source }),
+      prompt: composeXPrompt(payload.source, payload.prompt),
+    };
     sendFns.set(connectionId, send);
 
     // Durable terminal replay comes first: an auto-update restarts the process

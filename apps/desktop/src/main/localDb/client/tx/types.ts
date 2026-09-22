@@ -1,4 +1,7 @@
+import type { TaskTagRequest, TaskTagResult } from '@cindy/maker-shared';
+
 export type DbTxName =
+  | 'taskTags.execute'
   | 'codex.importMessages'
   | 'claude.importMessages'
   | 'rewind.commit'
@@ -111,6 +114,12 @@ export interface RewindCommitArgs {
   preserveMessageUuid?: string;
   /** Replacement SDK session/thread id to persist atomically with rewind. */
   sdkSessionId?: string;
+  /**
+   * Codex thread/rollback 或分页 fork 换出新 thread 时,把保留消息 agent_meta 里
+   * `nativeForkAnchor.sdkSessionId` 从旧 thread 重映射到新 thread(pairs,语义同
+   * fork.session 的同名字段),否则后续回退/fork 会把这些锚点当异线程丢弃。
+   */
+  nativeForkAnchorSessionMap?: Array<[string, string]>;
   now: number;
 }
 
@@ -604,6 +613,8 @@ export interface BotsCreateProfileArgs {
 
 export interface BotsUpdateProfileArgs {
   id: string;
+  /** Explicit settings changes also update the permanent chat in this transaction. */
+  canonicalPermissionMode?: 'ask' | 'auto' | 'bypassPermissions';
   displayName?: string;
   description?: string;
   avatar?: string;
@@ -710,6 +721,8 @@ export interface BotsFinishRuntimeArgs {
   eventPayloadJson: string;
 }
 export interface BotsFinishDelegationArgs {
+  expectedRunSequence?: number;
+  expectedExecution?: { instanceId: string; generation: number };
   delegationId: string;
   status: 'completed' | 'failed' | 'cancelled' | 'timed-out';
   resultSummary: string | null;
@@ -721,6 +734,8 @@ export interface BotsFinishDelegationArgs {
 
 export interface BotsFinishDelegationResult {
   id: string;
+  targetBotId: string | null;
+  runSequence: number;
   parentSessionId: string | null;
   childSessionId: string | null;
   status: 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled' | 'timed-out';
@@ -1165,6 +1180,7 @@ export type DbTxArgsByName = {
   'sessions.setStatus': SessionsSetStatusArgs;
   'recentWorkdirs.mergeWindowsIdentity': RecentWorkdirsMergeWindowsIdentityArgs;
   'recentWorkdirs.removeWindowsIdentity': RecentWorkdirsRemoveWindowsIdentityArgs;
+  'taskTags.execute': TaskTagRequest & { newId?: string; callerSessionId?: string };
   'projectAliases.replaceIdentity': ProjectAliasesReplaceIdentityArgs;
   'toolResults.compactSession': CompactSessionToolResultsArgs;
   'session.agentSwitchFallback': SessionAgentSwitchFallbackArgs;
@@ -1237,6 +1253,7 @@ export type DbTxResultByName = {
   'sessions.setStatus': SessionsSetStatusResultItem[];
   'recentWorkdirs.mergeWindowsIdentity': undefined;
   'recentWorkdirs.removeWindowsIdentity': { changes: number };
+  'taskTags.execute': TaskTagResult;
   'projectAliases.replaceIdentity': {
     projectKey: string;
     alias: string;
