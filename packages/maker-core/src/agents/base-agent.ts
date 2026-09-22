@@ -7,6 +7,8 @@
  * - 持有依赖注入的 deps，但具体使用由子类决定
  */
 
+import type { AutoReviewUserIntent } from './shared/auto-review-decision.js';
+import { LIBRARY_READ_ROOT } from './shared/library-native-read.js';
 import { canonicalSkillPath, isSkillDisabled } from './shared/skill-activation.js';
 
 import type {
@@ -72,6 +74,7 @@ import type {
   AgentBuiltinCommand,
   ListAgentSkillsOptions,
   ListAgentSkillsResult,
+  ListRuntimeSkillsOptions,
 } from '../types/palette.js';
 import type {
   ListCustomizationsOptions,
@@ -190,6 +193,10 @@ export type PiNativeApi =
   | 'openai-responses'
   | 'openai-completions'
   | 'google-generative-ai'
+  | 'bedrock-converse-stream'
+  | 'azure-openai-responses'
+  | 'google-vertex'
+  | 'mistral-conversations'
   /** PI's native ChatGPT subscription adapter; not a portable BYOM protocol. */
   | 'openai-codex-responses';
 
@@ -253,6 +260,8 @@ export interface RemoteAgentFileOps {
   listDir(dir: string): Promise<string[]>;
   /** Bounded UTF-8 read used for remote runtime metadata such as SKILL.md. */
   readFile(file: string, maxBytes?: number): Promise<string>;
+  /** Bounded UTF-8 tail for native history receipts; absent on older hosts. */
+  readFileTail?(file: string, maxBytes: number): Promise<string>;
   /** Hash the complete remote file without transferring its contents to the client. */
   sha256File(file: string): Promise<string>;
 }
@@ -275,6 +284,8 @@ export type PiGatewayModelSpec = Pick<
  * 解析产出;PiAgent 写进 models.json 的独立 provider 块,并按 model→provider 路由 set_model。
  */
 export interface PiNativeProviderSpec {
+  /** Pi adapter identity; the user connection retains its independent ID and credential. */
+  adapterProvider?: string;
   /** PI runtime provider id(slug,禁与网关 provider `cindy` 撞名)。 */
   id: string;
   /** Cindy catalog / persisted provider id; defaults to the runtime id. */
@@ -635,7 +646,7 @@ export interface PiExtensionUiStrings {
 }
 
 export interface PiManagedPackageRuntimeConvergence {
-  runtimeConvergence: 'complete' | 'partial';
+  runtimeConvergence: 'complete' | 'partial' | 'deferred';
   recoveryAction?: 'restart-cindy-to-refresh-packages';
 }
 
@@ -695,6 +706,8 @@ export interface AgentDeps {
    * 缺省 / 返回 undefined → 回退到全局 process.env.XDT_CC_DEBUG_FILE。
    */
   resolveCcDebugFile?: (sessionId?: string) => string | undefined;
+  /** Register one local debug writer; the returned disposer runs on process exit/error. */
+  trackCcDebugFile?: (filePath: string, sessionId?: string) => () => void;
 
   /**
    * MCP server 提供者列表（host 注入）。agent 在 startSession 时按上下文挑选
@@ -745,13 +758,18 @@ export interface AgentDeps {
 
   /**
    * Pi-only: host callback after a package mutation receipt has been queued/sent.
-   * Desktop publishes a bounded convergence outcome before retiring the caller,
-   * then retires its exact stale local ordinary Pi snapshot. Native package
-   * success remains authoritative.
+   * Desktop retires idle instances and defers busy captured instances until
+   * their product turn settles. A sent receipt is not proof Pi consumed it.
+   * Native package success remains authoritative; deferred is not a failure.
+   * publishOutcome returns the exact queued event so the Host can retain its
+   * caller lease until Session dispatches that receipt (not a persistence ACK).
+   * The event factory supplies a fresh complete receipt for eventual retirement
+   * failure, without writing into the possibly closed caller queue.
    */
   onPiManagedPackageMutationSettled?: (
     callerSessionId: string | undefined,
-    publishOutcome: (outcome: PiManagedPackageRuntimeConvergence) => void,
+    publishOutcome: (outcome: PiManagedPackageRuntimeConvergence) => AgentEvent,
+    createRetirementFailureEvent: () => AgentEvent,
   ) => Promise<void>;
 
   /**
@@ -985,6 +1003,8 @@ export interface AgentDeps {
     ctx: {
       providerId?: string;
       codexHome?: string;
+      /** Actual native config/history root; credential/catalog preparation keeps codexHome above. */
+      runtimeCodexHome?: string;
       accountHostKey?: string;
       remoteHostId?: string;
       credentialMode?: AgentCredentialMode;
@@ -1077,6 +1097,8 @@ export interface AgentDeps {
    * for host-owned HTTP MCP bridges. Missing hooks keep the old no-session
    * behavior; implementations should be in-memory and best-effort.
    */
+  /** Synchronous local policy registration; no RPC or IO on a send. Returns owner-scoped cleanup. */
+  registerCodexTextOnlyPolicy?: (threadId: string, disabled: () => boolean) => () => void;
   registerCodexMcpThreadContext?: (args: CodexMcpThreadContextArgs) => void;
   unregisterCodexMcpThreadContext?: (
     threadId: string,
@@ -1277,7 +1299,9 @@ export interface AgentDeps {
    */
   prepareCodexResumeSession?: (threadId: string, context?: { codexHome: string; providerId?: string }) => Promise<string | void>;
   recordCodexThreadLocation?: (threadId: string, codexHome: string, rolloutPath?: string) => Promise<void>;
-  resolveCodexThreadStorageHome?: (threadId: string) => Promise<string | undefined>;
+  resolveCodexThreadStorage?: (threadId: string) => Promise<{ historyHome: string; sqliteHome: string; rolloutPath?: string } | undefined>;
+  /** Freeze the owner/account scope before async host startup; never expose tokens to the renderer. */
+  createCodexAuthTokenReader?: (providerId?: string) => () => Promise<import('./codex/app-server/external-auth.js').CodexChatgptTokens>;
 
   /**
    * Codex 专用:把已拼好的产品级 system prompt 同步登记到 host 的 codex proxy registry。
@@ -1862,6 +1886,8 @@ export interface StartSessionOptions {
    * 跟 model/effort 同语义: 启动时快照 + 由 setExtraDirs 热更新 closure。
    */
   extraDirs?: string[];
+  /** Current task library root, supplied only by the Host and included in extraDirs. */
+  [LIBRARY_READ_ROOT]?: string | null;
   /**
    * 附加可读写目录列表(绝对路径)。这是用户逐目录授予的会话级权限，不能从
    * extraDirs 自动推导；启动时快照，并可由 setWritableDirs 热更新。
@@ -1890,6 +1916,17 @@ export const AUTO_REVIEW_USER_INTENT = Symbol('cindy.auto-review-user-intent');
 /** Main-only selection from the original input for a retained-history continuation. */
 export const INHERITED_CAPABILITY_SELECTION = Symbol('cindy.inherited-capability-selection');
 
+/**
+ * Main-attested Skill winner for this exact send. Symbol keys cannot cross the
+ * Renderer/device-link boundary, so only a Host dispatcher can pin a path.
+ */
+export const PINNED_SKILL_INVOCATION = Symbol('cindy.pinned-skill-invocation');
+
+export interface PinnedSkillInvocation {
+  readonly name: string;
+  readonly path: string;
+}
+
 export interface MainOwnedSendContext {
   readonly origin: TurnPermissionOrigin;
   /** Main-authenticated user text before channel/persona/context decoration. */
@@ -1902,8 +1939,10 @@ export interface MainOwnedSendContext {
  */
 export interface SendOptions {
   readonly [AUTO_REVIEW_SOURCE_CONTENT]?: UserMessage['content'];
-  readonly [AUTO_REVIEW_USER_INTENT]?: string;
+  readonly [AUTO_REVIEW_USER_INTENT]?: AutoReviewUserIntent;
   readonly [INHERITED_CAPABILITY_SELECTION]?: string;
+  /** Exact Skill selected by a Host authorization check for this send. */
+  readonly [PINNED_SKILL_INVOCATION]?: PinnedSkillInvocation;
   /** Host-authenticated metadata; never accept an equivalent string-keyed wire field. */
   readonly [MAIN_OWNED_SEND_CONTEXT]?: MainOwnedSendContext;
   /**
@@ -1978,6 +2017,8 @@ export interface SendOptions {
    * approval boundary, before MCP auto-approval or permission-mode bypasses.
    */
   turnPermissionPolicy?: TurnPermissionPolicy;
+  /** Host-owned text-only turn. Block every tool before execution, including reads and Full access. */
+  toolsDisabled?: boolean;
 }
 
 export type TurnPermissionOrigin =
@@ -2266,6 +2307,9 @@ export interface AgentSessionHandle {
   /** 当前 maker 进程内记录的计划模式状态；不支持的 agent 不实现。 */
   getPlanMode?(): boolean | null;
 
+  /** Execution authority, including an active one-shot Plan turn after the UI toggle is consumed. */
+  getExecutionPlanMode?(): boolean | null;
+
   /**
    * 把当前会话导出成 HTML 文件,返回写入的绝对路径。
    * `outputPath` 省略时由 agent 决定默认落盘位置。仅 Capabilities.sessionHtmlExport
@@ -2295,7 +2339,7 @@ export interface AgentSessionHandle {
   /**
    * 运行时增删 extraDirs(覆盖式)。Claude 与 Codex 都更新 closure，在下一 turn 生效。
    */
-  setExtraDirs?(dirs: string[]): Promise<void>;
+  setExtraDirs?(dirs: string[], libraryRoot?: string | null): Promise<void>;
 
   /** 运行时增删附加可读写目录(覆盖式)，下一 turn 生效。 */
   setWritableDirs?(dirs: string[]): Promise<void>;
@@ -2347,6 +2391,11 @@ export interface AgentSessionHandle {
    * 默认实现为 false (capability 缺失时 host 不该问)。
    */
   isTurnRunning?(): boolean;
+  /** A provider-owned preparatory turn still precedes the accepted user input.
+   * Host timeouts must not resume it with a generic CONTINUE. Read synchronously
+   * before abort clears the provider's existing preparation state.
+   */
+  isPreparingUserTurn?(): boolean;
 }
 
 export abstract class BaseAgent {
@@ -2486,6 +2535,11 @@ export abstract class BaseAgent {
   async listAgentSkills(opts: ListAgentSkillsOptions): Promise<ListAgentSkillsResult> {
     void opts;
     return { skills: [] };
+  }
+
+  /** Runtime-accurate Skill discovery for host-side authorization checks. */
+  async listRuntimeSkills(opts: ListRuntimeSkillsOptions): Promise<ListAgentSkillsResult> {
+    return this.listAgentSkills(opts);
   }
 
   /**

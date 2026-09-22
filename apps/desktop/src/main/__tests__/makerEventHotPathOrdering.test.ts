@@ -8,7 +8,9 @@
 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { ScriptTarget, transpileModule } from 'typescript';
+import type { AgentEvent } from '@cindy/maker-core';
 
 const sourcePath = resolve(__dirname, '..', 'maker-ipc', 'register.ts');
 const source = readFileSync(sourcePath, 'utf8').replace(/\r\n?/g, '\n');
@@ -23,6 +25,66 @@ const goalStorageSourcePath = resolve(__dirname, '..', 'goal-host', 'storage.ts'
 const goalStorageSource = readFileSync(goalStorageSourcePath, 'utf8').replace(/\r\n?/g, '\n');
 
 describe('maker:event hot path ordering', () => {
+  it('finishes mandatory runtime cleanup when optional remote refresh throws at an owner boundary', () => {
+    const start = source.indexOf('function cleanupClosedSessionRuntime(');
+    const code = source.slice(start, source.indexOf('\n// Keep holder reads', start));
+    const js = transpileModule(code, { compilerOptions: { target: ScriptTarget.ES2022 } }).outputText;
+    const cleared = vi.fn();
+    const deps = {
+      pendingCredentialSwitchHolder: null, deferredCodexRestartHolder: null,
+      agentInputCoordinatorHolder: null,
+      refreshRemoteCodexMcpOnTurnSettledHolder: () => { throw new Error('App session is switching'); },
+      gitSnapshotCoordinator: { onSessionClosed: vi.fn() },
+      clearOrcaMcpHydrated: vi.fn(), knownNonOrcaSessionIds: new Set(),
+      lastReportedCostUsdBySession: new Map(), lastReportedModelUsageBySession: new Map(),
+      turnModelPromiseBySession: new Map(), turnUsageContextBySession: new Map(),
+      productTurnWallClockTracker: { clear: cleared }, productTurnUsageTargetTracker: { clear: vi.fn() },
+      claudeOutputLagTimingGuard: { clear: vi.fn() }, clearClaudeSessionBackgroundActivity: vi.fn(),
+      clearSessionPersistState: vi.fn(), clearSubagentObservationRewindState: () => true,
+      handleAgentIslandSessionClosedAfterCleanup: vi.fn(), log: { warn: vi.fn() },
+    };
+    const cleanup = new Function(...Object.keys(deps), `${js}; return cleanupClosedSessionRuntime;`)(...Object.values(deps));
+    expect(() => cleanup({ id: 'departing-task' })).not.toThrow();
+    expect(cleared).toHaveBeenCalledWith('departing-task');
+    expect(deps.clearSessionPersistState).toHaveBeenCalledWith('departing-task');
+    expect(deps.handleAgentIslandSessionClosedAfterCleanup).toHaveBeenCalledWith('departing-task', 'process-closed');
+  });
+
+  it('does not read the guarded Maker during account-boundary remote refresh', () => {
+    const start = source.indexOf('refreshRemoteCodexMcpOnTurnSettledHolder = (sessionId: string): void => {');
+    const prefix = source.slice(start, source.indexOf('    const remoteHostId', start));
+    const js = transpileModule(`let refreshRemoteCodexMcpOnTurnSettledHolder; ${prefix}\n};`, {
+      compilerOptions: { target: ScriptTarget.ES2022 },
+    }).outputText;
+    const getSession = vi.fn(() => { throw new Error('App session is switching'); });
+    const refresh = new Function('isAppSessionBoundaryPending', 'maker', `${js}; return refreshRemoteCodexMcpOnTurnSettledHolder;`)(() => true, { getSession });
+    expect(() => refresh('departing-task')).not.toThrow();
+    expect(getSession).not.toHaveBeenCalled();
+  });
+  it.each([undefined, null, { text: 'Restart Cindy before using Pi again.', isFinal: true }])(
+    'strips Host recovery metadata from the boundary copy with data %j',
+    (data) => {
+      // Execute the actual boundary function without booting Desktop/register side effects.
+      const start = source.indexOf('function redactEventForRenderer');
+      const code = source.slice(start, source.indexOf('\nfunction ', start + 1));
+      const js = transpileModule(code, {
+        compilerOptions: { target: ScriptTarget.ES2022 },
+      }).outputText;
+      const redact = new Function(`${js}; return redactEventForRenderer;`)() as
+        (event: AgentEvent) => AgentEvent;
+      const original: AgentEvent = {
+        type: 'text', source: 'pi', data, runtimeRecovery: true,
+        sessionInstanceId: 'runtime', sessionTurnGeneration: 7,
+      };
+      const boundary = redact(original);
+      expect(boundary).toEqual({ type: 'text', source: 'pi', data });
+      expect(original.runtimeRecovery).toBe(true);
+      expect(original.sessionInstanceId).toBe('runtime');
+      expect(original.sessionTurnGeneration).toBe(7);
+      expect(boundary).not.toBe(original);
+    },
+  );
+
   it('keeps complete PI Subagent returns on the host side of the event boundary', () => {
     const redactor = source.slice(
       source.indexOf('function redactEventForRenderer'),
@@ -52,6 +114,7 @@ describe('maker:event hot path ordering', () => {
     expect(wireSessionSource).toMatch(
       /registration\.disposers\.push\(\s*session\.onEvent\(\(event: AgentEvent\) => \{/,
     );
+    expect(wireSessionSource).toContain('session.onRuntimeRecovery(emitWiredSessionEvent)');
     expectOrder(
       wireSessionSource,
       'sessionBindings.attachStatusListener(registration);',
@@ -117,7 +180,7 @@ describe('maker:event hot path ordering', () => {
     expectOrder(
       continuation,
       'productTurnWallClockTracker.preserveForContinuation(session.id);',
-      'const sendResult = await session.send(',
+      'const sendResult = await session.sendHostTurnContinuation(',
     );
   });
 
@@ -383,7 +446,7 @@ describe('maker:event hot path ordering', () => {
     );
     expect(source).toContain('out.push({ request: entry.request, persistId: entry.persistId });');
     expect(source).toContain(
-      'taken.push({ requestId, request: entry.request, resolve: entry.resolve });',
+      'taken.push({ requestId, request: entry.request, resolve:',
     );
   });
 
@@ -418,30 +481,37 @@ describe('maker:event hot path ordering', () => {
     );
   });
 
-  it('preserves only a waiting Codex reconnect-stall retry across its exact provider rebuild', () => {
+  it('preserves continuation-only retry across its exact unexpected provider rebuild', () => {
     const closedBlock = extractSessionCloseAdaptersSource();
 
     expect(source).toContain(
-      'const pendingCodexReconnectStalledRebuilds = new WeakMap<Session, number>();',
+      'const pendingContinuationOnlyAutoResumeRebuilds = new WeakMap<Session, number>();',
     );
-    expect(source).toContain("if (signals.reason === 'codex_reconnect_stalled') {");
+    expect(source).toContain('if (isAcceptedTurnContinuationOnlyReason(signals.reason)) {');
     expect(source).toContain(
-      'pendingCodexReconnectStalledRebuilds.set(runtimeSession, decision.attemptToken);',
+      'pendingContinuationOnlyAutoResumeRebuilds.set(runtimeSession, decision.attemptToken);',
     );
-    expect(source).toContain("if (closeReason !== 'unexpected') return false;");
+    expect(source).toContain('shouldPreserveWaitingContinuationOnlyAutoResume({');
+    expect(source).toContain('leasedAttemptToken,');
     expect(source).toContain(
       'interruptedTurnAutoResumeGuard.isCurrentAttempt(session.id, attemptToken)',
     );
-    expect(source).toContain('coordinator.getAutoResumeAttemptToken(session.id) !== attemptToken');
-    expect(source).toContain('autoResumeBookkeeping.hasWaitingSchedule(session.id, attemptToken)');
+    expect(source).toContain('autoResumeBookkeeping.hasLiveSchedule(session.id, attemptToken)');
+    expect(source).toContain('coordinator?.hasQueuedAutoResume(session.id)');
+    expect(source).toContain('isContinuationOnly:');
+    expect(source).toContain('coordinator?.isContinuationOnlyAutoResume(session.id) === true');
+    expect(source).toContain('coordinator?.isContinuationOnlyAutoResume(session.id) !== true');
     expect(closedBlock).toContain(
-      'shouldPreserveCodexReconnectStalledAutoResume(session, closeReason)',
+      'shouldPreserveContinuationOnlyAutoResume(session, closeReason)',
     );
     expect(closedBlock).toContain(
       'shouldPreserveSessionRuntimeFallbackAutoResume(session, closeReason)',
     );
     expect(closedBlock).toContain('runSessionCloseCleanup(context.preserveAutoResumeIntent, {');
     expect(closedBlock).toContain('autoResumeBookkeeping.teardown(session.id);');
+    expect(source).toMatch(/onBind: \(session: WiredSession\) => \{\s*advanceSessionTurnBoundaryGeneration\(session.id\);\s*bindContinuationOnlyAutoResumeLease\(session\);/);
+    expect(source).toContain('onUnconfirmedAutoResumeTurn:');
+    expect(source).toContain('autoResumeBookkeeping.abandonUnconfirmedPersistedResume(');
   });
 
   it('clears Agent Island after mandatory closed-session cleanup', () => {
@@ -608,7 +678,7 @@ describe('maker:event hot path ordering', () => {
       'const goalPause = pauseGoalBeforeExplicitStop(sid);',
       'inputCoordinator.stop(',
     );
-    expectOrder(inputStopSource, 'inputCoordinator.stop(', 'await goalPause;');
+    expectOrder(inputStopSource, 'inputCoordinator.stop(', 'await Promise.all([goalPause, makeInterrupted]);');
     expect(goalPauseStart).toBeGreaterThanOrEqual(0);
     expect(goalPauseSource).toContain('catch (err)');
     expect(goalPauseSource).toContain('await Promise.resolve(observer(sessionId));');

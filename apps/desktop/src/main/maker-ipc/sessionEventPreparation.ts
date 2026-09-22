@@ -16,12 +16,14 @@ import { noteSubagentObservationTurnStarted } from '../subagentObservationRewind
 import { persistSessionFields } from '../localDb/ipc/sessions.js';
 
 import { createLogger } from '../logger.js';
+import { t } from '../i18n.js';
 import type { GitSnapshotCoordinator } from '../git-snapshot/gitSnapshotCoordinator.js';
 import { markSessionTurnStarted } from '../localDb/sessionActiveTurn.js';
 import {
   backgroundTurnPredatesSessionClear,
   noteAgentMeta,
   noteTurnStarted,
+  onStandaloneTextEvent,
 } from '../messagePersistBroadcaster.js';
 import { isCcMgrUpgradeInFlight } from '../remote-ssh/index.js';
 import { AgentInputCoordinator } from './agent-input-coordinator.js';
@@ -143,6 +145,33 @@ export function prepareSessionEvent(
       sessionTurnGeneration: event.sessionTurnGeneration ?? null,
       sessionInstanceId: event.sessionInstanceId ?? null,
     });
+    return;
+  }
+  // Post-terminal Host recovery bypasses the model. Localize before both
+  // persistence and renderer delivery, without mutating the internal receipt.
+  if (event.runtimeRecovery && event.source === 'pi' && event.type === 'text') {
+    event = {
+      ...event,
+      data: {
+        ...(event.data as Record<string, unknown>),
+        text: t('settings.piPackages.failure.runtimeRetirementFailed'),
+      },
+    };
+  }
+  if (event.type === 'text' && event.standaloneText === true) {
+    // Deliver through the existing persisted-row channel only. Sending a text
+    // event as well would let older renderers adopt the notice as their active
+    // assistant stream and overwrite/misdate the next model reply.
+    const redacted = deps.redactEventForRenderer(event);
+    const text = (redacted.data as { text?: unknown } | null)?.text;
+    const inputId = deps.agentInputCoordinatorHolder?.getActiveInputClientId(session.id, event.sessionTurnGeneration);
+    // Private-message visibility is still owned by the accepted input, even
+    // though the notice is independent of the model's reply/usage state.
+    const privateReply = inputId ? inputId.startsWith('bot-dm:') : event.agentMeta?.botPrivateReply;
+    if (typeof text === 'string') {
+      onStandaloneTextEvent(session.id, text,
+        typeof privateReply === 'boolean' ? { botPrivateReply: privateReply } : null);
+    }
     return;
   }
   // 自动续跑的 pending 不能只靠 status(isRunning=true) 清理：Pi/Claude 的

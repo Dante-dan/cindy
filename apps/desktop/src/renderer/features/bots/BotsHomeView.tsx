@@ -1,6 +1,9 @@
+import { shouldShowOpenPathError } from '../../../shared/openPathResult';
 import { ConnectProviderCard } from '@/components/onboarding/ConnectProviderCard';
 import { useProviderOnboarding } from '@/hooks/useProviderOnboarding';
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { MainViewHistoryContext } from '@/contexts/MainViewHistoryContext';
+import { BotPortraitPicker } from './BotPortraitPicker';
 import {
   ArrowLeft,
   Bot,
@@ -27,6 +30,7 @@ import type { ConversationSearchJump } from '../../../shared/conversationSearchJ
 import { useRegisterContentHeader } from '../feature-context';
 import {
   canonicalBotSessionId,
+  hasLoadedBotProfiles,
   chooseBotAvatar,
   retryBotInvitation,
   setCanonicalBotSession,
@@ -37,10 +41,11 @@ import {
   type BotCapabilities,
   type BotProfile,
 } from './botStore';
-import { BotCreateMenu } from './BotCreateMenu';
+import { BotRosterView } from './BotRosterView';
 import { BotAvatar } from './BotAvatar';
 import { BotBasicProfileFields } from './BotBasicProfileFields';
 import {
+  botEntryTarget,
   createBotCanonicalSessionWithRetry,
   shouldDeferCanonicalBotSessionNavigation,
   withBotCanonicalSessionReadTimeout,
@@ -302,7 +307,7 @@ export function BotSettings({
     );
   }
 
-  const handleChooseAvatar = async () => {
+  const handleChooseAvatar = async (portrait?: string) => {
     if (avatarInFlight.current) return;
     avatarInFlight.current = true;
     setAvatarBusy(true);
@@ -310,7 +315,9 @@ export function BotSettings({
     try {
       await autosave.flush();
       if (autosave.isDirty()) return;
-      const next = await chooseBotAvatar(bot.id);
+      const next = portrait
+        ? await chooseBotAvatar(bot.id, portrait.split(',')[1])
+        : await chooseBotAvatar(bot.id);
       if (!next) return;
       setAvatar(next.avatar);
       setAvatarColor(next.avatarColor);
@@ -321,6 +328,27 @@ export function BotSettings({
       setAvatarBusy(false);
     }
   };
+
+  const avatarPicker = (
+    <BotPortraitPicker
+      disabled={avatarBusy}
+      onChange={portrait => void handleChooseAvatar(portrait)}
+      onUpload={() => void handleChooseAvatar()}
+      trigger={
+        <button
+          type="button"
+          disabled={avatarBusy}
+          aria-label={t('bots.profile.changeAvatar')}
+          className="relative rounded-full outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] disabled:opacity-50"
+        >
+          <BotAvatar bot={{ name, avatar, avatarColor }} size="xl" />
+          <span className="absolute bottom-0 right-0 flex h-6 w-6 items-center justify-center rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)]">
+            <Camera size={12} aria-hidden="true" />
+          </span>
+        </button>
+      }
+    />
+  );
 
   if (
     bot.invitation &&
@@ -339,9 +367,9 @@ export function BotSettings({
     ['advanced', FolderOpen, t('bots.homeFolder.title')],
   ] as const;
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 pb-8 sm:px-7">
+    <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 pb-8">
       <div className="mx-auto w-full max-w-xl">
-        <div className="flex min-h-12 items-center justify-between gap-3">
+        <div className="flex min-h-12 flex-wrap items-center justify-between gap-3">
           {page !== 'home' ? (
             <div className="flex min-w-0 items-center gap-2">
               <button
@@ -387,18 +415,7 @@ export function BotSettings({
         {page === 'home' ? (
           <>
             <div className="flex flex-col items-center pb-6 pt-2 text-center">
-              <button
-                type="button"
-                onClick={() => void handleChooseAvatar()}
-                disabled={avatarBusy}
-                aria-label={t('bots.profile.changeAvatar')}
-                className="relative rounded-full outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] disabled:opacity-50"
-              >
-                <BotAvatar bot={{ name, avatar, avatarColor }} size="xl" />
-                <span className="absolute bottom-0 right-0 flex h-6 w-6 items-center justify-center rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)]">
-                  <Camera size={12} />
-                </span>
-              </button>
+              {avatarPicker}
               <h1 className="mt-2 max-w-full break-words text-18 font-medium text-[var(--text-primary)]">
                 {name}
               </h1>
@@ -437,8 +454,7 @@ export function BotSettings({
           <BotBasicProfileFields
             centeredAvatar
             value={{ name, description, avatar, avatarColor }}
-            avatarBusy={avatarBusy}
-            onChooseAvatar={() => void handleChooseAvatar()}
+            avatarControl={avatarPicker}
             onChange={(next, kind) => {
               setName(next.name);
               setDescription(next.description);
@@ -578,7 +594,7 @@ export function BotSettings({
                     if (!bot.homeDir) return;
                     setFolderError(null);
                     void window.electronAPI.openPath(bot.homeDir).then((result) => {
-                      if (!result.success)
+                      if (shouldShowOpenPathError(result))
                         setFolderError(result.error ?? t('bots.homeFolder.openFailed'));
                     });
                   }}
@@ -636,7 +652,10 @@ export function BotsHomeView() {
   const [unavailableCanonicalId, setUnavailableCanonicalId] = useState<string | null>(null);
   const [isCreatingSession, setIsCreatingSession] = useState(false);
   const [createSessionError, setCreateSessionError] = useState<unknown>(null);
-  const selectedBot = useMemo(() => bots.find((bot) => bot.id === botId) ?? null, [botId, bots]);
+  const history = useContext(MainViewHistoryContext);
+  const selectedBot = useMemo(() => bots.find((bot) => bot.id === botId && bot.status !== 'deleting') ?? null, [botId, bots]);
+  const profilesLoaded = hasLoadedBotProfiles();
+  const entryTarget = botEntryTarget(bots, history?.current.lastBotId);
   // An empty profile projection can predate the newly connected source/runtime.
   // Only followers may resume from live defaults; Main resolves the actual route
   // when opening the canonical task without writing a per-Bot override.
@@ -708,24 +727,21 @@ export function BotsHomeView() {
   }, [addRequested, navigate]);
 
   useEffect(() => {
-    if (addRequested) return;
-    // 已经有伙伴，但 URL 指着一个不存在的（刚被删掉 / 手改过的链接）：回伙伴总览，
-    // 由下面那条重定向落到第一个伙伴。以前这里会停在一页空态，现在会停在 spinner
-    // ——两个都不是答案，直接把人送回有东西的地方。
-    if (botId && bots.length > 0 && !selectedBot) {
-      navigate('/bots', { replace: true });
-      return;
-    }
-    if (!botId && bots[0]) {
-      const target = bots.find((bot) => bot.status !== 'archived') ?? bots[0];
+    if (addRequested || !profilesLoaded || selectedBot) return;
+    // Wait for the authoritative roster before deciding a remembered/deep-linked
+    // profile is gone. Missing Cindy is not an empty roster.
+    const target = entryTarget;
+    if (target) {
       const query = searchParams.toString();
       const nextQuery =
         target.status !== 'active'
           ? new URLSearchParams({ ...Object.fromEntries(searchParams), settings: '1' }).toString()
           : query;
       navigate(`/bots/${target.id}${nextQuery ? `?${nextQuery}` : ''}`, { replace: true });
+    } else if (botId) {
+      navigate('/bots', { replace: true });
     }
-  }, [addRequested, botId, bots, navigate, searchParams, selectedBot]);
+  }, [addRequested, botId, entryTarget, profilesLoaded, navigate, searchParams, selectedBot]);
 
   // 顶栏注入区:伙伴页保留「头像 + 名字」入口;设置页升级成
   // 「头像 + 名字 > 设置」面包屑,让当前页归属一眼可见。
@@ -754,7 +770,7 @@ export function BotsHomeView() {
 
   useEffect(() => {
     if (needsProviderConnection || needsModelSelection) return;
-    if (selectedBot?.invitation && selectedBot.invitation.stage !== 'ready') return;
+    if (selectedBot?.invitation && selectedBot.invitation.stage !== 'ready' && !selectedBot.canonicalSessionId) return;
     if (!selectedBot || shouldDeferCanonicalBotSessionNavigation({ settingsOpen, addRequested }))
       return;
     if (selectedBot.status !== 'active') {
@@ -874,24 +890,8 @@ export function BotsHomeView() {
     );
   }
 
-  if (!selectedBot) {
-    if (bots.length === 0)
-      return (
-        <div className="flex flex-1 items-center justify-center">
-          <BotCreateMenu label={t('bots.add')} />
-        </div>
-      );
-    return (
-      <main className="flex h-full items-center justify-center bg-[var(--surface)]" role="main">
-        <Spinner
-          size={20}
-          className="text-[var(--text-tertiary)]"
-          role="status"
-          aria-label={t('ccAgent.common.loading')}
-        />
-      </main>
-    );
-  }
+  if (!selectedBot && (!profilesLoaded || entryTarget)) return <main className="flex h-full items-center justify-center"><Spinner size={20} /></main>;
+  if (!selectedBot) return <BotRosterView inline />;
 
   if (needsModelSelection) {
     return (
@@ -923,10 +923,10 @@ export function BotsHomeView() {
     );
   }
 
-  if (selectedBot.invitation && selectedBot.invitation.stage !== 'ready')
+  if (selectedBot.invitation && selectedBot.invitation.stage !== 'ready' && !selectedBot.canonicalSessionId)
     return (
       <main className="flex h-full items-center justify-center px-6" role="main">
-        <BotInvitationWelcome bot={selectedBot} />
+        {selectedBot.invitation.stage === 'failed' ? <button type="button" className="h-10 rounded-full px-5 text-13 hover:bg-[var(--surface-hover)]" onClick={() => void retryBotInvitation(selectedBot.id)}>{t('commonUi.retry')}</button> : <Spinner size={20} />}
       </main>
     );
 

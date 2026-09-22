@@ -1,4 +1,7 @@
+import { registerCodexTextOnlyPolicy } from './codex-text-only-policy.js';
 import { readDisabledSkillPaths } from '../skillhub/activationPreferences';
+import { cindyMakeManager } from '../cindy-make/manager.js';
+import { makeSourceRoot } from '../cindy-make/sourcePaths.js';
 import { clearCodexAccountUsageSnapshot } from '../usageBroadcaster.js';
 /**
  * apps/desktop/src/main/maker-host
@@ -22,6 +25,7 @@ import { app, BrowserWindow } from 'electron';
 import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import fsSync from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 import {
@@ -51,8 +55,12 @@ import { listCustomMcpRuntimeGenerations } from './custom-mcp-store.js';
 
 import { createMessage } from '../localDb/ipc/messages.js';
 import { createCindyMakeMcpProvider } from '../cindy-make/mcpProvider.js';
+import { captureMakeHistoryStore } from '../cindy-make/historyOwner.js';
+import { captureMakeHistoryCompletion } from '../cindy-make/historyCapture.js';
+import { broadcastMakeRemoteChanged } from '../cindy-make/remoteBroadcast.js';
+import { captureDataOwnerBroadcastScope, isDataOwnerBroadcastScopeCurrent } from '../device-link/broadcast-tap.js';
 import {
-  commitCindyMakeChanges,
+  collectCindyMakeChanges,
   createCindyMakeCompletionTracker,
 } from '../cindy-make/completion.js';
 import { isCindyMakeWorktreePath } from '../cindy-make/taskWorkspace.js';
@@ -61,6 +69,7 @@ import { createMakeToolchainEnvironment } from '../cindy-make/toolchainEnvironme
 import { getMessagesForHistory } from '../localDb/chatHistoryReader.js';
 import { getWorkerLink, updateWorkerStatus } from '../localDb/orcaTeamStore.js';
 import { cleanupSessionTempAttachments } from '../maker-ipc/normalizeAttachments.js';
+import { resolveGhostFsSessionSnapshot } from '../maker-ipc/ghostFsSessionSnapshot.js';
 import { markKnownOrcaWorkerSession } from '../maker-ipc/orcaManualInterrupt.js';
 import { markOrcaMcpHydratedIfNeeded } from '../maker-ipc/orcaMcpHydrationCache.js';
 import { preparePersistedOrcaSessionStart } from '../maker-ipc/orcaSessionStartOptions.js';
@@ -125,7 +134,7 @@ import { createToolResultImageDescriptor } from '../vision-bridge/tool-result-im
 import * as blobStore from '../cindy-media/blobStore.js';
 import { buildPiVisionBridgeEnv } from '../vision-bridge/pi-vision-bridge-env.js';
 import { resolveVisionBackendRoute, setVisionGatewayKeyReader } from './provider-route.js';
-import { resolveSessionCcDebugFile } from '../logger.js';
+import { resolveSessionCcDebugFile, trackSessionCcDebugFile } from '../logger.js';
 import { resetProviderModelAutoRefreshCooldowns } from './provider-model-auto-refresh.js';
 import { getThinkingEnabledFromMemory } from './newMakerDefaultsCache.js';
 import { getSessionFastMode } from './session-effort-store.js';
@@ -168,7 +177,7 @@ import {
 import { buildPiAgent } from './pi-host.js';
 import {
   captureLocalPiPackageRuntimeInvalidationSnapshot,
-  invalidateLocalPiPackageRuntimeSnapshot,
+  settleLocalPiPackageRuntimeSnapshot,
   type PiPackageRuntimeInvalidationSnapshot,
 } from './pi-package-runtime-invalidation.js';
 import { clearChatgptBridgeCredentialCache } from './anthropic-responses-bridge-host.js';
@@ -334,7 +343,7 @@ import {
   getSessionProvider,
   hydrateSessionProvider,
 } from './session-provider-store.js';
-import { prepareLocalCodexCredentialModeSwitch } from './codex-credential-switch.js';
+import { CodexCredentialModeSwitchBusyError, prepareLocalCodexCredentialModeSwitch } from './codex-credential-switch.js';
 import { createDesktopOrcaTeamStoreAdapter } from './orcaTeamStoreAdapter.js';
 import { broadcastOrcaWorkerChanged } from './orcaWorkerBroadcast.js';
 import {
@@ -788,6 +797,14 @@ function createDesktopBotCapabilityService() {
   });
 }
 
+export function listBotCreationCapabilities(input: Parameters<ReturnType<typeof createBotCapabilityService>['forCreation']>[0]) {
+  return createDesktopBotCapabilityService().forCreation(input);
+}
+
+export function listBotSettingsCapabilities(input: Parameters<ReturnType<typeof createBotCapabilityService>['forSettings']>[0]) {
+  return createDesktopBotCapabilityService().forSettings(input);
+}
+
 /** Settings IPC reuses the model-side catalog at its save boundary. */
 export async function validateBotCapabilityAdditions(update: BotCapabilityUpdate): Promise<void> {
   await createDesktopBotCapabilityService().validateAdditions(update);
@@ -903,7 +920,7 @@ export function getMaker(): Maker {
     const pluginRegistry = createPluginRegistry();
 
     const resolveIOSSimulatorAccess = (context?: IOSSimulatorMcpCallContext) => {
-      const workingDir = context?.workingDir?.trim() || null;
+      const workingDir = context?.workingDir?.trim() ? context.workingDir : null;
       // Product access is the installed plugin (enable + workdir disable).
       // Leftover Tools-page `builtinTools['ios-simulator']` must not gate runtime.
       return getIOSSimulatorPluginAccessDecision(workingDir);
@@ -922,6 +939,17 @@ export function getMaker(): Maker {
       pluginRegistry,
       resolveIOSSimulatorAccess,
       invokeRemote: remoteInvoke,
+      isCurrentLocalSessionInstance: (
+        sessionId: string,
+        sessionInstanceId: string | undefined,
+      ) => {
+        const session = _maker?.getSession(sessionId);
+        return Boolean(sessionInstanceId
+          && session
+          && session.instanceId === sessionInstanceId
+          && session.getStatus() === 'active'
+          && !session.remoteHostId);
+      },
       // 只读活跃 Session 的运行时真相。权限切换是 runtime-first、DB-second，
       // 因此插件过户自动放行不得回退 sessions.permission_mode；会话不再 active
       // 时同样 fail closed。闭包在 MCP tool-call 时执行，此时 _maker 已装配完成。
@@ -929,17 +957,13 @@ export function getMaker(): Maker {
         if (!sessionInstanceId) return null;
         const session = _maker?.getSession(sessionId);
         if (!session || session.instanceId !== sessionInstanceId) return null;
-        const permission = session.stablePermissionModeState;
-        if (!permission) return null;
+        const snapshot = resolveGhostFsSessionSnapshot((id) => _maker?.getSession(id), sessionId, sessionInstanceId);
         return {
-          permissionMode: permission.mode,
+          permissionMode: session.stablePermissionModeState?.mode ?? null,
           remoteHostId: session.remoteHostId,
-          reviewAction: async (action: import('@cindy/maker-core').ReviewableAction) => {
-            const decision = await session.reviewHostPermissionAction(action);
-            return _maker?.getSession(sessionId) === session
-              ? decision
-              : { verdict: 'block' as const, reason: 'The task instance changed during review.' };
-          },
+          isCurrent: () => !!snapshot && !snapshot.planModeEnabled && snapshot.permissionMode !== 'plan'
+            && snapshot.isCurrent?.() === true,
+          reviewAction: snapshot?.reviewAction,
         };
       },
     };
@@ -1063,26 +1087,39 @@ export function getMaker(): Maker {
       collectFacts: async (sessionId) => {
         const userData = app.getPath('userData');
         const meta = await _maker?.getSessionMeta(sessionId);
-        // Only a worktree Cindy created for this task may be committed on the
-        // task's behalf; anything else is not a Cindy Make workspace.
+        // Finalize only the managed task branch; official/personal integration is a separate action.
         if (!meta?.workDir || !isCindyMakeWorktreePath(userData, meta.workDir)) {
           throw new Error('session working directory is not a Cindy Make worktree');
         }
         const env = await createMakeToolchainEnvironment(userData);
-        const title = meta.title?.trim();
-        return commitCindyMakeChanges(
-          (args) =>
-            runSourceGit(env.processEnvironment(), args, meta.workDir, AbortSignal.timeout(60_000)),
-          `Cindy Make: ${title || sessionId}`,
+        return cindyMakeManager.withProject(makeSourceRoot(userData), () =>
+          collectCindyMakeChanges(
+            (args, cwd, indexFile) =>
+              runSourceGit(
+                { ...env.processEnvironment(), ...(indexFile ? { GIT_INDEX_FILE: indexFile } : {}) },
+                args, cwd, AbortSignal.timeout(60_000),
+              ),
+            userData,
+            meta.workDir,
+          ),
         );
       },
-      persist: (sessionId, meta) =>
-        createMessage(sessionId, {
-          clientId: randomUUID(),
+      persist: async (sessionId, meta) => {
+        const scope = captureDataOwnerBroadcastScope();
+        const history = captureMakeHistoryStore();
+        const session = await _maker?.getSessionMeta(sessionId);
+        if (!isDataOwnerBroadcastScopeCurrent(scope)) return;
+        const clientId = randomUUID();
+        await createMessage(sessionId, {
+          clientId,
           role: 'assistant',
           content: '',
           agentMeta: { cindyMakeCompletion: meta },
-        }).then(() => undefined),
+        });
+        if (isDataOwnerBroadcastScopeCurrent(scope) && session?.workDir)
+          captureMakeHistoryCompletion(history, path.basename(session.workDir), clientId, meta);
+        broadcastMakeRemoteChanged(sessionId, scope);
+      },
       logger: desktopMakerLogger,
     });
     const cindyMakeProvider = createCindyMakeMcpProvider({
@@ -1134,6 +1171,7 @@ export function getMaker(): Maker {
       // 每个 session 的 cc 子进程 debug 写到 sessions/<id>/cc-debug.raw.log (logger 拼路径
       // + mkdir), tailer 再归一化汇入该 session 的 <date>.ndjson。
       resolveCcDebugFile: resolveSessionCcDebugFile,
+      trackCcDebugFile: trackSessionCcDebugFile,
       mcpProviders: claudeMcpProviders,
       capabilityRouting: DESKTOP_CAPABILITY_ROUTING_POLICY,
       makerMemory: makerMemoryManager,
@@ -1648,7 +1686,7 @@ export function getMaker(): Maker {
         }
         const browserCompanion = isControlPlane || isReview
           ? null
-          : await prepareCodexBrowserCompanion({ codexHome: effectiveCodexHome });
+          : await prepareCodexBrowserCompanion({ codexHome: ctx.runtimeCodexHome ?? effectiveCodexHome });
         const browserCompanionSpawnConfig =
           resolveCodexBrowserCompanionSpawnConfig(browserCompanion);
         mcpExtraArgs.push(...browserCompanionSpawnConfig.extraArgs);
@@ -1860,6 +1898,7 @@ export function getMaker(): Maker {
       },
       withCodexMcpDiscoveryContext: (ctx, run) =>
         withCodexMcpDiscoveryContext({ ...ctx, agentKind: 'codex' }, run),
+      registerCodexTextOnlyPolicy,
       registerCodexMcpThreadContext: ({
         threadId,
         sessionId,
@@ -1897,14 +1936,28 @@ export function getMaker(): Maker {
       prepareCodexResumeSession: async (threadId) => {
         if (!getActiveAppSession().dataOwnerId) return prepareExternalCodexSessionForResume(threadId);
         const locations = new CodexThreadLocations(path.join(codexAccountHome('thread-index'), 'locations'));
-        return await locations.read(threadId) ?? await prepareExternalCodexSessionForResume(threadId);
+        return locations.prepareResume(threadId, prepareExternalCodexSessionForResume);
       },
-      resolveCodexThreadStorageHome: async (threadId) => {
+      resolveCodexThreadStorage: async (threadId) => {
         if (!getActiveAppSession().dataOwnerId) return;
-        return new CodexThreadLocations(path.join(codexAccountHome('thread-index'), 'locations')).readStorageHome(threadId, {
+        const ownerScope = activeOwnerScopeKey();
+        const storage = await new CodexThreadLocations(path.join(codexAccountHome('thread-index'), 'locations')).readStorage(threadId, {
           home: getCodexHome(),
           prepare: prepareExternalCodexSessionForResume,
         });
+        if (activeOwnerScopeKey() !== ownerScope) throw new Error('Codex history owner changed during preparation');
+        return storage;
+      },
+      createCodexAuthTokenReader: (providerId) => {
+        const ownerScope = activeOwnerScopeKey();
+        return async () => {
+          if (isAppSessionBoundaryPending() || activeOwnerScopeKey() !== ownerScope) throw new Error('Codex authentication owner changed');
+          const state = await desktopCodexAuthAdapter.getState({ credentialMode: 'oauth-bearer', providerId });
+          if (isAppSessionBoundaryPending() || activeOwnerScopeKey() !== ownerScope) throw new Error('Codex authentication owner changed');
+          const credentials = state.authenticated ? desktopCodexAuthAdapter.readOneShotCreds(providerId) : null;
+          if (!credentials) throw new Error('Codex account credentials are unavailable');
+          return { accessToken: credentials.accessToken, chatgptAccountId: credentials.accountId };
+        };
       },
       recordCodexThreadLocation: async (threadId, storageHome, rolloutPath) => {
         if (!rolloutPath || !getActiveAppSession().dataOwnerId) return;
@@ -1946,6 +1999,11 @@ export function getMaker(): Maker {
       // 远端 transport — SSH 连接已有 ConnectionPool (remote-ssh feature 起的) 管,
       // 这里包一层把 RemoteHost + SshDaemonTransport 装起来。
       // 远端机器没在 pool / 未连接 → 抛错, CodexAgent 把它当 startSession 失败传上去。
+      getRemoteAgentFileOps: (remoteHostId) => {
+        const remoteHost = getRemoteSshPool().get(remoteHostId);
+        if (!remoteHost) throw new Error(`remote SSH host "${remoteHostId}" is not connected`);
+        return createRemotePiFileOps(remoteHost);
+      },
       getRemoteCodexTransport: (remoteHostId) => {
         const remoteHost = getRemoteSshPool().get(remoteHostId);
         if (!remoteHost) {
@@ -2178,9 +2236,8 @@ export function getMaker(): Maker {
       mcpProviders: piMcpProviders,
       makerMemory: makerMemoryManager,
       // Fence in-flight startups at the durable package edge, but do not close
-      // the current caller before maker-core queues its host-owned receipt and
-      // sends the extension response. The settled callback below retires only
-      // the exact local runtimes captured at the mutation's latest byte edge.
+      // the current caller. The settled callback requests retirement of the
+      // captured runtimes only after their current product turns settle.
       onPiManagedPackageMutationCommitted: async (phase = 'commit') => {
         const maker = _maker;
         if (!maker) return;
@@ -2194,7 +2251,7 @@ export function getMaker(): Maker {
           pendingPiPackageRuntimeSnapshots.push(snapshot);
         }
       },
-      onPiManagedPackageMutationSettled: async (callerSessionId, publishOutcome) => {
+      onPiManagedPackageMutationSettled: async (callerSessionId, publishOutcome, createRetirementFailureEvent) => {
         const partial = () => publishOutcome({
           runtimeConvergence: 'partial',
           recoveryAction: 'restart-cindy-to-refresh-packages',
@@ -2205,34 +2262,9 @@ export function getMaker(): Maker {
           partial();
           return;
         }
-        const callerEntries = snapshot.entries.filter(({ session }) => session.id === callerSessionId);
-        const siblingEntries = snapshot.entries.filter(({ session }) => session.id !== callerSessionId);
-        let siblingFailed = false;
-        try {
-          const siblingResult = await invalidateLocalPiPackageRuntimeSnapshot(
-            maker,
-            { entries: siblingEntries },
-          );
-          siblingFailed = siblingResult.failedSessionIds.length > 0;
-        } catch {
-          siblingFailed = true;
-        }
-        const initiallyPartial = siblingFailed
-          || callerEntries.length === 0
-          || callerEntries.some(({ metadataFailed }) => metadataFailed);
-        if (initiallyPartial) partial();
-        else publishOutcome({ runtimeConvergence: 'complete' });
-
-        if (callerEntries.length === 0) return;
-        try {
-          const callerResult = await invalidateLocalPiPackageRuntimeSnapshot(
-            maker,
-            { entries: callerEntries },
-          );
-          if (!initiallyPartial && callerResult.failedSessionIds.length > 0) partial();
-        } catch {
-          if (!initiallyPartial) partial();
-        }
+        // The receipt has been sent, not necessarily consumed by Pi. Keep the
+        // caller and busy siblings alive until their owned turn settles.
+        await settleLocalPiPackageRuntimeSnapshot(maker, snapshot, callerSessionId, publishOutcome, createRetirementFailureEvent);
       },
       getGhostRosterPrompt,
       // 仅为命中视觉桥目标的 Pi 模型注册 Layer C 工具。
@@ -2908,12 +2940,15 @@ export async function waitForInitialCustomMcpRefresh(): Promise<void> {
  *
  * null-safe: getMaker() 还没构造过 codexAgent 时直接 no-op (此时也没进程要收)。
  */
-export async function prepareCodexForAuthModeChange(): Promise<void> {
+export async function prepareCodexForAuthModeChange(options: { allLocalHosts?: boolean } = {}): Promise<void> {
   if (_codexCredentialChangeGuard) {
     throw new Error('Codex credential mode change is already in progress');
   }
   const guard = _codexAgent
-    ? await _codexAgent.beginLocalHostCredentialChange('Codex desktop auth mode changed')
+    ? await _codexAgent.beginLocalHostCredentialChange('Codex desktop auth mode changed', {
+      ...options,
+      busyError: () => new CodexCredentialModeSwitchBusyError([]),
+    })
     : null;
   let prepared = false;
   // 软重启存活的本地 codex 会话。busy session 直接 fail closed，调用方据此避免先改持久化状态。
@@ -2936,6 +2971,9 @@ export async function prepareCodexForAuthModeChange(): Promise<void> {
       }
     }
     guard?.assertIdle();
+    // MCP invalidation can run before finalize (settings applyRuntime). Keep
+    // the reservation held, but retire every old bridge consumer first.
+    if (options.allLocalHosts) await guard?.retireActiveHost();
     _codexCredentialChangeGuard = guard;
     prepared = true;
   } finally {
@@ -2977,12 +3015,26 @@ export function cancelCodexAuthModeChange(): void {
   guard?.release();
 }
 
-export async function finalizeCodexAfterAuthModeChange(): Promise<void> {
+export async function finalizeCodexAfterAuthModeChange(options: { prepareMcpEnvironment?: boolean } = {}): Promise<void> {
   // 只 dispose 本地 app-server, 让下一次本地 send 按新模式重新 spawn。
   // 远端 Codex host 使用远端 daemon / 远端用户配置,不能被本地 key / OAuth 变化误关。
   const guard = _codexCredentialChangeGuard;
-  _codexCredentialChangeGuard = null;
   const agent = _codexAgent;
+  try {
+    if (options.prepareMcpEnvironment && _mcpProviders.codex) {
+      // Bridge preparation does not acquire a host; model backfill below does.
+      await getCodexExtraSpawnConfig({ mcpProviders: _mcpProviders.codex, logger: desktopMakerLogger });
+    }
+  } catch (error) {
+    if (_codexCredentialChangeGuard === guard) _codexCredentialChangeGuard = null;
+    guard?.release();
+    throw error;
+  }
+  if (_codexCredentialChangeGuard !== guard || _codexAgent !== agent) {
+    guard?.release();
+    return;
+  }
+  _codexCredentialChangeGuard = null;
   if (guard || agent) {
     try {
       if (guard) {
@@ -3015,9 +3067,20 @@ export async function finalizeCodexAfterAuthModeChange(): Promise<void> {
   await broadcastCodexAuthStateChanged();
 }
 
-export async function restartCodexAfterAuthModeChange(): Promise<void> {
-  await prepareCodexForAuthModeChange();
-  await finalizeCodexAfterAuthModeChange();
+export async function restartCodexAfterAuthModeChange(
+  refreshEnvironment?: () => Promise<void | boolean>,
+): Promise<void> {
+  await prepareCodexForAuthModeChange({ allLocalHosts: !!refreshEnvironment });
+  const ownedGuard = _codexCredentialChangeGuard;
+  try {
+    if (refreshEnvironment) {
+      if (await refreshEnvironment() === false) return;
+    }
+    if (_codexCredentialChangeGuard !== ownedGuard) return;
+    await finalizeCodexAfterAuthModeChange({ prepareMcpEnvironment: !!refreshEnvironment });
+  } finally {
+    if (_codexCredentialChangeGuard === ownedGuard) cancelCodexAuthModeChange();
+  }
 }
 
 /**

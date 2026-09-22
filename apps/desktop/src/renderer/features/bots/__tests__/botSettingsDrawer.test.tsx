@@ -4,9 +4,28 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createMemoryRouter, RouterProvider, useLocation } from 'react-router-dom';
+import { transferableAbortController } from 'node:util';
+
+// jsdom supplies its own AbortController while Request remains Node's native
+// fetch implementation. React Router must construct both in the same realm.
+const NativeAbortController = transferableAbortController().constructor;
+beforeEach(() => vi.stubGlobal('AbortController', NativeAbortController));
+afterEach(() => vi.unstubAllGlobals());
 
 const guard = vi.hoisted(() => vi.fn(async () => true));
-beforeEach(() => guard.mockReset().mockResolvedValue(true));
+const nativeAbortController = transferableAbortController();
+beforeEach(() => {
+  guard.mockReset().mockResolvedValue(true);
+  // React Router uses Node Request; its signal must come from the same realm.
+  vi.stubGlobal('AbortController', nativeAbortController.constructor);
+  vi.stubGlobal('AbortSignal', nativeAbortController.signal.constructor);
+  const controller = new AbortController();
+  const request = new Request('https://example.invalid', { signal: controller.signal });
+  expect(request.signal.aborted).toBe(false);
+  controller.abort('realm-probe');
+  expect(request.signal.aborted).toBe(true);
+  expect(request.signal.reason).toBe('realm-probe');
+});
 
 vi.mock('../botPronounContext', () => ({
   useBotTranslation: () => ({ t: (key: string) => key }),
@@ -56,7 +75,13 @@ function LocationProbe() {
   return <output data-testid="location">{`${location.pathname}${location.search}`}</output>;
 }
 
-afterEach(cleanup);
+afterEach(() => {
+  try {
+    cleanup();
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
 
 describe('BotSettingsDrawer', () => {
   it.each(['query', 'sidebar', 'back'])(
@@ -136,7 +161,7 @@ describe('BotSettingsDrawer', () => {
     expect(backgroundWheel.defaultPrevented).toBe(true);
   });
 
-  it('opens as a right half-window without replacing the current chat route', async () => {
+  it('opens as a compact right drawer without replacing the current chat route', async () => {
     render(
       <RouterProvider
         router={createMemoryRouter(
@@ -159,7 +184,8 @@ describe('BotSettingsDrawer', () => {
 
     const dialog = screen.getByRole('dialog');
     expect(dialog.className).toContain('right-0');
-    expect(dialog.className).toContain('lg:w-1/2');
+    expect(dialog.className).toContain('w-full');
+    expect(dialog.className).toContain('max-w-md');
     expect(screen.getByTestId('chat-underlay')).toBeTruthy();
     expect(screen.getByTestId('simple-bot-settings')).toBeTruthy();
 

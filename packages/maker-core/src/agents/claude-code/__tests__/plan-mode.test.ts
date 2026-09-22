@@ -13,6 +13,7 @@ import path from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { PINNED_SKILL_INVOCATION } from '../../base-agent.js';
 import type { AgentDeps, RemoteClaudeRoute } from '../../base-agent.js';
 import type { AuthAdapter, AuthAdapterOptions } from '../../../interfaces/auth-adapter.js';
 import type { PermissionMode } from '../../../types/common.js';
@@ -276,6 +277,40 @@ describe('ClaudeCodeAgent plan mode', () => {
     await handle.close();
   });
 
+  it('expands the exact Host-pinned Skill before Claude resolves slash commands by name', async () => {
+    const { handle, queryPrompt, workingDir } = await startPlanSession(false);
+    const skillFile = path.join(workingDir, 'system-skills', 'v10', 'learn', 'SKILL.md');
+    await fs.mkdir(path.dirname(skillFile), { recursive: true });
+    await fs.writeFile(skillFile, [
+      '---',
+      'name: learn',
+      'description: Start Cindy Learn.',
+      '---',
+      '',
+      '# Trusted Learn instructions',
+      '',
+      'Call the Cindy Learn host exactly once.',
+    ].join('\n'));
+    const nextInput = queryPrompt[Symbol.asyncIterator]().next();
+
+    await handle.send(
+      { type: 'user', content: '/learn release flow' },
+      { [PINNED_SKILL_INVOCATION]: { name: 'learn', path: skillFile } },
+    );
+
+    const sdkInput = (await nextInput).value;
+    expect(sdkInput?.message?.content).toBe([
+      '<command-name>learn</command-name>',
+      '<command-message>/learn</command-message>',
+      '<command-args>release flow</command-args>',
+      '',
+      '# Trusted Learn instructions',
+      '',
+      'Call the Cindy Learn host exactly once.',
+    ].join('\n'));
+    await handle.close();
+  });
+
   it('starts the SDK query in plan mode while keeping the underlying permission mode', async () => {
     const { handle, queryOptions } = await startPlanSession(true);
 
@@ -290,6 +325,32 @@ describe('ClaudeCodeAgent plan mode', () => {
     expect(queryOptions.permissionMode).toBe('acceptEdits');
     expect(queryOptions.allowedTools).toBeUndefined();
     expect(handle.getPlanMode?.()).toBe(false);
+    await handle.close();
+  });
+
+  it('Full Access cannot bypass an active one-shot Plan turn, but resumes after plan approval', async () => {
+    const { handle, queryOptions } = await startPlanSession(true, {}, 'bypassPermissions');
+    const resolver = vi.fn(async () => ({ kind: 'plan_review' as const, behavior: 'allow' as const }));
+    handle.setInteractionResolver(resolver);
+    await handle.send({ type: 'user', content: 'Plan the change.' });
+    expect(handle.getPlanMode?.()).toBe(false);
+    expect(handle.getExecutionPlanMode?.()).toBe(true);
+    for (const tool of ['Write', 'Bash', 'mcp__cindy__ghost_call']) {
+      expect(await queryOptions.canUseTool!(tool, {}, { toolUseID: `plan-${tool}` })).toMatchObject({ behavior: 'deny' });
+    }
+    expect(await queryOptions.canUseTool!('Read', {}, { toolUseID: 'plan-read' })).toMatchObject({ behavior: 'allow' });
+    expect(resolver).not.toHaveBeenCalled();
+    expect(await queryOptions.canUseTool!('ExitPlanMode', { plan: 'Apply the change.' }, { toolUseID: 'plan-exit' })).toMatchObject({ behavior: 'allow' });
+    expect(handle.getExecutionPlanMode?.()).toBe(false);
+    expect(await queryOptions.canUseTool!('Write', {}, { toolUseID: 'after-plan-write' })).toMatchObject({ behavior: 'allow' });
+    await handle.close();
+  });
+
+  it('arming the next Plan turn does not rewrite the current ordinary Full Access turn', async () => {
+    const { handle, queryOptions } = await startPlanSession(false, {}, 'bypassPermissions');
+    await handle.send({ type: 'user', content: 'Apply the approved change.' });
+    await handle.setPlanMode!(true);
+    expect(await queryOptions.canUseTool!('Write', {}, { toolUseID: 'current-write' })).toMatchObject({ behavior: 'allow' });
     await handle.close();
   });
 
@@ -1216,10 +1277,10 @@ describe('ClaudeCodeAgent plan mode', () => {
     );
 
     expect(reviewAutoPermissionAction).toHaveBeenCalledWith(expect.objectContaining({
-      userIntent:
-        'Earlier user messages (still apply unless explicitly changed below):\n'
-        + 'Refactor the parser without changing public behavior\n\nLatest user message:\n'
-        + 'Approved plan:\n1. Inspect parser call sites\n2. Update parser\n3. Run focused tests',
+      userIntent: {
+        earlierUserMessages: ['Refactor the parser without changing public behavior'],
+        currentUserMessage: 'Approved plan:\n1. Inspect parser call sites\n2. Update parser\n3. Run focused tests',
+      },
     }));
     await handle.close();
   });

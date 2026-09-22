@@ -1,4 +1,3 @@
-import { BotAuthorizationCardView } from '@/features/bots/BotAuthorizationCard';
 /**
  * SystemCard
  * ---------------------------------------------------------------------------
@@ -6,6 +5,7 @@ import { BotAuthorizationCardView } from '@/features/bots/BotAuthorizationCard';
  * Renders /help, /cost, /context, /pwd, /status as styled info panels in the chat stream.
  */
 
+import { BotAuthorizationCardView } from '@/features/bots/BotAuthorizationCard';
 import { useState, type ReactNode } from 'react';
 import {
   ArrowLeftRight,
@@ -21,6 +21,11 @@ import {
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 
+import {
+  hasInterruptionContext,
+  readAutoResumeInfo,
+  type AutoResumeCardInfo,
+} from '@/lib/autoResumePresentation';
 import { cn } from '@/lib/utils';
 import { Collapse } from '@/components/ui/collapse';
 import { Spinner } from '@/components/ui/spinner';
@@ -44,6 +49,8 @@ import {
 } from './activityRowChrome';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import { CindyMakeDoctorCard } from './CindyMakeDoctorCard';
+import { builtInSkillDescriptionKey } from '@/features/skillhub/lib/builtInSkillPresentation';
+import { CindyMakeCompleteCard } from '@/components/cindy-make/CindyMakeCompleteCard';
 
 interface SystemCardProps {
   cardType:
@@ -83,7 +90,7 @@ interface SystemCardProps {
 }
 
 const cardClass = cn(
-  'w-full rounded-[12px] border',
+  'w-full rounded-xl border',
   'border-[var(--msg-user-border)]',
   'bg-[var(--msg-user-bg)]',
   'px-5 py-4',
@@ -104,22 +111,38 @@ const codeClass = cn(
 );
 
 function HelpCard({ data }: { data?: Record<string, unknown> }) {
+  const { t } = useTranslation();
   const commands =
-    (data?.commands as Array<{ name: string; description?: string; source: string }>) ?? [];
+    (data?.commands as Array<{
+      name: string;
+      description?: string;
+      source: string;
+      builtIn?: boolean;
+    }>) ?? [];
   const desktopCmds = commands.filter((c) => c.source === 'desktop');
   const agentBuiltinCmds = commands.filter((c) => c.source === 'agent-builtin');
   const projectCmds = commands.filter((c) => c.source === 'user' || c.source === 'skill');
 
   const renderCommandRows = (
-    items: Array<{ name: string; description?: string; source: string }>,
+    items: Array<{
+      name: string;
+      description?: string;
+      source: string;
+      builtIn?: boolean;
+    }>,
   ) => (
     <div className="flex flex-col gap-[2px]">
-      {items.map((c) => (
-        <div key={c.name} className={rowClass}>
-          <span className={codeClass}>/{c.name}</span>
-          <span className={descClass}>{c.description ?? ''}</span>
-        </div>
-      ))}
+      {items.map((c) => {
+        const descriptionKey = builtInSkillDescriptionKey(c);
+        return (
+          <div key={c.name} className={rowClass}>
+            <span className={codeClass}>/{c.name}</span>
+            <span className={descClass}>
+              {descriptionKey ? t(descriptionKey) : c.description ?? ''}
+            </span>
+          </div>
+        );
+      })}
     </div>
   );
 
@@ -326,7 +349,7 @@ function ContextCard({ data }: { data?: Record<string, unknown> }) {
   return (
     <div
       className={cn(
-        'w-full rounded-[12px] border border-[var(--msg-user-border)] bg-[var(--msg-user-bg)]',
+        'w-full rounded-xl border border-[var(--msg-user-border)] bg-[var(--msg-user-bg)]',
         'px-3 py-3 text-13 leading-none text-[var(--msg-user-text)] select-text',
       )}
     >
@@ -422,7 +445,7 @@ function ContextCard({ data }: { data?: Record<string, unknown> }) {
           </div>
 
           {hasDetails && (
-            <div className="mt-2 flex flex-col gap-[6px]">
+            <div className="mt-2 flex flex-col gap-1.5">
               {visibleDetailRows.map((row) => {
                 const isDetailExpanded = !!expandedDetails[row.key];
                 return (
@@ -834,53 +857,6 @@ function GoalResumedCard({ data }: { data?: { kind?: string } }) {
 }
 
 /**
- * silent-stop 自动续跑分隔条:上游空响应静默收尾后,main 守卫自动补发了隐藏的
- * 「继续」。用户不看到用户气泡,只看到这条轻分隔线标记"上一段与下一段之间发生过
- * 一次自动接续"(否则模型"一句话断成两段凭空接着说"会让人怀疑消息丢了)。
- * 复用 CompactBoundaryCard / GoalResumedCard 的分隔条视觉语言。
- */
-/** 活动行需要的展示信息(从 systemCardData 松散读取,缺字段一律降级而不是崩)。 */
-interface AutoResumeCardInfo {
-  error?: string;
-  attempt?: number;
-  maxAttempts?: number;
-  sessionTotal?: number;
-  /** 结果:由 main 在产出 / 再次被打断时回填;缺省 = 还在等结果。 */
-  outcome?: 'succeeded' | 'failed';
-}
-
-/**
- * 这条自动续跑记录属于「中断重连」还是 silent-stop 的「空回复后续跑」。
- *
- * 判据是有没有任何中断上下文（原因 / 次数 / 累计 / 结果）。**必须区分**：silent-stop 那条
- * 路径也走 `auto-resume` 卡，但它不是重连——把三态重连行套上去，历史里那条「已自动继续」
- * 会变成语义错误的「重新连接」（copilot review）。
- */
-function hasInterruptionContext(info: AutoResumeCardInfo): boolean {
-  return (
-    info.error !== undefined ||
-    info.attempt !== undefined ||
-    info.maxAttempts !== undefined ||
-    info.sessionTotal !== undefined ||
-    info.outcome !== undefined
-  );
-}
-
-function readAutoResumeInfo(data?: Record<string, unknown>): AutoResumeCardInfo {
-  const num = (v: unknown) =>
-    typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined;
-  return {
-    ...(typeof data?.error === 'string' && data.error.length > 0 ? { error: data.error } : {}),
-    ...(num(data?.attempt) !== undefined ? { attempt: num(data?.attempt) } : {}),
-    ...(num(data?.maxAttempts) !== undefined ? { maxAttempts: num(data?.maxAttempts) } : {}),
-    ...(num(data?.sessionTotal) !== undefined ? { sessionTotal: num(data?.sessionTotal) } : {}),
-    ...(data?.outcome === 'succeeded' || data?.outcome === 'failed'
-      ? { outcome: data.outcome }
-      : {}),
-  };
-}
-
-/**
  * 把中断原文压成一行摘要，放进活动行的 param 位（对齐 AgentActionRow 的
  * 「动词 + 命令 / 文件名」结构）。
  *
@@ -1002,13 +978,13 @@ function AutoResumeActionRow({
         // 图标与 chevron 都是 aria-hidden,可见文本(动词 + 摘要)本身就是正确的无障碍名。
         disabled={!canExpand}
         className={cn(
-          'flex w-full items-center gap-[6px]',
+          'flex w-full items-center gap-1.5',
           ACTIVITY_ROW_RADIUS_CLASS,
           'px-2 py-[3px]',
           'text-left outline-none',
           canExpand
             ? cn(
-                'group cursor-pointer select-none focus-visible:ring-2 focus-visible:ring-[var(--info-700)]/40',
+                'group cursor-pointer select-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]',
                 ACTIVITY_ROW_COLOR_TRANSITION_CLASS,
                 ACTIVITY_ROW_HOVER_SURFACE_CLASS,
               )
@@ -1263,64 +1239,6 @@ function ContextRebuildCard({ data }: { data?: Record<string, unknown> }) {
   );
 }
 
-/**
- * 个人版制作任务的完成卡片:Agent 调用 cindy_make.report_complete、本轮回复结束后由
- * Main 落库。整块步骤卡片,与 /cindy-make 弹窗的三步卡同形态;第二阶段的核对、测试与
- * 打包会作为后续步骤长在这张卡上,当前只有「修改源码」一步。内容全部是代码核实的事实
- * (改动文件数、基准 commit、完成时间),不含模型自述。
- */
-function CindyMakeCompleteCard({ data }: { data?: Record<string, unknown> }) {
-  const { t, i18n } = useTranslation();
-  const changedFiles = typeof data?.changedFiles === 'number' ? data.changedFiles : undefined;
-  const commit =
-    typeof data?.commit === 'string' && data.commit ? data.commit.slice(0, 12) : undefined;
-  const reportedAt = typeof data?.reportedAt === 'number' ? data.reportedAt : undefined;
-  const time =
-    reportedAt !== undefined
-      ? new Intl.DateTimeFormat(i18n?.resolvedLanguage ?? i18n?.language, {
-          dateStyle: 'medium',
-          timeStyle: 'short',
-        }).format(reportedAt)
-      : undefined;
-  const branch = typeof data?.branch === 'string' && data.branch ? data.branch : undefined;
-  const meta = [
-    changedFiles !== undefined
-      ? t('cindyMake.complete.changedFiles', { count: changedFiles })
-      : null,
-    branch ? t('cindyMake.complete.branch', { branch }) : null,
-    commit ? t('cindyMake.complete.commit', { commit }) : null,
-    time ?? null,
-  ].filter((part): part is string => typeof part === 'string' && part.length > 0);
-
-  return (
-    <section
-      className="w-full rounded-[12px] border border-[var(--border-default)] bg-[var(--surface-elevated)] text-14 text-[var(--text-primary)]"
-      aria-label={t('cindyMake.complete.title')}
-    >
-      <div className="flex items-start gap-3 px-4 py-4">
-        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[var(--surface-chip)]">
-          <Check size={18} className="text-[var(--status-success)]" aria-hidden />
-        </div>
-        <div className="min-w-0 flex-1">
-          <p className="text-16 font-medium">{t('cindyMake.complete.title')}</p>
-          <p className="mt-0.5 text-13 text-[var(--text-secondary)]">
-            {t('cindyMake.complete.description')}
-          </p>
-        </div>
-      </div>
-      <div className="border-t border-[var(--border-default)] px-4 py-3">
-        <p className="flex items-center gap-2 font-medium">
-          <Check size={14} className="shrink-0 text-[var(--status-success)]" aria-hidden />
-          <span>{t('cindyMake.complete.stepCode')}</span>
-        </p>
-        {meta.length > 0 && (
-          <p className="mt-1 pl-6 text-12 text-[var(--text-secondary)]">{meta.join(' · ')}</p>
-        )}
-      </div>
-    </section>
-  );
-}
-
 const REVIEW_FAILURE_I18N_KEY: Record<ReviewFailureCode, string> = {
   'no-visible-result': 'chat.systemCard.review.noResult',
   'reviewer-closed': 'chat.systemCard.review.failure.reviewerClosed',
@@ -1507,13 +1425,13 @@ function CmdCard({ data }: { data?: Record<string, unknown> }) {
   // 不用红色 (违反 §2 grayscale 硬规则)。
   const blockClass = cn(
     'mt-1 max-h-[320px] overflow-auto whitespace-pre-wrap break-words',
-    'rounded-[12px] px-[12px] py-[10px]',
+    'rounded-xl px-[12px] py-[10px]',
     'font-mono text-[length:calc(var(--app-code-font-size)_-_1.5px)] leading-[1.55]',
     'bg-[var(--msg-code-block-bg)] text-[var(--msg-user-text)]',
     'border border-[var(--msg-code-block-border)]',
   );
   const cmdLineClass = cn(
-    'mt-2 px-[12px] py-[8px] rounded-[12px] overflow-x-auto',
+    'mt-2 px-[12px] py-[8px] rounded-xl overflow-x-auto',
     'font-mono text-[length:calc(var(--app-code-font-size)_-_1px)] leading-[1.5]',
     'bg-[var(--msg-code-block-bg)] text-[var(--msg-user-text)]',
     'border border-[var(--msg-code-block-border)]',

@@ -3284,10 +3284,36 @@ describe('remoteSessionStore', () => {
     expect(remoteSessionStore.isSessionMakerTurnRunning('s1')).toBe(false);
   });
 
-  it('keeps the product turn running across claimed mobile continuation boundaries', () => {
+  it('keeps terminal prediction eligibility through acknowledgement and clears it for the next run', () => {
+    pushMakerStatus('s1', { isRunning: true });
+    remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
+      sessionId: 's1', event: { type: 'error', data: { message: 'Failed', isTerminal: true } },
+    });
+    expect(remoteSessionStore.getSessionRunStatus('s1').hasTerminalError).toBe(true);
+    remoteSessionStore.applySessionActivity('dev-1', { sessionId: 's1', phase: 'completed', attention: false });
+    expect(remoteSessionStore.getSessionRunStatus('s1').hasTerminalError).toBe(true);
+    pushMakerStatus('s1', { isRunning: false });
+    expect(remoteSessionStore.getSessionRunStatus('s1').hasTerminalError).toBe(true);
+    pushMakerStatus('s1', { isRunning: true });
+    expect(remoteSessionStore.getSessionRunStatus('s1').hasTerminalError).toBe(false);
+  });
+
+  it('recovers a terminal error from activity even without its maker event', () => {
+    remoteSessionStore.applySessionActivity('dev-1', { sessionId: 's1', phase: 'error', attention: false });
+    expect(remoteSessionStore.getSessionRunStatus('s1').hasTerminalError).toBe(true);
+    remoteSessionStore.applySessionActivity('dev-1', { sessionId: 's1', phase: 'running' });
+    expect(remoteSessionStore.getSessionRunStatus('s1').hasTerminalError).toBe(false);
+    remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
+      sessionId: 's1', event: { type: 'error', data: { message: 'Retrying', isTerminal: false, willRetry: true } },
+    });
+    expect(remoteSessionStore.getSessionRunStatus('s1').hasTerminalError).toBe(false);
+  });
+
+  it.each(['ask_user_question', 'plan_review'])('keeps the product running while %s awaits confirmation across an SDK boundary', (kind) => {
     vi.useFakeTimers();
     try {
       pushMakerStatus('s1', { isRunning: true });
+      remoteSessionStore.setPendingInteractions('s1', [{ request: { kind, requestId: 'human-1' } }]);
       pushMakerText('s1', 'persist-1', 'first segment', false);
       vi.runOnlyPendingTimers();
 
@@ -3305,16 +3331,21 @@ describe('remoteSessionStore', () => {
       });
 
       expect(remoteSessionStore.isSessionRunning('s1')).toBe(true);
+      expect(remoteSessionStore.getPendingInteractions('s1')).toHaveLength(1);
       expect(remoteSessionStore.isSessionMakerTurnRunning('s1')).toBe(true);
       expect(remoteSessionStore.getSessionRunStatus('s1').startedAt).not.toBeNull();
       expect(remoteSessionStore.getMessages('s1')[0]?.agentMeta?.isStreaming).toBe(true);
 
+      remoteSessionStore.applyRemotePush('dev-1', 'maker:interaction-dismissed', {
+        sessionId: 's1', requestId: 'human-1', resolvedAs: 'allow',
+      });
       remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
         sessionId: 's1',
         event: { type: 'done', data: {} },
       });
 
       expect(remoteSessionStore.isSessionRunning('s1')).toBe(false);
+      expect(remoteSessionStore.getPendingInteractions('s1')).toHaveLength(0);
       expect(remoteSessionStore.isSessionMakerTurnRunning('s1')).toBe(false);
       expect(remoteSessionStore.getMessages('s1')[0]?.agentMeta?.isStreaming).not.toBe(true);
     } finally {
@@ -6435,5 +6466,40 @@ describe('device-clock live row clamp (applyRemoteTextEvent createdAt, cross-clo
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('task tag source isolation', () => {
+  beforeEach(() => remoteSessionStore.clear());
+  it('invalidates a first list response before a shard exists, only for the source device', () => {
+    const epoch = remoteSessionStore.captureDeviceSessionListMutationEpoch('dev-a');
+    const otherEpoch = remoteSessionStore.captureDeviceSessionListMutationEpoch('dev-b');
+    remoteSessionStore.applyRemotePush('dev-a', 'local-db:task-tags:changed', { tags: [] });
+    expect(remoteSessionStore.isDeviceSessionListMutationEpochCurrent('dev-a', epoch)).toBe(false);
+    expect(remoteSessionStore.isDeviceSessionListMutationEpochCurrent('dev-b', otherEpoch)).toBe(true);
+    const replacementEpoch = remoteSessionStore.captureDeviceSessionListMutationEpoch('dev-a');
+    expect(remoteSessionStore.isDeviceSessionListMutationEpochCurrent('dev-a', replacementEpoch)).toBe(true);
+  });
+  it('projects rename and deletion only into the source computer task memberships', () => {
+    const tag = {
+      id: 'default:red',
+      name: 'Red',
+      color: 'red' as const,
+      favoriteOrder: 0,
+      revision: 1,
+    };
+    remoteSessionStore.setDeviceSessions('dev-a', 'A', [session('a', { tags: [tag] })]);
+    remoteSessionStore.setDeviceSessions('dev-b', 'B', [session('b', { tags: [tag] })]);
+    const renamed = { ...tag, name: 'Work', revision: 2 };
+    remoteSessionStore.applyRemotePush('dev-a', 'local-db:task-tags:changed', {
+      tags: [renamed],
+    });
+    expect(remoteSessionStore.getSessions().find((row) => row.id === 'a')?.tags).toEqual([renamed]);
+    expect(remoteSessionStore.getSessions().find((row) => row.id === 'b')?.tags).toEqual([tag]);
+    remoteSessionStore.applyRemotePush('dev-a', 'local-db:task-tags:changed', {
+      tags: [],
+    });
+    expect(remoteSessionStore.getSessions().find((row) => row.id === 'a')?.tags).toEqual([]);
+    expect(remoteSessionStore.getSessions().find((row) => row.id === 'b')?.tags).toEqual([tag]);
   });
 });
