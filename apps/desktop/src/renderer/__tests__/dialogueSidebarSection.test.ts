@@ -209,8 +209,14 @@ describe('Mixed main list (sidebar-redesign D 期)', () => {
     );
     // 不按设备分组的两条渲染路径不传目标 → 上层沿用作用域推断。
     expect(projectsSectionSource).toContain('renderNonProjectEntry(entry, DIALOGUE_GROUP_ALL_KEY)');
+    // Make 组只在存在本机会话时提供就地创建入口，普通对话组继续传递设备目标。
     expect(projectsSectionSource).toContain(
-      'onCreateDialogue={isMake ? undefined : () => onCreateDialogue(dialogueDeviceTarget)}',
+      'const canCreateMake = entry.sessions.some((session) => !session.deviceLinkDeviceId);',
+    );
+    expect(projectsSectionSource).toContain('? () => setMakeCreateOpen(true)');
+    expect(projectsSectionSource).toContain(': () => onCreateDialogue(dialogueDeviceTarget)');
+    expect(projectsSectionSource).toContain(
+      '<CindyMakeCreateDialog onOpenChange={setMakeCreateOpen} />',
     );
     // 目标设备离线 → 禁用新建并复用远程写保护文案(被控端才是真正的创建方)。
     expect(projectsSectionSource).toContain("t('ccAgent.remoteSession.actionsUnavailable')");
