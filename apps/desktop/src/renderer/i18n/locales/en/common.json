@@ -2628,6 +2628,13 @@
       }
     },
     "gitSafety": {
+      "nonEmptyPrompt": {
+        "title": "Set up file recovery for this project?",
+        "message": "This project already contains files but has no Git history.",
+        "detail": "{{path}}\n\nCindy will initialize Git and create a recovery point from eligible files before this task edits them. Existing files stay in place. Files excluded by safety filters cannot be restored from this point. Skipping leaves this project without file recovery points. If you decline, Cindy will not ask again for this project unless you reset Git Safety settings.",
+        "allow": "Create Recovery Point",
+        "decline": "Skip This Project"
+      },
       "title": "Git Safety",
       "autoSnapshotTitle": "File recovery points",
       "description": "Choose when Cindy records hidden file recovery points. This affects file recovery cost, not conversation rewind.",
@@ -2635,7 +2642,7 @@
       "modes": {
         "off": "Off",
         "existingGit": "Existing Git projects only",
-        "allProjects": "Include new empty projects"
+        "allProjects": "Include projects without Git"
       },
       "toggleAria": "File recovery point mode",
       "saveFailed": "Failed to save Git safety setting"

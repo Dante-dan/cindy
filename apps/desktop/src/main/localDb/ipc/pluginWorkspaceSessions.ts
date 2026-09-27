@@ -114,8 +114,8 @@ export async function createPluginDraftSession(params: {
     source: 'plugin' as const,
     ...(params.title ? { title: params.title } : {}),
   };
-  // 与 local-db:sessions:create 同流程:只有“所有项目”模式才会给空目录 git init,
-  // 已有 Git 项目仍可在“已有 Git 项目”模式下记录保存点。
+  // 与 local-db:sessions:create 同流程:只有“所有项目”模式才会给空目录 git init;
+  // 非空目录留待首轮任务显式同意。已有 Git 项目仍可在“已有 Git 项目”模式下记录保存点。
   const gitSafety = readGitSafetySettings();
   await ensureProjectGitInitialized({
     workingDir: insertRow.workingDir,
