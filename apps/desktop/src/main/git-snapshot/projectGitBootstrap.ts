@@ -3,8 +3,8 @@
  *
  * Empty non-Git folders are initialized only after the user opts into Git
  * safety snapshots, so Codex file rewind can anchor to a real HEAD without
- * silently mutating default-off projects. Non-empty folders are left untouched
- * until a future explicit-confirmation flow exists.
+ * silently mutating default-off projects. Non-empty folders require an explicit
+ * per-project confirmation before the first Git write.
  */
 
 import { promises as fs } from 'node:fs';
@@ -29,6 +29,8 @@ export interface ProjectGitBootstrapRequest {
   autoSnapshotEnabled?: boolean | null;
   autoInitProjectGit?: boolean | null;
   source?: string;
+  /** Only interactive turn-start callers provide this; other callers keep skipping non-empty dirs. */
+  confirmNonEmptyProject?: (workingDir: string) => Promise<boolean>;
 }
 
 export interface ProjectGitBootstrapResult {
@@ -90,8 +92,19 @@ async function ensureProjectGitInitializedInner(
       return { status: 'already-git', repoRoot: before.repoRoot };
     }
 
-    if (!(await isDirectoryEffectivelyEmpty(request.workingDir))) {
-      return { status: 'skipped', reason: 'non-empty-project' };
+    const nonEmpty = !(await isDirectoryEffectivelyEmpty(request.workingDir));
+    if (nonEmpty) {
+      if (
+        !request.confirmNonEmptyProject ||
+        !(await request.confirmNonEmptyProject(request.workingDir))
+      ) {
+        return { status: 'skipped', reason: 'non-empty-project' };
+      }
+      // Confirmation may outlive another session's bootstrap. Never reinitialize it.
+      const afterConfirmation = await detectCwd(request.workingDir);
+      if (afterConfirmation.isGitRepo) {
+        return { status: 'already-git', repoRoot: afterConfirmation.repoRoot };
+      }
     }
 
     await gitExec(['init'], request.workingDir);
@@ -104,7 +117,7 @@ async function ensureProjectGitInitializedInner(
       allowEmpty: true,
     });
 
-    log.info('[project-git-bootstrap] initialized empty project git repository', {
+    log.info('[project-git-bootstrap] initialized project git repository', {
       source: request.source,
       workingDir: request.workingDir,
       commit: snapshot.commit?.slice(0, 8) ?? null,
