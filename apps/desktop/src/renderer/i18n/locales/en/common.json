@@ -2631,7 +2631,7 @@
       "nonEmptyPrompt": {
         "title": "Set up file recovery for this project?",
         "message": "This project already contains files but has no Git history.",
-        "detail": "{{path}}\n\nCindy will initialize Git and create a recovery point from eligible files before this task edits them. Existing files stay in place. Files excluded by safety filters cannot be restored from this point. Skipping leaves this project without file recovery points. If you decline, Cindy will not ask again for this project unless you reset Git Safety settings.",
+        "detail": "{{path}}\n\nCindy will initialize Git and create a recovery point from eligible files before this task edits them. Existing files stay in place. This creates a `.git` folder in the project. You can turn off future recovery points in Git Safety settings; removing `.git` later also removes this project’s Git history. Files excluded by safety filters cannot be restored from this point. Skipping leaves this project without file recovery points. If you decline, Cindy will not ask again for this project unless you reset Git Safety settings.",
         "allow": "Create Recovery Point",
         "decline": "Skip This Project"
       },
