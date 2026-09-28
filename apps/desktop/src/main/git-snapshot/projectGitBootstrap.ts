@@ -18,6 +18,7 @@ import { createSnapshotDetailed, type CreateSnapshotDetailedResult } from './git
 const log = createLogger('project-git-bootstrap');
 const INITIAL_PROJECT_LABEL = 'Initialize project snapshot';
 const FALLBACK_SESSION_ID = 'project-bootstrap';
+const SNAPSHOT_AUTHOR = { name: 'Cindy Recovery', email: 'recovery@cindy.local' };
 
 export type ProjectGitBootstrapStatus = 'initialized' | 'already-git' | 'skipped' | 'failed';
 
@@ -108,14 +109,32 @@ async function ensureProjectGitInitializedInner(
     }
 
     await gitExec(['init'], request.workingDir);
-    const snapshot = await createSnapshotDetailed(request.workingDir, {
-      label: INITIAL_PROJECT_LABEL,
-      meta: {
-        sessionId: request.sessionId?.trim() || FALLBACK_SESSION_ID,
-        kind: 'manual',
-      },
-      allowEmpty: true,
-    });
+    let snapshot: CreateSnapshotDetailedResult;
+    try {
+      snapshot = await createSnapshotDetailed(request.workingDir, {
+        label: INITIAL_PROJECT_LABEL,
+        meta: {
+          sessionId: request.sessionId?.trim() || FALLBACK_SESSION_ID,
+          kind: 'manual',
+        },
+        author: SNAPSHOT_AUTHOR,
+        allowEmpty: true,
+      });
+    } catch (error) {
+      // A repository without its first commit is not a recovery point. Only
+      // remove the .git directory that this call just created, and only while
+      // it still has no HEAD; preserve any repository another process advanced.
+      const hasHead = await gitExec(['rev-parse', '--verify', 'HEAD'], request.workingDir).then(
+        () => true,
+        () => false,
+      );
+      if (!hasHead) {
+        const gitDir = path.join(request.workingDir, '.git');
+        const stat = await fs.lstat(gitDir).catch(() => null);
+        if (stat?.isDirectory()) await fs.rm(gitDir, { recursive: true, force: true });
+      }
+      throw error;
+    }
 
     log.info('[project-git-bootstrap] initialized project git repository', {
       source: request.source,

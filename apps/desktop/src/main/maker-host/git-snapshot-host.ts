@@ -7,7 +7,7 @@
  */
 
 import type { AgentKind, Maker } from '@cindy/maker-core';
-import { app, BrowserWindow, dialog } from 'electron';
+import { app, dialog } from 'electron';
 import path from 'node:path';
 import {
   isCindyMakeManagedWorktreePath,
@@ -30,16 +30,17 @@ import {
   recordDeclinedNonEmptyProjectGit,
 } from './git-safety-settings-store.js';
 import { isAgentOneShotRouteDisabled } from './model-route-guard-live.js';
+import { focusedWindowForSession } from './session-window-focus.js';
 
 const log = createLogger('git-snapshot');
 const ONESHOT_MAX_TOKENS = 80;
 const ONESHOT_TIMEOUT_MS = 20_000;
 
-async function confirmNonEmptyProjectGit(workingDir: string): Promise<boolean> {
+async function confirmNonEmptyProjectGit(workingDir: string, sessionId: string): Promise<boolean> {
   if (hasDeclinedNonEmptyProjectGit(workingDir)) return false;
-  // No focused window means there is no safe place to ask; leave the directory untouched.
-  const owner = BrowserWindow.getFocusedWindow();
-  if (!owner || owner.isDestroyed()) return false;
+  // Background turns must not show their consent prompt over another session.
+  const owner = focusedWindowForSession(sessionId);
+  if (!owner) return false;
   const result = await dialog.showMessageBox(owner, {
     type: 'question',
     title: t('settings.gitSafety.nonEmptyPrompt.title'),
@@ -48,14 +49,15 @@ async function confirmNonEmptyProjectGit(workingDir: string): Promise<boolean> {
     buttons: [
       t('settings.gitSafety.nonEmptyPrompt.allow'),
       t('settings.gitSafety.nonEmptyPrompt.decline'),
+      t('settings.gitSafety.nonEmptyPrompt.cancel'),
     ],
-    defaultId: 1,
-    cancelId: 1,
+    defaultId: 2,
+    cancelId: 2,
     noLink: true,
   });
-  if (owner.isDestroyed()) return false;
+  if (owner.isDestroyed() || focusedWindowForSession(sessionId) !== owner) return false;
   if (result.response === 0) return true;
-  await recordDeclinedNonEmptyProjectGit(workingDir);
+  if (result.response === 1) await recordDeclinedNonEmptyProjectGit(workingDir);
   return false;
 }
 
@@ -147,7 +149,7 @@ export function createGitSnapshotCoordinator(
           autoSnapshotEnabled: opts.autoSnapshotEnabled,
           autoInitProjectGit: opts.autoInitProjectGit,
           source: 'git-snapshot:on-turn',
-          confirmNonEmptyProject: confirmNonEmptyProjectGit,
+          confirmNonEmptyProject: (workingDir) => confirmNonEmptyProjectGit(workingDir, sessionId),
         })),
     getSessionContext: async (sessionId) => {
       const meta = await maker.getSessionMeta(sessionId);

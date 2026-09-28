@@ -10,6 +10,7 @@
  */
 
 import { app } from 'electron';
+import { realpathSync } from 'node:fs';
 import path from 'node:path';
 
 import { desktopMakerLogger } from './logger-adapter.js';
@@ -119,9 +120,7 @@ export function readGitSafetySettingsState(): OverrideSettingsState<GitSafetySet
   };
 }
 
-export function writeGitSafetyMode(
-  mode: GitSafetyMode,
-): OverrideSettingsState<GitSafetySettings> {
+export function writeGitSafetyMode(mode: GitSafetyMode): OverrideSettingsState<GitSafetySettings> {
   store.writePatch({ mode });
   log.info('git safety setting written', { mode });
   return readGitSafetySettingsState();
@@ -140,13 +139,25 @@ export function resetGitSafetySettings(): GitSafetySettings {
 
 function projectConsentKey(workingDir: string): string {
   const resolved = path.resolve(workingDir);
-  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+  let canonical = resolved;
+  try {
+    canonical = realpathSync.native(resolved);
+  } catch {
+    // Keep the lexical path when the directory disappeared between turns.
+  }
+  return process.platform === 'win32' ? canonical.toLowerCase() : canonical;
 }
 
 /** A declined prompt stays quiet across turns and restarts; resetting Git safety clears it. */
 export function hasDeclinedNonEmptyProjectGit(workingDir: string): boolean {
   store.invalidateIfChanged();
-  return store.read().declinedNonEmptyProjects.includes(projectConsentKey(workingDir));
+  const declined = store.read().declinedNonEmptyProjects;
+  const lexical = path.resolve(workingDir);
+  const legacyKey = process.platform === 'win32' ? lexical.toLowerCase() : lexical;
+  const canonical = projectConsentKey(workingDir);
+  return declined.some(
+    (key) => key === canonical || key === legacyKey || projectConsentKey(key) === canonical,
+  );
 }
 
 export async function recordDeclinedNonEmptyProjectGit(workingDir: string): Promise<void> {

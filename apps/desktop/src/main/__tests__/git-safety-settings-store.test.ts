@@ -1,10 +1,18 @@
+import { promises as fs } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('electron', () => ({
   app: { getPath: () => '/tmp/cindy-git-safety-settings-test' },
 }));
 
-import { __testing } from '../maker-host/git-safety-settings-store';
+import {
+  __testing,
+  hasDeclinedNonEmptyProjectGit,
+  recordDeclinedNonEmptyProjectGit,
+  resetGitSafetySettings,
+} from '../maker-host/git-safety-settings-store';
 
 describe('git safety settings migration', () => {
   it('defaults new installs to existing Git projects', () => {
@@ -59,4 +67,23 @@ describe('git safety settings migration', () => {
       }),
     ).toEqual({ mode: 'all-projects', declinedNonEmptyProjects: ['/example/project'] });
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'recognizes a declined project through a symlink',
+    async () => {
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cindy-git-consent-'));
+      try {
+        const project = path.join(dir, 'project');
+        const alias = path.join(dir, 'alias');
+        await fs.mkdir(project);
+        await fs.symlink(project, alias, 'dir');
+        resetGitSafetySettings();
+        await recordDeclinedNonEmptyProjectGit(alias);
+        expect(hasDeclinedNonEmptyProjectGit(project)).toBe(true);
+      } finally {
+        resetGitSafetySettings();
+        await fs.rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
 });
