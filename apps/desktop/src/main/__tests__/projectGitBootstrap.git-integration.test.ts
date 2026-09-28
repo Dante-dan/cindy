@@ -229,6 +229,54 @@ describe('projectGitBootstrap', () => {
     expect(await isGitRepo(dir)).toBe(false);
   });
 
+  it('creates the first savepoint for a non-empty project only after explicit consent', async () => {
+    const dir = await makeTempDir();
+    await fs.writeFile(path.join(dir, 'index.html'), '<!doctype html>\n<html></html>\n');
+    const confirmNonEmptyProject = vi.fn(async () => true);
+
+    const result = await ensureProjectGitInitialized({
+      workingDir: dir,
+      workspaceKind: 'project',
+      autoInitProjectGit: true,
+      confirmNonEmptyProject,
+    });
+
+    expect(confirmNonEmptyProject).toHaveBeenCalledOnce();
+    expect(confirmNonEmptyProject).toHaveBeenCalledWith(dir);
+    expect(result.status).toBe('initialized');
+    expect(result.commit).toMatch(/^[0-9a-f]{40}$/);
+    expect(await headChangedFiles(dir)).toEqual(['index.html']);
+    expect(await fs.readFile(path.join(dir, 'index.html'), 'utf8')).toBe(
+      '<!doctype html>\n<html></html>\n',
+    );
+    expect(
+      await ensureProjectGitInitialized({
+        workingDir: dir,
+        workspaceKind: 'project',
+        autoInitProjectGit: true,
+        confirmNonEmptyProject,
+      }),
+    ).toMatchObject({ status: 'already-git' });
+    expect(confirmNonEmptyProject).toHaveBeenCalledOnce();
+  });
+
+  it('does not initialize a non-empty project when consent is declined', async () => {
+    const dir = await makeTempDir();
+    await fs.writeFile(path.join(dir, 'index.html'), 'original\n');
+    const confirmNonEmptyProject = vi.fn(async () => false);
+
+    const result = await ensureProjectGitInitialized({
+      workingDir: dir,
+      workspaceKind: 'project',
+      autoInitProjectGit: true,
+      confirmNonEmptyProject,
+    });
+
+    expect(result).toMatchObject({ status: 'skipped', reason: 'non-empty-project' });
+    expect(await isGitRepo(dir)).toBe(false);
+    expect(await fs.readFile(path.join(dir, 'index.html'), 'utf8')).toBe('original\n');
+  });
+
   it('does not reinitialize folders that are already Git repositories', async () => {
     const dir = await makeTempDir();
     await gitExec(['init'], dir);

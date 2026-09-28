@@ -2,7 +2,7 @@
  * git-safety-settings-store —— Git safety workflow machine settings.
  *
  * File: <userData>/git-safety-settings.json
- *   { "mode": "existing-git" }
+ *   { "mode": "existing-git", "declinedNonEmptyProjects": [] }
  *
  * New installs snapshot existing Git projects without initializing empty
  * folders. The override file stores only customized fields, so future default
@@ -26,16 +26,18 @@ export interface GitSafetySettings {
   mode: GitSafetyMode;
   /** Derived compatibility field for existing snapshot consumers. */
   autoSnapshotEnabled: boolean;
-  /** Whether an empty local non-Git project may be bootstrapped. */
+  /** Whether local non-Git projects may be bootstrapped (non-empty needs consent). */
   autoInitProjectGit: boolean;
 }
 
 interface PersistedGitSafetySettings {
   mode: GitSafetyMode;
+  declinedNonEmptyProjects: string[];
 }
 
 const DEFAULTS: PersistedGitSafetySettings = {
   mode: 'existing-git',
+  declinedNonEmptyProjects: [],
 };
 
 function settingsFilePath(): string {
@@ -59,6 +61,9 @@ function normalize(raw: unknown): PersistedGitSafetySettings {
         : DEFAULTS.mode;
   return {
     mode,
+    declinedNonEmptyProjects: Array.isArray(r.declinedNonEmptyProjects)
+      ? r.declinedNonEmptyProjects.filter((value): value is string => typeof value === 'string')
+      : [],
   };
 }
 
@@ -85,6 +90,9 @@ function mergeOverrides({
     // preserves the user's choice if the default changes in a later release.
     updated.mode = next.mode;
     delete updated.autoSnapshotEnabled;
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'declinedNonEmptyProjects')) {
+    updated.declinedNonEmptyProjects = next.declinedNonEmptyProjects;
   }
   return updated;
 }
@@ -128,6 +136,24 @@ export function writeGitSafetyAutoSnapshotEnabled(
 
 export function resetGitSafetySettings(): GitSafetySettings {
   return derive(store.reset());
+}
+
+function projectConsentKey(workingDir: string): string {
+  const resolved = path.resolve(workingDir);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+/** A declined prompt stays quiet across turns and restarts; resetting Git safety clears it. */
+export function hasDeclinedNonEmptyProjectGit(workingDir: string): boolean {
+  store.invalidateIfChanged();
+  return store.read().declinedNonEmptyProjects.includes(projectConsentKey(workingDir));
+}
+
+export async function recordDeclinedNonEmptyProjectGit(workingDir: string): Promise<void> {
+  const key = projectConsentKey(workingDir);
+  await store.updateAtomic(({ value }) => ({
+    declinedNonEmptyProjects: [...new Set([...value.declinedNonEmptyProjects, key])],
+  }));
 }
 
 export const __testing = { mergeOverrides, normalize };
