@@ -2859,6 +2859,7 @@ function ModelSelectorContentView({
             paymentRequiredUnlockLabel={t('newChat.modelSelector.paymentRequired.unlock')}
             onPaymentRequired={showPaymentRequired}
             configurationEnabled={configurationEnabled}
+            localContextLimitEnabled={!deviceId && !providersOverride}
             selectionPolicy={unifiedSelectionPolicy}
             isRouteDisabled={(providerId, id, rowAgent) => providersOverride ? false : modelDisabledOf(providers.find((provider) => provider.id === providerId) ?? null, id, rowAgent)}
             {...(sessionEngineFilter ? { sessionEngineFilter } : {})}

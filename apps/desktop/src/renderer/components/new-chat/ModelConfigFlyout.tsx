@@ -1,4 +1,5 @@
 import { useCodexContextWindow } from '@/hooks/useCodexContextWindow';
+import { useModelContextLimit } from '@/hooks/useModelContextLimit';
 import { localizedModelName } from '@/lib/modelDisplayNames';
 import { Star, Zap } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -37,6 +38,8 @@ export interface ModelConfigFlyoutProps {
   disabled?: boolean;
   /** Same-engine views show the current harness without offering a cross-engine switch. */
   engineLocked?: boolean;
+  /** Local persisted overrides are unavailable for device and injected-catalog views. */
+  localContextLimitEnabled?: boolean;
   onEngineChange: (engine: UnifiedEngine) => void;
   onEffortChange: (effort: Effort) => void;
   onFastChange: (enabled: boolean) => void;
@@ -69,6 +72,7 @@ export function ModelConfigFlyout({
   justFavorited = false,
   disabled = false,
   engineLocked = false,
+  localContextLimitEnabled = true,
   onEngineChange,
   onEffortChange,
   onFastChange,
@@ -79,8 +83,17 @@ export function ModelConfigFlyout({
   const { t } = useTranslation();
   const displayName = localizedModelName(entry.displayName, t);
   const showSlider = config.efforts.length > 1;
-  const contextWindow = config.capability?.contextWindow ?? 0;
   const codexDefaultContext = config.engine === 'codex';
+  const modelContext = useModelContextLimit(
+    !codexDefaultContext && localContextLimitEnabled
+      ? {
+          agent: config.agent,
+          providerId: entry.providerId,
+          modelId: config.wireModelId ?? entry.modelId,
+        }
+      : null,
+  );
+  const contextWindow = modelContext.limit ?? config.capability?.contextWindow ?? 0;
   const codexContext = useCodexContextWindow({
     enabled: codexDefaultContext, providerId: entry.providerId, modelId: config.wireModelId ?? entry.modelId,
   });

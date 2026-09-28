@@ -39,6 +39,22 @@ describe('context editor request ownership', () => {
     expect(hook.result.current.limit).toBe(200_000);
     hook.unmount();
   });
+  it('hides the previous target synchronously while the next read is pending', async () => {
+    const next = deferred<ReturnType<typeof view>>();
+    get.mockResolvedValueOnce(view(100_000)).mockReturnValueOnce(next.promise);
+    const hook = renderHook(({ modelId }) => useModelContextLimit({ ...target, modelId }), {
+      initialProps: { modelId: 'old' },
+    });
+    await act(async () => {});
+    expect(hook.result.current.limit).toBe(100_000);
+    hook.rerender({ modelId: 'new' });
+    expect(hook.result.current.limit).toBeNull();
+    await act(async () => {
+      next.resolve(view(200_000));
+    });
+    expect(hook.result.current.limit).toBe(200_000);
+    hook.unmount();
+  });
   it('sends the owner stamp and never applies a write response to another owner', async () => {
     get.mockResolvedValue(view(null));
     const pending = deferred<ReturnType<typeof view>>();

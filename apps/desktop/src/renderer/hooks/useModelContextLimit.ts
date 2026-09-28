@@ -17,20 +17,25 @@ const EMPTY: ModelContextLimitView = { limit: null, isCustomized: false };
 export function useModelContextLimit(target: ModelContextLimitTarget | null) {
   const key = JSON.stringify(target);
   const stableTarget = useMemo<ModelContextLimitTarget | null>(() => JSON.parse(key), [key]);
-  const [state, setState] = useState({ ...EMPTY, loading: true, error: false });
+  const [state, setState] = useState({ key, ...EMPTY, loading: true, error: false });
   const generation = useRef(0);
 
   const run = useCallback(
     async (write?: { limit: number | null }) => {
       const request = ++generation.current;
       if (!stableTarget) {
-        setState({ ...EMPTY, loading: false, error: false });
+        setState({ key, ...EMPTY, loading: false, error: false });
         return;
       }
       const owner = getDataOwnerGeneration();
       const stamp = { dataOwnerId: owner.dataOwnerId, ownerGeneration: owner.generation };
       const current = () => request === generation.current && isDataOwnerGenerationCurrent(owner);
-      setState((prev) => ({ ...prev, loading: true, error: false }));
+      setState((prev) => ({
+        ...(prev.key === key ? prev : EMPTY),
+        key,
+        loading: true,
+        error: false,
+      }));
       try {
         let view = write
           ? await window.electronAPI.maker.setModelContextLimit(stableTarget, write.limit, stamp)
@@ -38,7 +43,7 @@ export function useModelContextLimit(target: ModelContextLimitTarget | null) {
         if (write && stableTarget.agent === 'codex' && current()) {
           view = await window.electronAPI.maker.getModelContextLimit(stableTarget);
         }
-        if (current()) setState({ ...view, loading: false, error: false });
+        if (current()) setState({ key, ...view, loading: false, error: false });
       } catch (error) {
         log.warn('model context limit request failed', error);
         // A failed runtime refresh is rolled back by main. Read the committed
@@ -46,7 +51,7 @@ export function useModelContextLimit(target: ModelContextLimitTarget | null) {
         if (write && current()) {
           try {
             const view = await window.electronAPI.maker.getModelContextLimit(stableTarget);
-            if (current()) setState({ ...view, loading: false, error: true });
+            if (current()) setState({ key, ...view, loading: false, error: true });
             return;
           } catch (readError) {
             log.warn('model context limit recovery read failed', readError);
@@ -55,18 +60,30 @@ export function useModelContextLimit(target: ModelContextLimitTarget | null) {
         if (current()) setState((prev) => ({ ...prev, loading: false, error: true }));
       }
     },
-    [stableTarget],
+    [key, stableTarget],
   );
 
   useEffect(() => {
-    setState({ ...EMPTY, loading: stableTarget !== null, error: false });
+    setState({ key, ...EMPTY, loading: stableTarget !== null, error: false });
     void run();
     return () => {
       generation.current += 1;
     };
-  }, [run, stableTarget]);
+  }, [key, run, stableTarget]);
 
   const setLimit = useCallback((limit: number | null) => run({ limit }), [run]);
   const reset = useCallback(() => run({ limit: null }), [run]);
-  return { ...state, setLimit, reset };
+  const scopedState = state.key === key
+    ? state
+    : { key, ...EMPTY, loading: stableTarget !== null, error: false };
+  return {
+    limit: scopedState.limit,
+    isCustomized: scopedState.isCustomized,
+    mixed: scopedState.mixed,
+    codexContext: scopedState.codexContext,
+    loading: scopedState.loading,
+    error: scopedState.error,
+    setLimit,
+    reset,
+  };
 }

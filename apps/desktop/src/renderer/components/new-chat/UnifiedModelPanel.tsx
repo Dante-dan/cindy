@@ -127,6 +127,8 @@ export interface UnifiedModelPanelProps {
   onPaymentRequired?: () => void;
   /** false = 只选模型,不出配置浮层(设置类入口的 configurationEnabled)。 */
   configurationEnabled?: boolean;
+  /** Whether flyouts may read this device's persisted context-window overrides. */
+  localContextLimitEnabled?: boolean;
   isRouteDisabled?: (providerId: string, modelId: string, agent: AgentKind) => boolean;
   /**
    * official = 模型优先的受限入口。忽略全局引擎偏好、模型记忆和收藏配置，
@@ -278,6 +280,7 @@ export function UnifiedModelPanel({
   paymentRequiredUnlockLabel,
   onPaymentRequired,
   configurationEnabled = true,
+  localContextLimitEnabled = true,
   selectionPolicy = 'personalized',
   isRouteDisabled,
   sessionEngineFilter,
@@ -1207,6 +1210,7 @@ export function UnifiedModelPanel({
                   )
                 }
                 engineLocked={effectiveRail.kind === 'engine'}
+                localContextLimitEnabled={localContextLimitEnabled}
                 onEngineChange={(engine) => {
                   if (effectiveRail.kind === 'engine') return;
                   applyEngine(target.anchor, target.entry, config, engine);
