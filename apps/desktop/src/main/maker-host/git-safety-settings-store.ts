@@ -2,7 +2,7 @@
  * git-safety-settings-store —— Git safety workflow machine settings.
  *
  * File: <userData>/git-safety-settings.json
- *   { "mode": "existing-git" }
+ *   { "mode": "existing-git", "declinedNonEmptyProjects": [] }
  *
  * New installs snapshot existing Git projects without initializing empty
  * folders. The override file stores only customized fields, so future default
