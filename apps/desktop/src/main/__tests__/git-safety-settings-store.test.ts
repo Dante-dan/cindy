@@ -1,4 +1,4 @@
-import { promises as fs } from 'node:fs';
+import { promises as fs, mkdtempSync, mkdirSync, rmSync, symlinkSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -13,6 +13,19 @@ import {
   recordDeclinedNonEmptyProjectGit,
   resetGitSafetySettings,
 } from '../maker-host/git-safety-settings-store';
+
+const canSymlink = (() => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'cindy-git-consent-probe-'));
+  try {
+    mkdirSync(path.join(dir, 'project'));
+    symlinkSync(path.join(dir, 'project'), path.join(dir, 'alias'), 'dir');
+    return true;
+  } catch {
+    return false;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+})();
 
 describe('git safety settings migration', () => {
   it('defaults new installs to existing Git projects', () => {
@@ -68,22 +81,19 @@ describe('git safety settings migration', () => {
     ).toEqual({ mode: 'all-projects', declinedNonEmptyProjects: ['/example/project'] });
   });
 
-  it.skipIf(process.platform === 'win32')(
-    'recognizes a declined project through a symlink',
-    async () => {
-      const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cindy-git-consent-'));
-      try {
-        const project = path.join(dir, 'project');
-        const alias = path.join(dir, 'alias');
-        await fs.mkdir(project);
-        await fs.symlink(project, alias, 'dir');
-        resetGitSafetySettings();
-        await recordDeclinedNonEmptyProjectGit(alias);
-        expect(hasDeclinedNonEmptyProjectGit(project)).toBe(true);
-      } finally {
-        resetGitSafetySettings();
-        await fs.rm(dir, { recursive: true, force: true });
-      }
-    },
-  );
+  it.skipIf(!canSymlink)('recognizes a declined project through a symlink', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cindy-git-consent-'));
+    try {
+      const project = path.join(dir, 'project');
+      const alias = path.join(dir, 'alias');
+      await fs.mkdir(project);
+      await fs.symlink(project, alias, 'dir');
+      resetGitSafetySettings();
+      await recordDeclinedNonEmptyProjectGit(alias);
+      expect(hasDeclinedNonEmptyProjectGit(project)).toBe(true);
+    } finally {
+      resetGitSafetySettings();
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
 });
