@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   DEVICE_LINK_CAPABILITY_HISTORY_VIEW_V1,
+  SHARED_TASK_CAPABILITY,
   type DeviceLinkClient,
   type DeviceLinkStatus,
   type DeviceView,
@@ -64,6 +65,8 @@ const transport = vi.hoisted(() => {
     connectNow = vi.fn();
     notifyNetworkChanged = vi.fn();
     getStatus = () => this.status;
+    serverCapabilities: string[] = [];
+    hasServerCapability = (capability: string) => this.serverCapabilities.includes(capability);
     isOutboundExplicitlyClosed = () => false;
     // No background recovery owner; each test explicitly starts the fresh read.
     hasPendingRequestsTo = () => false;
@@ -185,6 +188,22 @@ describe('Provider device roster reads', () => {
     expect(await joined).toEqual({ devices: [offlineDesktop] });
     expect(await fresh).toEqual({ devices: [onlineDesktop] });
     expect(context.getPresenceAvailability('desktop')).toBe(true);
+  });
+});
+
+describe('Provider shared-task relay compatibility', () => {
+  it('distinguishes an old online relay from disconnection and re-negotiates after upgrade', async () => {
+    const client = transport.clients[0];
+    expect(context.sharedTaskAvailable).toBeUndefined();
+    await act(async () => client.statusChanged('online'));
+    expect(context.sharedTaskAvailable).toBe(false);
+    await act(async () => client.statusChanged('connecting'));
+    expect(context.sharedTaskAvailable).toBeUndefined();
+    client.serverCapabilities = [SHARED_TASK_CAPABILITY];
+    await act(async () => client.statusChanged('online'));
+    expect(context.sharedTaskAvailable).toBe(true);
+    await act(async () => client.statusChanged('stopped'));
+    expect(context.sharedTaskAvailable).toBeUndefined();
   });
 });
 
