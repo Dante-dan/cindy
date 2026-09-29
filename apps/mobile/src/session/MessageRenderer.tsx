@@ -1,3 +1,5 @@
+import { CompanionTaskResultCard } from './CompanionTaskResultCard';
+import { botTaskResultKey, readBotTaskResults } from '@cindy/maker-shared/botCollaboration';
 import { AgentErrorDetails } from './AgentErrorDetails';
 import { FileTypeIcon } from '@/components/FileTypeIcon';
 import { CompanionMessageActions } from './CompanionMessageActions';
@@ -268,7 +270,6 @@ import {
 } from '@/session/messageContentLayout';
 import { buildMobileReadableViewportLayout } from '@/session/responsiveViewportLayout';
 import {
-  formatDuration,
   type MobileAgentTaskItem,
   type MobileMessageItem,
   type MobileMessageRenderItem,
@@ -393,6 +394,7 @@ import type { RemoteTextFilePreviewResult } from '@/device-link/mobileMakerTrans
 import { fontWeight, lineHeight, radius, spacing, typeScale } from '@/theme/tokens';
 import { iconSize, iconStroke, monoFont, useTheme, useThemedStyles, type ThemeColors } from '@/theme';
 import { i18n } from '@/i18n';
+import { formatLocalizedDuration } from '@/session/sessionDurationFormat';
 import { mobilePresentationLocalizer } from '@/i18n/presentationLocalizer';
 import { mobileToolRowWording } from '@/i18n/toolWording';
 
@@ -3780,6 +3782,12 @@ function MessageBubble({
       ) : null}
       {attachmentStripNode}
       {hasBubbleContent || (!attachmentStripNode && messageQuotes.length === 0) ? bubble : null}
+      {actions.companion && item.message.kind === 'assistant' && item.message.turnCompleted === true
+        && item.message.body.trim() ? readBotTaskResults(item.message.source.agentMeta?.botTaskResults).map(meta => (
+          <CompanionTaskResultCard key={botTaskResultKey(meta)} meta={meta} attached
+            deviceId={actions.remoteDeviceId ?? ''} parentSessionId={item.message.source.sessionId}
+            renderMarkdown={text => <CompanionCardMarkdown text={text} actions={actions} />} />
+        )) : null}
       {item.message.rawError ? <AgentErrorDetails key={item.message.key} message={item.message.rawError} /> : null}
       {item.message.kind === 'assistant' && item.message.modelMismatch ? (
         // 模型降级提示(对齐桌面 AssistantMessage):所选模型本轮被上游静默替换,
@@ -3991,9 +3999,9 @@ function ThinkingCard({
   const title = item.redacted
     ? t('message.renderer.thinkingHidden')
     : item.durationMs !== undefined
-      ? t('message.renderer.thinkingDone', { duration: formatDuration(item.durationMs) })
+      ? t('message.renderer.thinkingDone', { duration: formatLocalizedDuration(item.durationMs) })
       : elapsedMs !== null
-        ? t('message.renderer.thinkingActive', { elapsed: formatDuration(elapsedMs) })
+        ? t('message.renderer.thinkingActive', { elapsed: formatLocalizedDuration(elapsedMs) })
         : t('message.renderer.thinkingProcess');
   return (
     <FoldablePanel
@@ -4421,7 +4429,7 @@ function buildAgentTaskMeta(model: AgentTaskCardModel): string[] {
   const parts: string[] = [AGENT_TASK_PROVIDER_LABEL[model.provider], agentTaskStatusLabel(model.status)];
   if (typeof model.totalTokens === 'number') parts.push(`${formatCompactTokens(model.totalTokens)} tokens`);
   if (typeof model.toolUses === 'number') parts.push(i18n.t('message.renderer.toolUseCount', { n: model.toolUses }));
-  if (typeof model.durationMs === 'number') parts.push(formatDuration(model.durationMs));
+  if (typeof model.durationMs === 'number') parts.push(formatLocalizedDuration(model.durationMs));
   return parts;
 }
 
@@ -4453,8 +4461,7 @@ function AgentTaskCard({
       toolName: item.toolCall?.label,
       toolInput: readAgentTaskToolInput(item.toolCall),
       update: item.update,
-      // 重连后 live update 为空：结构化终态优先，存量历史再由配对结果兜底 completed。
-      // summary 仍来自 secondaryBody，与 desktop 对齐。
+      // 重连后 live update 为空：协议级子任务错误结果必须恢复为 failed。
       result: item.toolCall?.secondaryBody,
       persistedStatus: item.toolCall?.agentTaskStatus,
     }),
@@ -4642,7 +4649,7 @@ function WorkGroupElapsed({ sinceIso }: { sinceIso: string | undefined }) {
   const elapsedMs = useLiveElapsedMs(true, sinceIso);
   return elapsedMs === null
     ? null
-    : <Text style={styles.workGroupElapsed}>{formatDuration(elapsedMs)}</Text>;
+    : <Text style={styles.workGroupElapsed}>{formatLocalizedDuration(elapsedMs)}</Text>;
 }
 
 const WorkToolActivityRow = memo(function WorkToolActivityRow({
@@ -4763,7 +4770,7 @@ function SubagentCard({
     ? t('message.renderer.subagentTyped', { type: item.header.subagentType })
     : t('message.renderer.subagent');
   const statusText = item.status === 'completed' && item.durationMs !== undefined
-      ? t('message.renderer.workedDuration', { duration: formatDuration(item.durationMs) })
+      ? t('message.renderer.workedDuration', { duration: formatLocalizedDuration(item.durationMs) })
       : agentTaskStatusLabel(item.status);
   const subtitle = [item.header.description, statusText].filter(Boolean).join(' · ');
   return (
@@ -6235,7 +6242,8 @@ function MarkdownSessionLinkSpan({
   );
 }
 
-function AttachmentStrip({
+/** 用户消息的附件条(图片缩略图 + 文件 chip);群聊时间线复用同一实现。 */
+export function AttachmentStrip({
   attachments,
   messageKey,
   clientId,
@@ -7480,12 +7488,10 @@ function DiffPayloadBody({
           {canPreview ? (
             <PayloadActionButton
               accessibilityLabel={t('message.renderer.readCurrentRemoteFile')}
-              disabled={previewState.status === 'loading'}
-              label={previewState.status === 'loading'
-                ? t('message.renderer.reading')
-                : previewState.status === 'unavailable'
-                  ? t('message.renderer.retryFilePreview')
-                  : t('message.renderer.readCurrentFile')}
+              busy={previewState.status === 'loading'}
+              label={previewState.status === 'unavailable'
+                ? t('message.renderer.retryFilePreview')
+                : t('message.renderer.readCurrentFile')}
               layout={layout}
               onPress={openFilePreview}
               testID="message.diffFilePreviewLoadButton"
@@ -7708,14 +7714,14 @@ function FilePayloadBody({
         </Text>
         <PayloadPathActions layout={layout} path={sourcePath}>
           {onResolveRemoteMedia && isDesktopLocalMediaUrl(sourcePath) ? <PayloadActionButton
-            accessibilityLabel={t('files.browser.exportShare')} label={t(exporting ? 'files.browser.exporting' : 'files.browser.exportShare')}
-            layout={layout} disabled={exporting} onPress={() => { void exportFile(); }} testID="message.fileExportButton" /> : null}
+            accessibilityLabel={t('files.browser.exportShare')} label={t('files.browser.exportShare')}
+            layout={layout} busy={exporting} onPress={() => { void exportFile(); }} testID="message.fileExportButton" /> : null}
 
           {canPreview && previewState.status !== 'ready' ? (
             <PayloadActionButton
               accessibilityLabel={t('message.renderer.loadRemoteTextPreview')}
-              disabled={previewState.status === 'loading'}
-              label={previewState.status === 'loading' ? t('message.renderer.loading') : previewState.status === 'unavailable' ? t('message.renderer.retryPreview') : t('message.renderer.loadPreview')}
+              busy={previewState.status === 'loading'}
+              label={previewState.status === 'unavailable' ? t('message.renderer.retryPreview') : t('message.renderer.loadPreview')}
               layout={layout}
               onPress={loadPreview}
               testID="message.filePreviewLoadButton"
@@ -7852,8 +7858,8 @@ function PayloadPathActions({
         {canCopy ? (
           <PayloadActionButton
             accessibilityLabel={t('message.renderer.copyRemoteFilePath')}
-            disabled={copyState === 'copying'}
-            label={copyState === 'copying' ? t('message.renderer.copyStateCopying') : t('message.renderer.copyPath')}
+            busy={copyState === 'copying'}
+            label={t('message.renderer.copyPath')}
             layout={layout}
             onPress={copyPath}
             testID="message.copyFilePathButton"
@@ -7872,6 +7878,7 @@ function PayloadPathActions({
 
 function PayloadActionButton({
   accessibilityLabel,
+  busy = false,
   disabled = false,
   label,
   layout,
@@ -7879,6 +7886,8 @@ function PayloadActionButton({
   testID,
 }: {
   accessibilityLabel?: string;
+  /** 进行中:按钮只转圈、不显示文字(宽高由 minWidth/minHeight 保持不跳)。 */
+  busy?: boolean;
   disabled?: boolean;
   label: string;
   layout: PayloadBodyLayout;
@@ -7886,13 +7895,15 @@ function PayloadActionButton({
   testID?: string;
 }) {
   const styles = useThemedStyles(makeStyles);
+  const { colors } = useTheme();
+  const interactionDisabled = disabled || busy;
   return (
     <Pressable
       accessibilityLabel={accessibilityLabel ?? label}
       accessibilityRole="button"
-      accessibilityState={{ disabled }}
-      disabled={disabled}
-      onPress={disabled ? undefined : onPress}
+      accessibilityState={{ busy: busy || undefined, disabled: interactionDisabled }}
+      disabled={interactionDisabled}
+      onPress={interactionDisabled ? undefined : onPress}
       style={({ pressed }) => [
         styles.payloadOpenButton,
         {
@@ -7900,11 +7911,15 @@ function PayloadActionButton({
           minWidth: layout.actionButtonMinWidth,
         },
         pressed && styles.pressed,
-        disabled && styles.disabled,
+        disabled && !busy && styles.disabled,
       ]}
       testID={testID}
     >
-      <Text style={styles.payloadOpenButtonText}>{label}</Text>
+      {busy ? (
+        <ActivityIndicator color={colors.textSecondary} size="small" />
+      ) : (
+        <Text style={styles.payloadOpenButtonText}>{label}</Text>
+      )}
     </Pressable>
   );
 }
@@ -8655,11 +8670,11 @@ const makeStyles = (colors: ThemeColors) => StyleSheet.create({
     lineHeight: lineHeight.micro,
     fontWeight: fontWeight.medium,
   },
+  // 分隔点:纯语义三级色,不再叠透明度「做淡」(§3 硬规则 1)。
   agentSwitchDot: {
     color: colors.textTertiary,
     fontSize: typeScale.micro,
     lineHeight: lineHeight.micro,
-    opacity: 0.5,
   },
   agentSwitchModel: {
     color: colors.textSecondary,
@@ -9218,7 +9233,8 @@ const makeStyles = (colors: ThemeColors) => StyleSheet.create({
     paddingVertical: spacing.md,
   },
   payloadHeaderText: { flex: 1, minWidth: 0 },
-  payloadTitle: { color: colors.textPrimary, fontSize: typeScale.title, fontWeight: fontWeight.medium, lineHeight: lineHeight.title },
+  // 面板大标题:§3 20/25 · 600。
+  payloadTitle: { color: colors.textPrimary, fontSize: typeScale.title, fontWeight: fontWeight.semibold, lineHeight: lineHeight.title },
   payloadGalleryCount: {
     color: colors.textSecondary,
     fontSize: typeScale.caption,
