@@ -50,7 +50,9 @@ it('selects a supported native detent when opening and rotating a menu', () => {
   } finally { act(() => root.unmount()); }
 });
 
-it('lets the native sheet scroll RN content while keeping its footer outside the scroll viewport', () => {
+// Native components are DOM mocks here: this guards composition only, not
+// medium-detent scrolling, keyboard resizing, final-action reachability or footer visibility on iOS.
+it('composes a content-sized RN bridge inside the native scroll component and a sibling footer', () => {
   state.width = 402; state.height = 874;
   const container = document.createElement('div');
   const root = createRoot(container);
