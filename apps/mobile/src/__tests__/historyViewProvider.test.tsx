@@ -168,6 +168,81 @@ describe('Provider device roster reads', () => {
     expect(await fresh).toEqual({ devices: [desktop] });
   });
 
+  it('fences stale rosters without disturbing another device or a second controller sharing the host', async () => {
+    const secondRoot = createRoot(document.createElement('div'));
+    let secondContext!: DeviceLinkContextValue;
+    function SecondProbe() { secondContext = useDeviceLink(); return null; }
+    await act(async () => secondRoot.render(createElement(DeviceLinkProvider, null, createElement(SecondProbe))));
+    try {
+      const client = transport.clients[0];
+      const secondClient = transport.clients[1];
+      const stale = deferredRoster();
+      const current = deferredRoster();
+      auth.apiFetch.mockReturnValueOnce(stale.promise).mockReturnValueOnce(current.promise);
+      client.openLink.mockResolvedValue(accepted(supported));
+      secondClient.openLink.mockResolvedValue(accepted(supported));
+      let settleOtherDevice!: (value: { ok: true; result: string }) => void;
+      let settleOtherController!: (value: { ok: true; result: string }) => void;
+      client.invoke.mockImplementationOnce(() => new Promise(resolve => { settleOtherDevice = resolve; }));
+      secondClient.invoke.mockImplementationOnce(() => new Promise(resolve => { settleOtherController = resolve; }));
+      const presence = (deviceId: string): PresenceSnapshot => ({
+        deviceId, deviceName: deviceId, platform: 'darwin', appVersion: 'test',
+        online: true, remoteControlEnabled: true, busy: false, lastSeenAt: 1,
+      });
+      // Seed authoritative presence before opening links: a real presence event
+      // intentionally invalidates that device's cached handshake. Roster fencing
+      // itself must leave these accepted links and outstanding calls untouched.
+      await act(async () => {
+        client.presenceChanged(presence('other-host'));
+        secondClient.presenceChanged(presence('desktop'));
+      });
+      let otherDeviceRead!: Promise<unknown>;
+      let otherControllerRead!: Promise<unknown>;
+      await act(async () => {
+        otherDeviceRead = context.invoke('other-host', historyChannel);
+        otherControllerRead = secondContext.invoke('desktop', historyChannel);
+      });
+      expect(client.invoke).toHaveBeenCalledTimes(1);
+      expect(secondClient.invoke).toHaveBeenCalledTimes(1);
+      const oldRead = context.readDeviceList();
+      const freshRead = context.readDeviceList({ fresh: true });
+      const row = (deviceId: string, online: boolean): DeviceView => ({
+        deviceId, name: deviceId, platform: 'darwin', appVersion: 'test',
+        online, remoteControlEnabled: true, busy: false, lastSeenAt: new Date(1).toISOString(), isSelf: false,
+      });
+      const staleRows = [row('desktop', false), row('other-host', false)];
+      await act(async () => stale.resolve({ devices: staleRows }));
+      expect(await oldRead).toEqual({ devices: staleRows });
+      expect(context.getPresenceAvailability('desktop')).toBeNull();
+      expect(context.getPresenceAvailability('other-host')).toBe(true);
+      expect(secondContext.getPresenceAvailability('desktop')).toBe(true);
+      const currentRows = [row('desktop', true), row('other-host', true)];
+      await act(async () => current.resolve({ devices: currentRows }));
+      expect(await freshRead).toEqual({ devices: currentRows });
+      expect(context.getPresenceAvailability('desktop')).toBe(true);
+      expect(context.getPresenceAvailability('other-host')).toBe(true);
+      expect(secondContext.getPresenceAvailability('desktop')).toBe(true);
+      await act(async () => {
+        settleOtherDevice({ ok: true, result: 'other device result' });
+        settleOtherController({ ok: true, result: 'other controller result' });
+      });
+      expect(await otherDeviceRead).toBe('other device result');
+      expect(await otherControllerRead).toBe('other controller result');
+      // Reading again reuses each accepted handshake rather than reopening links.
+      await act(async () => {
+        await context.invoke('other-host', historyChannel);
+        await secondContext.invoke('desktop', historyChannel);
+      });
+      for (const peer of [client, secondClient]) {
+        expect(peer.openLink).toHaveBeenCalledTimes(1);
+        expect(peer.invoke).toHaveBeenCalledTimes(2);
+        expect(peer.stop).not.toHaveBeenCalled();
+        expect(peer.restartConnection).not.toHaveBeenCalled();
+        expect(peer.connectNow).not.toHaveBeenCalled();
+      }
+    } finally { await act(async () => secondRoot.unmount()); }
+  });
+
   it('prevents an older roster response from superseding a newer fresh read', async () => {
     const stale = deferredRoster();
     const current = deferredRoster();
