@@ -1,18 +1,22 @@
+import { usePublishHomeScheduleUnread } from './HomeUnreadContext';
+import { getMobileAuthOwner, isMobileAuthOwnerCurrent } from '@/auth/authOwnerGeneration';
 import type { HomeMode } from './homeViewPreferenceStore';
 import { TaskTagDots } from '@/session/TaskTags';
 import { ResidentHomeList, useResidentHomeList } from './ResidentHomeList';
 import { HomeNewTaskButton } from './HomeNewTaskButton';
 import { useRetainedHomeState, getHomeViewSession } from './homeViewSession';
 import { rememberRecentTask } from './recentTasks';
-import { homeListStyles, SessionStatusMark } from '@/session/HomeListVisuals';
-import { useHeaderHeight } from "expo-router/react-navigation";
+import { homeListStyles, SESSION_ROW_LONG_PRESS_MS, SessionStatusMark } from '@/session/HomeListVisuals';
+import { useOptionalHeaderHeight } from '@/session/useOptionalHeaderHeight';
 import { SessionHeaderNativeBlur } from "@/session/SessionHeaderNativeControls";
+import { rememberComposerEntry } from './composerMorph';
+import type { ComposerMorphOrigin } from './composerGeometry';
 import { RemoteTaskSuggestions } from '@/session/RemoteTaskSuggestions';
 import { isTaskSuggestionsSyncPending, useRemoteTaskSuggestionsPresentation } from '@/session/useRemoteTaskSuggestionsPresentation';
 import { countHomeSuggestionSessions, remoteTaskSuggestionsMode, type RemoteTaskSuggestionId } from '@/session/remoteTaskSuggestionsModel';
 import { cacheRemoteResourceHome, readRemoteResourceSnapshot } from '@/device-link/remoteResourceCache';
 import { canBrowseMobileHomeDevice } from '@/session/mobileHome';
-import { useFocusEffect, useIsFocused } from 'expo-router';
+import { useFocusEffect, useIsFocused, useRouter } from 'expo-router';
 import { createContext, useContext, Fragment, memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode } from 'react';
 import {
   ActivityIndicator,
@@ -36,15 +40,19 @@ import {
   type ViewStyle,
 } from 'react-native';
 import { Text } from '@/components/AppText';
-import { DeviceLinkError, type DeviceView, type PresenceSnapshot } from '@cindy/device-link';
+import { DeviceLinkError, isSharedTaskPeer, type DeviceView, type PresenceSnapshot } from '@cindy/device-link';
+import { useSharedTasks } from '@/device-link/useSharedTasks';
+import { splitSharedHomeGroup, type SharedHomeRole } from '@/session/sharedHomeGroup';
 import {
   Archive,
   Check,
   ChevronDown,
   ChevronRight,
+  Crown,
   Ellipsis,
   Folder,
   FolderOpen,
+  FileText,
   Hammer,
   LoaderCircle,
   Menu,
@@ -64,7 +72,9 @@ import type { TFunction } from 'i18next';
 import { useAuth } from '@/auth/AuthContext';
 import { configureCollapseAnimation } from '@/utils/collapseAnimation';
 import { useGuardedPush } from '@/utils/useGuardedPush';
+import { useHomeMenuFadeTiming } from '@/session/homeMenuFadeTiming';
 import {
+  MainWindowActionButton,
   MainWindowActionGroup,
   MainWindowEmptyState,
   StatusDot,
@@ -84,7 +94,6 @@ import {
   NativePullDownMenu,
   usesNativePullDownMenu,
   usesNativeStackHeader,
-  usesSystemActionMenu,
 } from '@/platform/chrome';
 import {
   buildHomeDisplayPullDownActions,
@@ -128,7 +137,7 @@ import {
 import { withTransientRemoteRetry } from '@/device-link/remoteRetry';
 import { ConnectionRecoveryProgress } from '@/components/ConnectionBanner';
 import { ConnectionNoticeOverlay, useDelayedConnectionNotice } from '@/components/ConnectionNoticeOverlay';
-import { resolveConnectionBannerVisibility, resolveConnectionBannerSyncActionVisibility, resolveHomeConnectionFeedback, type HomeConnectionError, type HomeDeviceFailure } from '@/components/connectionBannerVisibility';
+import { resolveConnectionBannerVisibility, resolveConnectionBannerSyncActionVisibility, resolveHomeConnectionFeedback, resolveHomeDeviceDisconnected, type HomeConnectionError, type HomeDeviceFailure } from '@/components/connectionBannerVisibility';
 import { QuietSyncIndicator } from '@/components/QuietSyncIndicator';
 import { runIndependentSnapshotReads } from '@/device-link/sessionSnapshotSingleFlight';
 import { revokedDevicesStore, useRevokedDevices } from '@/device-link/revokedDevicesStore';
@@ -199,7 +208,7 @@ import {
 } from '@/session/homeSections';
 import {
   readHomeViewPreferences,
-  saveHomeViewPreferences,
+  saveHomeViewPreferences as persistHomeViewPreferences,
   type HomeViewPreferences,
 } from '@/session/homeViewPreferenceStore';
 import {
@@ -256,7 +265,9 @@ import { useSessionListActions } from '@/session/useSessionListActions';
 import { useModalFadeLifecycle } from '@/session/useModalFadeLifecycle';
 import type { RemoteSession } from '@/session/types';
 import { useTheme, useThemedStyles, type ThemeColors } from '@/theme';
-import { fontWeight, iconSize, iconStroke, lineHeight, radius, spacing, typeScale } from '@/theme/tokens';
+import { fontWeight, iconSize, iconStroke, lineHeight, motionDuration, navigationChrome, radius, spacing, typeScale } from '@/theme/tokens';
+import { mobileInteractionStyles } from '@/components/mobileInteractionStyles';
+import { useReduceMotionEnabled } from '@/hooks/useReduceMotion';
 
 const LIST_LIMIT = 200;
 // Keep the device-link channel responsive while All Sessions hydrates several
@@ -279,6 +290,16 @@ const HOME_SESSION_SINGLE_LINE_ROW_HEIGHT = 60;
 const CINDY_LIST_GUTTER = 20;
 const CINDY_LIST_FAB_BOTTOM = 45;
 const HOME_HEADER_MIN_HEIGHT = 48;
+/**
+ * 新建钮不在系统栏时的列表底部滚动余量:给右下浮动新建钮让出最后一行。
+ * 新建钮坐在输入框静止底线上(安全区 + 8,55 圆钮,顶边约安全区 + 63),
+ * 沿用历史取值 83,最后一行与圆钮之间留约 20pt。
+ */
+const LEGACY_HOME_LIST_BOTTOM_RESERVE = 83;
+/** 项目块「查看全部」行的左缩进(历史取值,与项目内任务文字列大致对齐,保持布局不变)。 */
+const HOME_PROJECT_VIEW_ALL_INSET = 48;
+/** 连接提示条同步按钮的视觉尺寸;命中区用 hitSlop 补到 navigationChrome.target(44)。 */
+const CONNECTION_ICON_BUTTON_SIZE = 28;
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 
 function estimateHomeSessionRowHeight(item: RemoteSessionListItem): number {
@@ -374,7 +395,7 @@ const ActiveHomeSession = createContext<string | undefined>(undefined);
 export function MobileHome(props: MobileHomeProps) {
   const screenFocused = useIsFocused();
   const { accountGeneration } = useAuth();
-  return <RemoteSessionStoreSubscriptionGate enabled={screenFocused && props.active !== false}>
+  return <RemoteSessionStoreSubscriptionGate enabled={screenFocused}>
     <ActiveHomeSession.Provider value={props.currentSessionId}>
       <HomeScreenContent key={accountGeneration} {...props} />
     </ActiveHomeSession.Provider>
@@ -382,6 +403,8 @@ export function MobileHome(props: MobileHomeProps) {
 }
 
 function HomeScreenContent({ active = true, onModeChange, width, onDismiss, newSessionInSystemBar = false, onSelectSession, runNavigation, newSessionActionRef }: MobileHomeProps) {
+  const ownedSharedTasks = useSharedTasks();
+  const [sharedCollapsed, setSharedCollapsed] = useState(false);
   // The retained page and its visible sidebar must never release each other's subscriptions.
   const HOME_LIST_SUBSCRIPTION_OWNER = `device-list:${useId()}`;
   const embedded = width !== undefined;
@@ -391,17 +414,28 @@ function HomeScreenContent({ active = true, onModeChange, width, onDismiss, newS
   const viewSession = getHomeViewSession();
   const [restoredView] = useState(() => viewSession.has('preferencesHydrated'));
   const routeFocused = useIsFocused();
-  const screenFocused = routeFocused && active;
+  // The task mirror also feeds navigation while the teammate pane is visible.
+  // Only read/sync work stays active; native headers and list presentation remain pane-scoped.
+  const screenFocused = routeFocused;
   const screenFocusedRef = useRef(screenFocused);
   screenFocusedRef.current = screenFocused;
   const styles = useThemedStyles(makeStyles);
   const { colors, mode } = useTheme();
   const { t, i18n: i18nInstance } = useTranslation();
+  const saveHomeViewPreferences = useCallback((patch: Parameters<typeof persistHomeViewPreferences>[0]) => {
+    const owner = getMobileAuthOwner();
+    return persistHomeViewPreferences(patch).catch(() => {
+      if (isMobileAuthOwnerCurrent(owner)) {
+        Alert.alert(t('devices.list.alert.actionFailed'), t('models.unified.saveFailed'));
+      }
+    });
+  }, [t]);
   // 所有前进导航(进会话 / 新建 / 设置 / 组页面)统一走守卫 push:列表卡顿时的
   // 连点会各自触发一次裸 push,把同一页压进栈 N 层(返回也要 N 次)。
   const push = useGuardedPush();
   const navigationHost = useRef({ runNavigation, onSelectSession });
   navigationHost.current = { runNavigation, onSelectSession };
+  const router = useRouter();
   const guardedPush = useCallback((href: Parameters<typeof push>[0]) => {
     const run = navigationHost.current.runNavigation;
     if (run) run(() => push(href)); else push(href);
@@ -486,7 +520,8 @@ function HomeScreenContent({ active = true, onModeChange, width, onDismiss, newS
   const remoteHomeCollectionsRef = useRef<RemoteHomeCollection[]>([]);
   remoteHomeCollectionsRef.current = remoteHomeCollections;
   const selectedDeviceIdRef = useRef<string | null>(selectedDeviceId);
-  selectedDeviceIdRef.current = selectedDeviceId;
+  // Hidden task pane synchronizes every host for its destination badge, independent of UI filters.
+  selectedDeviceIdRef.current = active ? selectedDeviceId : null;
   const [searchOpen, setSearchOpen] = useRetainedHomeState(viewSession, 'searchOpen', false);
   const [searchFilterOpen, setSearchFilterOpen] = useState(false);
   // 恢复偏好时暂存的设备名:设备列表尚未同步回来前表头用它兜底,避免显示成占位文案。
@@ -575,7 +610,11 @@ function HomeScreenContent({ active = true, onModeChange, width, onDismiss, newS
     for (const deviceId of unresponsiveDevices) merged[deviceId] = 'failed';
     return merged;
   }, [rawDeviceConnectionStates, unresponsiveDevices]);
+  const publishScheduleUnread = usePublishHomeScheduleUnread();
   const [scheduleIndex, setScheduleIndex] = useState<Map<string, RemoteSessionScheduleInfo>>(() => new Map());
+  useEffect(() => {
+    publishScheduleUnread(new Set([...scheduleIndex].filter(([, info]) => info.unreadCount > 0).map(([id]) => id)));
+  }, [scheduleIndex, publishScheduleUnread]);
   const scheduleMirrorInvalidations = useRemoteScheduleMirrorInvalidations();
 
   // Clear the entire account-owned Home projection before paint. The generation ref is already
@@ -784,7 +823,7 @@ function HomeScreenContent({ active = true, onModeChange, width, onDismiss, newS
             const epoch = remoteSessionStore.captureDeviceSessionListMutationEpoch(device.deviceId);
             const list = await invoke<RemoteSession[]>(device.deviceId, 'local-db:sessions:list', [
               LIST_LIMIT,
-              remoteListStatusFilter(statusFilter),
+              active ? remoteListStatusFilter(statusFilter) : 'active',
               { includePinned: true, fresh: true },
             ]);
             return [list, epoch] as const;
@@ -793,8 +832,8 @@ function HomeScreenContent({ active = true, onModeChange, width, onDismiss, newS
             assertCurrentScope();
             const epoch = remoteSessionStore.captureActiveSessionSnapshotEpoch();
             // Old hosts ignore this optional projection and still return the full snapshot.
-            const active = await invoke<unknown[]>(device.deviceId, 'maker:list-active', [
-              { summary: true },
+            const active = await invoke<unknown>(device.deviceId, 'maker:list-active', [
+              { summary: true, snapshotVersion: 2 },
             ]).catch((err) => {
               if (isOptionalActiveSessionSnapshotError(err)) return null;
               throw err;
@@ -829,7 +868,7 @@ function HomeScreenContent({ active = true, onModeChange, width, onDismiss, newS
           device.name,
           nextSessions,
         );
-        if (Array.isArray(activeSessions)) {
+        if (activeSessions !== null) {
           remoteSessionStore.setActiveSessionSnapshots(
             device.deviceId,
             activeSessions,
@@ -876,7 +915,7 @@ function HomeScreenContent({ active = true, onModeChange, width, onDismiss, newS
         superseded: false,
       };
     }
-  }, 'foreground'), [HOME_LIST_SUBSCRIPTION_OWNER, homeCacheUserId, invoke, isCurrentHomeSyncTarget, markDeviceOffline, refreshDeviceScheduleIndex, statusFilter, subscribe, updateDeviceConnectionState]);
+  }, 'foreground'), [HOME_LIST_SUBSCRIPTION_OWNER, homeCacheUserId, invoke, isCurrentHomeSyncTarget, markDeviceOffline, refreshDeviceScheduleIndex, statusFilter, active, subscribe, updateDeviceConnectionState]);
 
   const hydrateDeviceSessions = useCallback((
     device: DeviceView,
@@ -1043,7 +1082,7 @@ function HomeScreenContent({ active = true, onModeChange, width, onDismiss, newS
       const ghostDeviceIds = new Set<string>();
       for (const session of remoteSessionStore.getSessions()) {
         const shardId = session.deviceLinkDeviceId;
-        if (shardId && !knownDeviceIds.has(shardId)) ghostDeviceIds.add(shardId);
+        if (shardId && !isSharedTaskPeer(shardId) && !knownDeviceIds.has(shardId)) ghostDeviceIds.add(shardId);
       }
       for (const deviceId of ghostDeviceIds) {
         invalidateScheduleIndexForDevice(deviceId);
@@ -1466,8 +1505,8 @@ function HomeScreenContent({ active = true, onModeChange, width, onDismiss, newS
       canOpen: item.canOpen,
       deviceId: item.device.deviceId,
     })),
-    selectedDeviceId,
-  ) : [], [deviceRows, screenFocused, selectedDeviceId]);
+    active ? selectedDeviceId : null,
+  ) : [], [deviceRows, screenFocused, selectedDeviceId, active]);
   const homeSyncDeviceIdSet = useMemo(() => new Set(homeSyncDeviceIds), [homeSyncDeviceIds]);
   const homeSyncRows = useMemo(
     () => deviceRows.filter((item) => homeSyncDeviceIdSet.has(item.device.deviceId)),
@@ -1476,7 +1515,7 @@ function HomeScreenContent({ active = true, onModeChange, width, onDismiss, newS
 
   useEffect(() => {
     const expectedAccountGeneration = accountGeneration;
-    const selectedDeviceIdAtStart = selectedDeviceId;
+    const selectedDeviceIdAtStart = selectedDeviceIdRef.current;
     const diff = reconcileHomeDeviceSyncScope(homeSyncDeviceIds);
     if (diff.acquire.length === 0) return;
     const acquireIds = new Set(diff.acquire);
@@ -1809,8 +1848,12 @@ function HomeScreenContent({ active = true, onModeChange, width, onDismiss, newS
   );
   const displayedProjectOrder = displayed.projectOrder;
   const displayedManualProjectOrder = displayed.manualProjectOrder;
+  const sharedGroup = useMemo(() => splitSharedHomeGroup(home, ownedSharedTasks, {
+    sessions: homeSessions, searchQuery, statusFilter,
+  }), [home, ownedSharedTasks, homeSessions, searchQuery, statusFilter]);
+  const sharedRows = shouldReplaceListWithSearchResults(searchQuery, indexedSearch.status) ? [] : sharedGroup.rows;
   const homeSections = useMemo(
-    () => buildHomeSections(home, groupByProject, pinnedCollapsed, {
+    () => buildHomeSections(sharedGroup.home, groupByProject, pinnedCollapsed, {
       dialogueTitle: t('devices.list.menu.dialogueFolder'),
       groupDialogue,
       manualProjectOrder: displayedManualProjectOrder,
@@ -1818,7 +1861,7 @@ function HomeScreenContent({ active = true, onModeChange, width, onDismiss, newS
       projectOrder: displayedProjectOrder,
       sortBy,
     }),
-    [displayedManualProjectOrder, displayedProjectOrder, groupByProject, groupDialogue, home, pinnedCollapsed, priorityContext, sortBy, t],
+    [displayedManualProjectOrder, displayedProjectOrder, groupByProject, groupDialogue, sharedGroup.home, pinnedCollapsed, priorityContext, sortBy, t],
   );
   const sections = useMemo(() => {
     if (!shouldReplaceListWithSearchResults(searchQuery, indexedSearch.status)) return homeSections;
@@ -1902,10 +1945,7 @@ function HomeScreenContent({ active = true, onModeChange, width, onDismiss, newS
   }, [home.deviceFilters, home.selectedDeviceId, initialHomeSettled, selectedDeviceId]);
   // 连接层失败原因比请求级 error 更根因:unstable 在 online 时也需保持可见。
   const activeConnectionIssue = status !== 'online' || connectionIssue?.kind === 'unstable' ? connectionIssue : null;
-  const selectedDeviceDisconnected = status !== 'connecting' && home.deviceFilters.some((item) => item.deviceId !== null
-    && (!selectedDeviceId || item.deviceId === selectedDeviceId) && item.sessionCount > 0)
-    && !home.deviceFilters.some((item) => item.deviceId !== null
-      && (!selectedDeviceId || item.deviceId === selectedDeviceId) && item.available);
+  const selectedDeviceDisconnected = resolveHomeDeviceDisconnected(home.deviceFilters, selectedDeviceId, status === 'connecting');
   const showConnectionRow = selectedDeviceDisconnected || resolveConnectionBannerVisibility({
     offline: status !== 'online',
     connecting: status === 'connecting',
@@ -1943,7 +1983,7 @@ function HomeScreenContent({ active = true, onModeChange, width, onDismiss, newS
   // 无可控制电脑的引导态(landing)可见性,与 ListEmptyComponent 的分支同口径。
   // 引导态下首页没有可筛选的对话:表头「所有对话 ▾」退化为纯品牌标题、新建 FAB 隐藏,
   // 避免在产品说明页上摆一堆无意义的入口。
-  const homeListItemCount = sections.reduce((count, section) => count + section.data.length, 0);
+  const homeListItemCount = sharedRows.length + sections.reduce((count, section) => count + section.data.length, 0);
   const showRemoteGuide = homeListItemCount === 0
     && !initialHomeLoading
     && !initialHomeError
@@ -2030,7 +2070,7 @@ function HomeScreenContent({ active = true, onModeChange, width, onDismiss, newS
     guardedPush(href);
   }, [guardedPush, priorityContext, rememberTask, swipeRegistry, t]);
 
-  const openNewSession = useCallback((project?: MobileHomeProjectGroup, suggestion?: RemoteTaskSuggestionId, explicitDeviceId?: string) => {
+  const openNewSession = useCallback((project?: MobileHomeProjectGroup, suggestion?: RemoteTaskSuggestionId, explicitDeviceId?: string, origin?: ComposerMorphOrigin) => {
     const deviceId = project?.deviceId ?? explicitDeviceId ?? home.primaryDevice?.deviceId;
     const deviceName = project?.deviceName ?? newSessionDeviceOptions.find((device) => device.deviceId === deviceId)?.name ?? home.primaryDevice?.label ?? deviceId ?? '';
     if (!deviceId) {
@@ -2043,6 +2083,7 @@ function HomeScreenContent({ active = true, onModeChange, width, onDismiss, newS
         deviceId,
         deviceName,
         deviceOptions: serializeNewSessionDeviceOptions(newSessionDeviceOptions),
+        ...(origin ? { composerMorph: rememberComposerEntry(origin) } : {}),
         ...(suggestion ? { suggestion } : {}),
         ...(project?.workingDir ? { workingDir: project.workingDir } : {}),
         // 列表正筛选某台电脑时,新建默认跟随这台电脑(显式指定,盖过"上次选择"的
@@ -2068,12 +2109,14 @@ function HomeScreenContent({ active = true, onModeChange, width, onDismiss, newS
     setLoggingOut(true);
     try {
       await auth.logout();
+      // Same landing as settings and the partner entries, without relying on the outer auth redirect.
+      router.replace('/login');
     } catch (error) {
       Alert.alert(t('devices.list.alert.actionFailed'), formatRemoteError(error));
     } finally {
       setLoggingOut(false);
     }
-  }, [auth, loggingOut, t]);
+  }, [auth, loggingOut, router, t]);
 
   const toggleProject = useCallback((key: string) => {
     configureCollapseAnimation();
@@ -2472,15 +2515,11 @@ function HomeScreenContent({ active = true, onModeChange, width, onDismiss, newS
     windowWidth: screenWidth,
   });
 
+  // 只服务系统下拉(iOS UIMenu / Android PopupMenu):点选即收起,没有自绘菜单的
+  // onClosed 可等,撤权提示直接挂;自绘回退菜单走 DeviceMenuModal 的 onSelect。
   const selectHomeScope = useCallback((item: MobileHomeDeviceFilterItem) => {
     if (item.deviceId && item.state === 'access_revoked') {
-      const deviceId = item.deviceId;
-      if (usesSystemActionMenu()) {
-        setRevokedTipDeviceId(deviceId);
-        return;
-      }
-      pendingMenuActionRef.current = () => setRevokedTipDeviceId(deviceId);
-      setDeviceMenuOpen(false);
+      setRevokedTipDeviceId(item.deviceId);
       return;
     }
     viewPrefsTouchedRef.current = true;
@@ -2559,7 +2598,7 @@ function HomeScreenContent({ active = true, onModeChange, width, onDismiss, newS
   const nativeHomeHeader = !embedded && usesNativeStackHeader();
   const homeGeometry = useAdaptiveWindow();
   const keepMenuTopLeft = nativeHomeHeader && homeGeometry.barEdge !== 'none';
-  const nativeHeaderHeight = useHeaderHeight();
+  const nativeHeaderHeight = useOptionalHeaderHeight();
   const chromeHeight = nativeHomeHeader
     ? nativeHeaderHeight + (headerHeight ?? 0)
     : (headerHeight ?? edgePadding.paddingTop + HOME_HEADER_MIN_HEIGHT);
@@ -2575,6 +2614,67 @@ function HomeScreenContent({ active = true, onModeChange, width, onDismiss, newS
           restoreListPosition();
         }}
         sections={sections}
+        ListHeaderComponent={sharedRows.length > 0 ? <View style={styles.projectGroup} testID="home.sharedGroup">
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={t('sharedTask.title')}
+            accessibilityState={{ expanded: !sharedCollapsed }}
+            onPress={() => { configureCollapseAnimation(); setSharedCollapsed(value => !value); }}
+            style={({ pressed }) => [styles.projectRow, pressed && styles.pressed]}
+            testID="home.sharedHeader"
+          >
+            {sharedCollapsed
+              ? <ChevronRight color={colors.textSecondary} size={iconSize.xl} strokeWidth={iconStroke.regular} />
+              : <ChevronDown color={colors.textSecondary} size={iconSize.xl} strokeWidth={iconStroke.regular} />}
+            <UsersRound color={colors.textSecondary} size={iconSize.action} strokeWidth={iconStroke.thin} />
+            <Text style={styles.projectTitle} numberOfLines={1}>{t('sharedTask.title')}</Text>
+          </Pressable>
+          {!sharedCollapsed && sharedRows.map((row, index) => {
+            if (row.item) {
+              const content = <HomeSessionRow
+                key={row.key}
+                indented
+                hideDivider={index === sharedRows.length - 1}
+                item={row.item}
+                sharedRole={row.role}
+                expandedAutomationGroups={expandedAutomationGroups}
+                onToggleAutomationGroup={toggleAutomationGroup}
+                onOpenSession={openSession}
+                onOpenAutomationGroup={openAutomationGroup}
+                swipe={sessionSwipeControls}
+                testID="home.sharedSessionRow"
+              />;
+              if (row.item.automationGroup || !conversationSearchAllowsLocalWrites(row.item)) return content;
+              return <SwipeableSessionRow key={row.key} session={row.item.session as RemoteSession}
+                registry={swipeRegistry} onArchive={archiveSession} onShowOptions={showSessionOptions} onTogglePin={toggleSessionPinned}
+                testID="home.sharedSessionRow.swipe">{content}</SwipeableSessionRow>;
+            }
+            return <Pressable
+            key={row.key}
+            accessibilityRole="button"
+            accessibilityLabel={row.task.title + ', ' + t('sharedTask.roleHost')}
+            onPress={() => guardedPush({ pathname: '/shared-session', params: { sharedTaskId: row.task.sharedTaskId } })}
+            style={({ pressed }) => [styles.sessionListRow, styles.sessionListRowSingleLine, styles.sessionListRowIndented, pressed && styles.pressed]}
+            testID="home.sharedOwnerRow"
+          >
+            <View style={[styles.sessionIconCell, styles.sessionIconCellSingleLine]}>
+              <FileText color={colors.textSecondary} size={iconSize.action} strokeWidth={iconStroke.thin} />
+            </View>
+            <View style={[styles.sharedRoleSlot, styles.sharedRoleSlotSingleLine]} testID={`home.sharedRoleSlot.owned.${row.task.sessionId}`}>
+              <Crown
+                accessible={false}
+                color={colors.warningFg}
+                size={iconSize.md}
+                strokeWidth={iconStroke.thin}
+              />
+            </View>
+            <View style={[styles.sessionListContent, index === sharedRows.length - 1 && styles.sessionListContentNoDivider]}>
+              <View style={styles.sessionTitleRow}>
+                <Text style={styles.sessionTitle} numberOfLines={1} ellipsizeMode="tail">{row.task.title}</Text>
+              </View>
+            </View>
+          </Pressable>; })}
+        </View> : null}
         style={styles.homeList}
         keyExtractor={(item) => item.key}
         initialNumToRender={HOME_LIST_INITIAL_RENDER_COUNT}
@@ -2586,6 +2686,7 @@ function HomeScreenContent({ active = true, onModeChange, width, onDismiss, newS
             progressViewOffset={residentList.enabled ? 0 : chromeHeight}
             refreshing={refreshing}
             onRefresh={() => void loadHome({ visible: true })}
+            tintColor={colors.textSecondary}
           />
         }
         scrollEnabled={projectDrag === null}
@@ -2593,11 +2694,13 @@ function HomeScreenContent({ active = true, onModeChange, width, onDismiss, newS
         contentContainerStyle={[
           styles.listContent,
           {
-            paddingBottom: (newSessionInSystemBar ? spacing.sm : 83) + insets.bottom,
+            paddingBottom: (newSessionInSystemBar ? spacing.sm : LEGACY_HOME_LIST_BOTTOM_RESERVE) + insets.bottom,
             paddingTop: residentList.enabled ? 0 : chromeHeight,
           },
         ]}
         onScroll={onListScroll}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
         scrollEventThrottle={16}
         onScrollBeginDrag={() => {
           scrollRestored.current = true;
@@ -2610,7 +2713,7 @@ function HomeScreenContent({ active = true, onModeChange, width, onDismiss, newS
           if (section.key !== 'pinned' || !section.title) return null;
           return (
             <Pressable
-              accessibilityLabel={t('devices.list.a11y.pinnedConversations', { count: home.pinned.length })}
+              accessibilityLabel={t('devices.list.a11y.pinnedConversations', { count: sharedGroup.home.pinned.length })}
               accessibilityRole="button"
               accessibilityState={{ expanded: !pinnedCollapsed }}
               onPress={togglePinned}
@@ -2624,7 +2727,7 @@ function HomeScreenContent({ active = true, onModeChange, width, onDismiss, newS
               )}
               <Pin color={colors.textSecondary} size={iconSize.action} strokeWidth={iconStroke.thin} />
               <Text style={styles.projectTitle} numberOfLines={1}>{section.title}</Text>
-              <Text style={styles.projectCount} numberOfLines={1}>{home.pinned.length}</Text>
+              <Text style={styles.projectCount} numberOfLines={1}>{sharedGroup.home.pinned.length}</Text>
             </Pressable>
           );
         }}
@@ -2635,7 +2738,7 @@ function HomeScreenContent({ active = true, onModeChange, width, onDismiss, newS
             <View style={styles.pinnedFooter} testID="home.pinnedFooter" />
           ) : null}
         ListEmptyComponent={
-          initialHomeLoading || taskSuggestionsPending ? (
+          sharedRows.length > 0 ? null : initialHomeLoading || taskSuggestionsPending ? (
             <HomeInitialLoadingState
               style={{
                 marginTop: spacing.xxl,
@@ -2708,8 +2811,9 @@ function HomeScreenContent({ active = true, onModeChange, width, onDismiss, newS
 
       {newSessionInSystemBar || showRemoteGuide || taskSuggestionsPending || taskSuggestionsMode === 'empty' ? null : (
         // 无可控电脑时不提供入口;完整空态已有主按钮,避免重复显示新建 CTA。
-        <HomeNewTaskButton bottomInset={insets.bottom} disabled={newSessionDisabled}
-          onPress={() => openNewSession()} />
+        // iOS: the circle stretches into the new task's composer pill (origin → morph handoff).
+        <HomeNewTaskButton bottomInset={insets.bottom} disabled={newSessionDisabled} morph
+          onPress={(origin) => openNewSession(undefined, undefined, undefined, origin)} />
       )}
 
   </>);
@@ -2753,6 +2857,7 @@ function HomeScreenContent({ active = true, onModeChange, width, onDismiss, newS
         <View style={{ paddingTop: nativeHomeHeader ? 0 : embedded ? spacing.lg : edgePadding.paddingTop }}>
         {nativeHomeHeader ? null : (
         <View style={styles.homeHeader}>
+        <View style={[styles.headerLeadingActions, embedded && styles.headerEmbeddedActions]}>
         <HomeHeaderGlassButton
           accessibilityLabel={onDismiss ? t('home.drawer.closeA11y') : t('devices.list.a11y.openMenu')}
           onPress={onDismiss ?? openChromeMenu}
@@ -2760,6 +2865,7 @@ function HomeScreenContent({ active = true, onModeChange, width, onDismiss, newS
         >
           <>{onDismiss ? <X color={colors.textPrimary} size={iconSize.action} strokeWidth={iconStroke.regular} /> : <Menu color={colors.textPrimary} size={iconSize.action} strokeWidth={iconStroke.regular} />}</>
         </HomeHeaderGlassButton>
+        </View>
         {showRemoteGuide ? (
           // 引导态没有可筛选的范围:正中只留品牌标题。
           <View style={styles.headerTitleWrap} testID="devices.title">
@@ -2769,6 +2875,7 @@ function HomeScreenContent({ active = true, onModeChange, width, onDismiss, newS
           <NativePullDownMenu
             actions={homeScopePullDownActions}
             onAction={handleHomeScopeAction}
+            style={styles.headerTitleSlot}
           >
             <Pressable
               accessibilityLabel={t('devices.list.a11y.selectScope')}
@@ -2787,9 +2894,9 @@ function HomeScreenContent({ active = true, onModeChange, width, onDismiss, newS
           </NativePullDownMenu>
         )}
         {showRemoteGuide ? (
-          <View style={styles.headerIconButton} />
+          <View style={[styles.headerActions, embedded && styles.headerEmbeddedActions]} />
         ) : (
-          <View style={styles.headerActions}>
+          <View style={[styles.headerActions, embedded && styles.headerEmbeddedActions]}>
             {selectedDeviceId && !embedded ? (
               <HomeHeaderGlassButton accessibilityLabel={t('remoteDesktop.title')} onPress={openSelectedRemoteDesktop} testID="home.remoteDesktopButton">
                 <Monitor color={colors.textPrimary} size={iconSize.action} strokeWidth={iconStroke.regular} />
@@ -2838,6 +2945,8 @@ function HomeScreenContent({ active = true, onModeChange, width, onDismiss, newS
             accessibilityRole="button"
             accessibilityState={{ busy: refreshing || undefined, disabled: refreshing }}
             disabled={refreshing}
+            // 视觉 28pt,hitSlop 把命中区补到 44pt(§5 触控目标)。
+            hitSlop={(navigationChrome.target - CONNECTION_ICON_BUTTON_SIZE) / 2}
             onPress={() => void loadHome({ visible: true })}
             style={({ pressed }) => [
               styles.connectionIconButton,
@@ -2856,7 +2965,7 @@ function HomeScreenContent({ active = true, onModeChange, width, onDismiss, newS
       </View>
 
       {residentList.enabled ? (
-        <ResidentHomeList focused={screenFocused} top={chromeHeight}
+        <ResidentHomeList focused={screenFocused && active} top={chromeHeight}
           left={embedded ? 0 : edgePadding.paddingLeft} right={embedded ? 0 : edgePadding.paddingRight}>
           <ActiveHomeSession.Provider value={activeHomeSession}>
               <View pointerEvents="box-none" style={{ flex: 1, paddingLeft: embedded ? 0 : edgePadding.paddingLeft, paddingRight: embedded ? 0 : edgePadding.paddingRight }}>
@@ -2879,7 +2988,6 @@ function HomeScreenContent({ active = true, onModeChange, width, onDismiss, newS
       />
       <DeviceMenuModal
         collections={remoteHomeCollections}
-        connectionStates={deviceConnectionStates}
         filters={home.deviceFilters}
         onClose={() => setDeviceMenuOpen(false)}
         onClosed={handleDeviceMenuClosed}
@@ -2932,7 +3040,9 @@ function HomeScreenContent({ active = true, onModeChange, width, onDismiss, newS
           handleChromeMenuClosed();
         }}
         onOpenSearch={() => {
-          setSearchOpen(true);
+          // 搜索框 autoFocus 要等菜单窗口完全卸载(onClosed)后再挂载:Android 的
+          // Dialog 还在退场时底层 Activity 没有窗口焦点,首次聚焦和软键盘请求会丢。
+          pendingMenuActionRef.current = () => setSearchOpen(true);
           setChromeMenuCloseInstant(false);
           setChromeMenuOpen(false);
         }}
@@ -2953,6 +3063,8 @@ function HomeScreenContent({ active = true, onModeChange, width, onDismiss, newS
           setChromeMenuCloseInstant(true);
           setChromeMenuOpen(false);
         }}
+        // 抽屉内部先确认(confirmLogout)再调 onLogout,这里不重复确认。
+        hasRunningTasks={runningSessionIds.size > 0}
         onLogout={() => void logout()}
         open={chromeMenuOpen}
         user={user}
@@ -3040,7 +3152,6 @@ function HomeInitialLoadingState({ style }: { style?: StyleProp<ViewStyle> }) {
 
 function DeviceMenuModal({
   collections,
-  connectionStates,
   filters,
   onClose,
   onClosed,
@@ -3050,7 +3161,6 @@ function DeviceMenuModal({
   visible,
 }: {
   collections: readonly RemoteHomeCollection[];
-  connectionStates: Record<string, HomeDeviceConnectionState>;
   filters: readonly MobileHomeDeviceFilterItem[];
   onClose(): void;
   /** 淡出动画完成、Modal 真正卸载后触发;父级用它把「打开第二个 Modal」延后到菜单卸载之后。 */
@@ -3067,16 +3177,18 @@ function DeviceMenuModal({
   const insets = useSafeAreaInsets();
   // 范围菜单只列设备;设置入口已挪到左上角 / 右上角。
   const scopeScrollMaxHeight = Math.max(160, screenHeight - topOffset - insets.bottom - 24);
-  // §14.4:展开用 ≤150ms 纯透明度过渡(不做位移/缩放),关闭淡出后再卸载 Modal。
+  // §14.4 轻浮层:fast 入场 / instant 退场纯透明度过渡(减弱动态效果直接显示),关闭淡出后再卸载 Modal。
+  const menuFadeTiming = useHomeMenuFadeTiming();
   // mounted/progress/进场时机(onShow)/onClosed 延迟触发(等 Modal 真正卸载的 commit
   // 完成,避免 iOS present-during-dismiss 吞掉第二个弹窗)统一走 useModalFadeLifecycle。
   const { mounted, progress, onShowStartIn } = useModalFadeLifecycle(visible, {
-    inMs: 140,
-    outMs: 110,
+    ...menuFadeTiming,
     onClosed,
   });
   const allFilter = filters.find((item) => item.deviceId === null) ?? null;
   // 离线电脑保留缓存入口；关远控和撤权不由缓存恢复访问权限。
+  // 自绘回退与系统下拉(buildHomeScopePullDownActions)同一组条目与勾选:全部 → 集合 → 设备;
+  // 不画在线点 / 同步脉冲 / 失败圈,连接状态交给顶栏同步指示与连接条。
   const deviceFilters = filters.filter((item) => item.deviceId !== null && canBrowseMobileHomeDevice(item));
   return (
     <HomeMenuScrim
@@ -3114,13 +3226,11 @@ function DeviceMenuModal({
             ))}
             {deviceFilters.map((item) => (
               <DeviceMenuItem
-                connectionState={item.deviceId ? connectionStates[item.deviceId] ?? 'idle' : 'idle'}
                 dimmed={!canBrowseMobileHomeDevice(item)}
                 key={item.id}
                 label={item.label}
                 onPress={() => onSelect(item)}
                 selected={item.selected}
-                status={deviceMenuStatus(item)}
                 testID={item.deviceId ? `home.deviceChip.${sanitizeDeviceChipTestId(item.deviceId)}` : undefined}
               />
             ))}
@@ -3165,9 +3275,9 @@ function HomeDisplaySettingsModal({
   const { height: screenHeight } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const scrollMaxHeight = Math.max(200, screenHeight - topOffset - insets.bottom - 24);
+  const menuFadeTiming = useHomeMenuFadeTiming();
   const { mounted, progress, onShowStartIn } = useModalFadeLifecycle(visible, {
-    inMs: 140,
-    outMs: 110,
+    ...menuFadeTiming,
   });
   return (
     <HomeMenuScrim
@@ -3258,23 +3368,19 @@ function HomeDisplaySettingsModal({
 
 function DeviceMenuItem({
   checked = false,
-  connectionState,
   dimmed = false,
   icon,
   label,
   onPress,
   selected,
-  status,
   testID,
 }: {
   checked?: boolean;
-  connectionState?: HomeDeviceConnectionState;
   dimmed?: boolean;
   icon?: ReactNode;
   label: string;
   onPress(): void;
   selected: boolean;
-  status?: 'online' | 'offline';
   testID?: string;
 }) {
   const styles = useThemedStyles(makeStyles);
@@ -3304,12 +3410,6 @@ function DeviceMenuItem({
         ) : null)}
       </View>
       <Text numberOfLines={1} style={styles.deviceMenuItemText}>{label}</Text>
-      {status ? (
-        <View style={styles.deviceMenuStatusSlot}>
-          <StatusDot tone={status === 'online' ? 'ready' : 'off'} pulsing={connectionState === 'syncing'} />
-          {connectionState === 'failed' ? <View style={styles.deviceConnectionFailedRing} /> : null}
-        </View>
-      ) : null}
     </Pressable>
   );
 }
@@ -3329,6 +3429,8 @@ function RevokedAccessTip({
   const { colors } = useTheme();
   const { t } = useTranslation();
   return (
+    // 说明型提示:只有右上角 × 与「重试访问」,没有「取消」按钮,按 DESIGN.md 关闭规则可点背景关闭;
+    // 重试在父级持有状态,关闭提示不会中断进行中的重试。
     <Modal animationType="fade" transparent visible={deviceName != null} onRequestClose={onClose}>
       <Pressable style={styles.revokedTipBackdrop} onPress={onClose} testID="home.revokedTip.backdrop">
         {/* Inner press swallow keeps taps on the card from dismissing via the backdrop. */}
@@ -3351,21 +3453,16 @@ function RevokedAccessTip({
           <Text style={styles.revokedTipBody}>
             {t('devices.list.revoked.body', { deviceName: deviceName ?? t('devices.list.thisComputer') })}
           </Text>
-          <Pressable
-            accessibilityLabel={t('devices.list.revoked.retry')}
-            accessibilityRole="button"
-            accessibilityState={{ busy: retrying, disabled: retrying }}
-            disabled={retrying}
-            onPress={onRetry}
-            style={({ pressed }) => [styles.revokedTipRetry, pressed && styles.pressed, retrying && styles.disabled]}
-            testID="home.revokedTip.retry"
-          >
-            {retrying ? (
-              <ActivityIndicator color={colors.ctaText} size="small" />
-            ) : (
-              <Text style={styles.revokedTipRetryText}>{t('devices.list.revoked.retry')}</Text>
-            )}
-          </Pressable>
+          <MainWindowActionButton
+            action={{
+              busy: retrying,
+              label: t('devices.list.revoked.retry'),
+              onPress: onRetry,
+              testID: 'home.revokedTip.retry',
+              tone: 'primary',
+            }}
+            style={styles.revokedTipRetry}
+          />
         </Pressable>
       </Pressable>
     </Modal>
@@ -3374,10 +3471,6 @@ function RevokedAccessTip({
 
 function sanitizeDeviceChipTestId(value: string): string {
   return value.replace(/[^A-Za-z0-9_-]/g, '_');
-}
-
-function deviceMenuStatus(item: MobileHomeDeviceFilterItem): 'online' | 'offline' {
-  return item.available && (item.state === 'ready' || item.state === 'busy') ? 'online' : 'offline';
 }
 
 function projectDragInsertY(drag: ProjectDragSession): number | null {
@@ -3929,6 +4022,7 @@ function HomeSessionRowInner({
   selected = false,
   selectionMarkTestID,
   selectionMode = false,
+  sharedRole,
   sourceLabel,
   suppressBlockTopBorder = false,
   swipe,
@@ -3967,6 +4061,8 @@ function HomeSessionRowInner({
   selected?: boolean;
   selectionMarkTestID?: string;
   selectionMode?: boolean;
+  /** Shared-group identity mark. Only owners show a crown; joined tasks match ordinary rows. */
+  sharedRole?: SharedHomeRole;
   /** 平铺时标题旁的来源标签(项目名 /「对话」);分组模式下不传。 */
   sourceLabel?: string;
   /** 块模式下,前一行也是块时不画自己的顶线(前块的底线已经是这根线)。 */
@@ -4020,8 +4116,8 @@ function HomeSessionRowInner({
           : { ...item, messagePreview: loadedMessagePreview },
         { running },
       );
-  // 零消息会话没有摘要。此时不要保留双行列表的空白第二行；但定时任务与置顶
-  // 标记仍占用右下状态槽，因此继续使用双行布局。
+  // 零消息会话没有摘要。此时不要保留双行列表的空白第二行；定时任务与置顶
+  // 标记仍占用右下状态槽，因此继续使用双行布局。共享身份位于标题左侧。
   const showPreviewLine = !!preview?.trim() || showSchedule || showPinned;
   // 组行点击语义对齐桌面版侧边栏:收起且有需关注内容(未读运行 / 待处理)时,点行直接打开
   // 该看的那条会话(共享层 primary:运行中 > 有未读 > 最新);想展开点行首箭头(独立热区)。
@@ -4032,6 +4128,12 @@ function HomeSessionRowInner({
     if (primary) onOpenSession(primary);
   };
   const groupRowOpensPrimary = !!group && (attention || rightStatus === 'error') && !groupExpanded;
+  const accessibilityTitle = sharedRole === 'owned' ? item.title + ', ' + t('sharedTask.roleHost') : item.title;
+  const accessibilityLabel = group
+    ? groupRowOpensPrimary
+      ? t('devices.list.a11y.openAutomationLatest', { title: accessibilityTitle })
+      : t('devices.list.a11y.automationTask', { title: accessibilityTitle })
+    : t('devices.list.a11y.openConversation', { title: accessibilityTitle });
   const handlePress = selectionMode && onPressSelection
     ? onPressSelection
     : group
@@ -4048,11 +4150,9 @@ function HomeSessionRowInner({
     >
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel={group
-          ? groupRowOpensPrimary ? t('devices.list.a11y.openAutomationLatest', { title: item.title }) : t('devices.list.a11y.automationTask', { title: item.title })
-          : t('devices.list.a11y.openConversation', { title: item.title })}
+        accessibilityLabel={accessibilityLabel}
         accessibilityState={group ? { expanded: groupExpanded, selected: selected || active } : { selected: selected || active }}
-        delayLongPress={400}
+        delayLongPress={SESSION_ROW_LONG_PRESS_MS}
         onLongPress={
           !selectionMode && !group && swipe && conversationSearchAllowsLocalWrites(item)
             ? () => {
@@ -4109,6 +4209,19 @@ function HomeSessionRowInner({
             showDraftIndicator={showDraftIndicator}
           />
         </View>
+        {sharedRole === 'owned' ? (
+          <View
+            style={[styles.sharedRoleSlot, !showPreviewLine && styles.sharedRoleSlotSingleLine]}
+            testID={`home.sharedRoleSlot.owned.${item.session.id}`}
+          >
+            <Crown
+              accessible={false}
+              color={colors.warningFg}
+              size={iconSize.md}
+              strokeWidth={iconStroke.thin}
+            />
+          </View>
+        ) : null}
         <View style={[
           styles.sessionListContent,
           (hideDivider || blockMode || (!!group && groupExpanded)) && styles.sessionListContentNoDivider,
@@ -4341,20 +4454,25 @@ function SessionRightSpinner({ testID }: { testID?: string }) {
   const { colors } = useTheme();
   const { t } = useTranslation();
   const spin = useRef(new Animated.Value(0)).current;
+  // 常驻循环:减弱动态效果(含首帧未知)下静止,只显示静态图标。
+  const reduceMotion = useReduceMotionEnabled();
   useEffect(() => {
+    if (reduceMotion !== false) return;
     const loop = Animated.loop(
       Animated.timing(spin, {
-        duration: 1000,
+        duration: motionDuration.spinnerCycle,
         easing: Easing.linear,
         toValue: 1,
         useNativeDriver: true,
+        isInteraction: false,
       }),
     );
     loop.start();
     return () => {
       loop.stop();
+      spin.setValue(0);
     };
-  }, [spin]);
+  }, [reduceMotion, spin]);
   const rotate = spin.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
   return (
     <Animated.View
@@ -4459,7 +4577,7 @@ function pruneHomeDeviceConnectionStates(
 const makeStyles = (colors: ThemeColors) => StyleSheet.create({
   ...homeListStyles(colors),
   safeArea: { flex: 1, backgroundColor: colors.surface },
-  pressed: { opacity: 0.72 },
+  pressed: mobileInteractionStyles.pressed,
   disabled: { opacity: 0.45 },
   homeChrome: {
     left: 0,
@@ -4481,17 +4599,32 @@ const makeStyles = (colors: ThemeColors) => StyleSheet.create({
     paddingBottom: spacing.md,
     paddingHorizontal: spacing.lg,
   },
-  headerIconButton: {
-    alignItems: 'center',
+  headerLeadingActions: {
+    // Match the trailing two-button slot so the title is centered on the
+    // screen, even when selecting a device reveals the remote-desktop action.
+    alignItems: 'flex-start',
     flexShrink: 0,
-    height: 44,
+    height: navigationChrome.target,
     justifyContent: 'center',
-    width: 44,
+    width: navigationChrome.target * 2 + spacing.xs,
   },
   headerActions: {
     alignItems: 'center',
     flexDirection: 'row',
+    flexShrink: 0,
     gap: spacing.xs,
+    justifyContent: 'flex-end',
+    width: navigationChrome.target * 2 + spacing.xs,
+  },
+  headerEmbeddedActions: {
+    // Embedded drawers never show the remote-desktop action. Keep both sides
+    // symmetric without reserving space for a second button that cannot appear.
+    width: navigationChrome.target,
+  },
+  // 菜单外层替标题占住顶栏中间的剩余宽度,长设备名在这里截断而不是挤开右侧按钮。
+  headerTitleSlot: {
+    flex: 1,
+    minWidth: 0,
   },
   headerTitleWrap: {
     alignItems: 'center',
@@ -4512,9 +4645,9 @@ const makeStyles = (colors: ThemeColors) => StyleSheet.create({
   headerTitle: {
     color: colors.textPrimary,
     flexShrink: 1,
-    fontSize: typeScale.listTitle,
+    fontSize: typeScale.title,
     fontWeight: fontWeight.semibold,
-    lineHeight: lineHeight.listTitleCompact,
+    lineHeight: lineHeight.title,
   },
   deviceMenuPanelCenter: {
     alignSelf: 'center',
@@ -4544,25 +4677,17 @@ const makeStyles = (colors: ThemeColors) => StyleSheet.create({
   connectionText: {
     color: colors.textSecondary,
     flexShrink: 1,
-    fontSize: typeScale.caption,
-    fontWeight: fontWeight.medium,
+    fontSize: typeScale.footnote,
+    lineHeight: lineHeight.caption,
+    fontWeight: fontWeight.regular,
     minWidth: 0,
   },
   connectionIconButton: {
     alignItems: 'center',
     borderRadius: radius.pill,
-    height: 28,
+    height: CONNECTION_ICON_BUTTON_SIZE,
     justifyContent: 'center',
-    width: 28,
-  },
-  deviceConnectionFailedRing: {
-    borderColor: colors.errorBorder,
-    // 16×16 圆环:语义是正圆,用 pill(RN 钳制到半高)而非碰巧同值的 control 档。
-    borderRadius: radius.pill,
-    borderWidth: 1.5,
-    height: 16,
-    position: 'absolute',
-    width: 16,
+    width: CONNECTION_ICON_BUTTON_SIZE,
   },
   deviceMenuBackdrop: {
     backgroundColor: colors.overlay,
@@ -4606,26 +4731,19 @@ const makeStyles = (colors: ThemeColors) => StyleSheet.create({
   },
   deviceMenuSectionLabel: {
     color: colors.textTertiary,
-    fontSize: typeScale.caption,
-    fontWeight: fontWeight.medium,
+    fontSize: typeScale.footnote,
+    fontWeight: fontWeight.semibold,
     lineHeight: lineHeight.caption,
     paddingHorizontal: spacing.md,
     paddingTop: spacing.sm,
   },
   deviceMenuHint: {
     color: colors.textTertiary,
-    fontSize: typeScale.caption,
+    fontSize: typeScale.footnote,
     fontWeight: fontWeight.regular,
     lineHeight: lineHeight.caption,
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.sm,
-  },
-  deviceMenuStatusSlot: {
-    alignItems: 'center',
-    height: 20,
-    justifyContent: 'center',
-    position: 'relative',
-    width: 20,
   },
   deviceMenuDivider: {
     backgroundColor: colors.border,
@@ -4672,8 +4790,8 @@ const makeStyles = (colors: ThemeColors) => StyleSheet.create({
   revokedTipTitle: {
     color: colors.textPrimary,
     fontSize: typeScale.title,
-    fontWeight: fontWeight.medium,
-    lineHeight: lineHeight.subtitle,
+    fontWeight: fontWeight.semibold,
+    lineHeight: lineHeight.title,
   },
   revokedTipBody: {
     color: colors.textSecondary,
@@ -4681,17 +4799,7 @@ const makeStyles = (colors: ThemeColors) => StyleSheet.create({
     lineHeight: lineHeight.body,
   },
   revokedTipRetry: {
-    alignItems: 'center',
-    backgroundColor: colors.cta,
-    borderRadius: radius.pill,
-    height: 44,
-    justifyContent: 'center',
     marginTop: spacing.sm,
-  },
-  revokedTipRetryText: {
-    color: colors.ctaText,
-    fontSize: typeScale.body,
-    fontWeight: fontWeight.semibold,
   },
   homeList: {
     backgroundColor: colors.surface,
@@ -4700,7 +4808,7 @@ const makeStyles = (colors: ThemeColors) => StyleSheet.create({
   listContent: {
     backgroundColor: colors.surface,
     flexGrow: 1,
-    paddingBottom: 83,
+    paddingBottom: LEGACY_HOME_LIST_BOTTOM_RESERVE,
     paddingTop: 0,
   },
   // 置顶区收尾线:回 XD-Maker 原版 hairline(换肤卡片化曾置 0,通栏回退一并恢复)。
@@ -4712,9 +4820,9 @@ const makeStyles = (colors: ThemeColors) => StyleSheet.create({
   },
   initialLoadingText: {
     color: colors.textSecondary,
-    fontSize: typeScale.caption,
-    fontWeight: fontWeight.medium,
-    lineHeight: lineHeight.code,
+    fontSize: typeScale.footnote,
+    fontWeight: fontWeight.regular,
+    lineHeight: lineHeight.caption,
   },
   projectGroup: {
     backgroundColor: colors.surface,
@@ -4742,7 +4850,7 @@ const makeStyles = (colors: ThemeColors) => StyleSheet.create({
     borderRadius: radius.container,
     borderWidth: StyleSheet.hairlineWidth,
     flexDirection: 'row',
-    gap: 8,
+    gap: spacing.sm,
     paddingLeft: spacing.md,
     paddingRight: spacing.lg,
     position: 'absolute',
@@ -4763,8 +4871,8 @@ const makeStyles = (colors: ThemeColors) => StyleSheet.create({
     alignItems: 'center',
     flexDirection: 'row',
     gap: spacing.sm,
-    minHeight: 54,
-    paddingLeft: 48,
+    minHeight: HOME_AUTOMATION_VIEW_ALL_ROW_HEIGHT,
+    paddingLeft: HOME_PROJECT_VIEW_ALL_INSET,
     paddingRight: spacing.lg,
   },
   projectViewAllText: {
@@ -4846,6 +4954,16 @@ const makeStyles = (colors: ThemeColors) => StyleSheet.create({
     minWidth: 0,
   },
 
+  sharedRoleSlot: {
+    alignItems: 'center',
+    justifyContent: 'flex-start',
+    paddingTop: 26,
+    width: iconSize.action,
+  },
+  sharedRoleSlotSingleLine: {
+    justifyContent: 'center',
+    paddingTop: 0,
+  },
   selectionMark: {
     alignItems: 'center',
     alignSelf: 'center',

@@ -318,7 +318,7 @@ describe('piCatalogProviderIdAfterRouteEdit', () => {
     });
   });
 
-  it('reconstructs explicit Pi reasoning capability from catalog efforts only for Pi', () => {
+  it('preserves reasoning metadata when reconstructing every engine', () => {
     const catalogModel = {
       id: 'reasoner',
       name: 'Reasoner',
@@ -329,6 +329,7 @@ describe('piCatalogProviderIdAfterRouteEdit', () => {
     expect(customProviderModelConfigFromCatalogModel(catalogModel, 'pi')).toEqual({
       id: 'reasoner',
       name: 'Reasoner',
+      efforts: ['low', 'high', 'xhigh'], defaultEffort: 'xhigh',
       reasoning: true,
       reasoningEfforts: ['low', 'high', 'xhigh'],
       reasoningDefaultEffort: 'xhigh',
@@ -336,6 +337,7 @@ describe('piCatalogProviderIdAfterRouteEdit', () => {
     expect(customProviderModelConfigFromCatalogModel(catalogModel, 'codex')).toEqual({
       id: 'reasoner',
       name: 'Reasoner',
+      efforts: ['low', 'high', 'xhigh'], defaultEffort: 'xhigh',
     });
   });
 });
@@ -460,7 +462,7 @@ describe('providerViewToCustomProviderConfig', () => {
           requestPath: '/tenant/acme/infer?stream=1',
           wireProtocol: 'openai-chat',
           modelsUrl: 'http://127.0.0.1:4000/v1/models',
-          models: [{ id: 'local-model', name: 'Local Model' }],
+          models: [{ id: 'local-model', name: 'Local Model', efforts: [], defaultEffort: null }],
         },
       },
     });
@@ -505,6 +507,7 @@ describe('providerViewToCustomProviderConfig', () => {
       {
         id: 'glm-5.3',
         name: 'GLM-5.3',
+        efforts: [], defaultEffort: null,
         route: {
           baseUrl: 'https://open.bigmodel.cn/api/v1',
           wireProtocol: 'openai-responses',
@@ -584,6 +587,7 @@ describe('providerViewToCustomProviderConfig', () => {
       {
         id: 'reasoner',
         name: 'Reasoner',
+        efforts: ['low', 'high', 'xhigh'], defaultEffort: 'high',
         reasoning: true,
         reasoningEfforts: ['low', 'high', 'xhigh'],
         reasoningDefaultEffort: 'high',
@@ -644,7 +648,7 @@ describe('appendDiscoveredCustomProviderModels', () => {
       .toContainEqual(expect.objectContaining({ id: 'anthropic/openai/new[1m]' }));
     expect(existing[0].id).toBe('anthropic/openai/new[1m]');
   });
-  it('only appends unknown models and defaults them to hidden', () => {
+  it('puts new models first without overriding native-engine defaults', () => {
     const result = appendDiscoveredCustomProviderModels(
       [{ id: 'kept', name: 'Kept' }],
       [
@@ -656,8 +660,8 @@ describe('appendDiscoveredCustomProviderModels', () => {
     );
     expect(result).toEqual({
       models: [
+        { id: 'new', name: 'New', discoveredMetadata: { name: 'New' } },
         { id: 'kept', name: 'Kept', nameExplicit: true, discoveredMetadata: { name: 'New name' } },
-        { id: 'new', name: 'New', defaultEnabled: false, discoveredMetadata: { name: 'New' } },
       ],
       addedIds: ['new'],
     });
@@ -677,11 +681,10 @@ describe('appendDiscoveredCustomProviderModels', () => {
         id: 'big',
         name: 'Big',
         discoveredMetadata: { name: 'Big', contextWindow: 1_000_000 },
-        defaultEnabled: false,
       },
-      { id: 'plain', name: 'Plain', discoveredMetadata: { name: 'Plain' }, defaultEnabled: false },
+      { id: 'plain', name: 'Plain', discoveredMetadata: { name: 'Plain' } },
       // 非法值不落盘,回落保守默认
-      { id: 'bogus', name: 'Bogus', discoveredMetadata: { name: 'Bogus' }, defaultEnabled: false },
+      { id: 'bogus', name: 'Bogus', discoveredMetadata: { name: 'Bogus' } },
     ]);
   });
 });
