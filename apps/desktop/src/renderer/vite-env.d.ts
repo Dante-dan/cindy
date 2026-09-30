@@ -4782,6 +4782,7 @@ interface ElectronAPI {
         session: import('@/lib/ccAgent.types').Session;
       }>;
       history: (botId: string) => Promise<unknown[]>;
+      listSkills: (botId: string) => Promise<import('../shared/botSkill').BotSkillSummary[]>;
       memory: {
         list: (
           botId: string,
@@ -5386,6 +5387,14 @@ interface ElectronAPI {
       options?: CustomProviderUpdateOptions,
     ) => Promise<CustomProviderUpdateResult>;
     localModelStatus: () => Promise<import('../shared/localModelRuntime').LocalRuntimeStatus>;
+    llamaCppEnsure: () => Promise<void>;
+    llamaCppStatus: () => Promise<import('../shared/llamaCpp').LlamaCppSnapshot>;
+    llamaCppInstall: () => Promise<void>;
+    llamaCppFiles: (repo: string) => Promise<import('../shared/llamaCpp').LlamaCppFile[]>;
+    llamaCppDownload: (input: import('../shared/llamaCpp').LlamaCppDownloadInput) => Promise<void>;
+    llamaCppStart: () => Promise<void>;
+    llamaCppStop: () => Promise<void>;
+    llamaCppCancel: (action?: 'cancel' | 'pause' | 'resume') => Promise<void>;
     localModelStart: () => Promise<import('../shared/localModelRuntime').LocalRuntimeStatus>;
     localModelList: () => Promise<{
       status: import('../shared/localModelRuntime').LocalRuntimeStatus;
@@ -6497,6 +6506,9 @@ interface ElectronAPI {
     onSessionCredentialSwitchApplied: (
       cb: (payload: { sessionId: string; model: string; providerId: string | null }) => void,
     ) => () => void;
+    onSessionCredentialSwitchFailed: (
+      cb: (payload: { sessionId: string; reason: 'apply-failed' | 'rollback-failed' }) => void,
+    ) => () => void;
 
     /** cc 默认路由会话的生效计费路由(proxy 按请求观察);null = 会话尚未发过请求 */
     claudeSessionRouteGet: (sessionId: string) => Promise<'gateway' | 'subscription' | null>;
@@ -6582,6 +6594,11 @@ interface ElectronAPI {
       workingDir?: string;
       turnGen: number;
       completionRevision: number;
+      cancel?: false;
+    } | {
+      sessionId: string;
+      completionRevision: number;
+      cancel: true;
     }) => Promise<{ prompt: string | null }>;
     helpAsk: (
       request: import('../shared/helpTypes').HelpAskRequest,
@@ -7353,24 +7370,7 @@ interface SkillhubPublishParams {
   changelog?: string;
 }
 
-type SkillhubPublishErrorCode =
-  | 'NAME_TAKEN'
-  | 'INVALID_DEPT'
-  | 'INVALID_NAME'
-  | 'CATEGORY_REQUIRED'
-  | 'MANIFEST_INVALID'
-  | 'VERSION_RACE'
-  | 'CHECKSUM_MISMATCH'
-  | 'NOT_AUTHOR'
-  | 'PACK_FAILED'
-  | 'OSS_PUT_FAILED'
-  | 'OSS_PUT_EXPIRED'
-  | 'OSS_OBJECT_NOT_FOUND'
-  | 'API_KEY_MISSING'
-  | 'CANCELLED'
-  | 'SKILL_HUB_READ_ONLY'
-  | 'INVALID_VISIBILITY'
-  | 'INTERNAL';
+type SkillhubPublishErrorCode = import('../shared/skillhubPublishErrors').SkillhubPublishErrorCode;
 
 type SkillhubPublishProgressEvent = (
   | { phase: 'packing' }
