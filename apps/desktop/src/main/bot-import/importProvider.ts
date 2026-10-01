@@ -11,11 +11,15 @@ import { CompanionImportError } from './types.js';
 
 /** Commands and the GUI share the same selection, durable receipt and takeover transaction. */
 export function createCompanionImportProvider(): McpProvider {
+  const entryIndex = z.number().int().nonnegative();
+  // MCP serializes the pipe's input: homogeneous, fixed-length arrays work in
+  // both draft-07 and 2020-12. The output retains the shared tuple contract.
+  const entryRange = z.array(entryIndex).length(2).pipe(z.tuple([entryIndex, entryIndex]));
   return { name: 'companion_import', toClaudeSdkConfig(context) {
     const server = new McpServer({ name: 'companion_import', version: '1.0.0' });
     server.tool('import_agent', 'Import a selected local Hermes/OpenClaw agent into a teammate. Discover sources, preview selectable metadata, then import only IDs explicitly selected by the user. Secrets remain on the host. For takeover, the user must request taking over the automations. Poll status by the same requestId; never invent a new requestId after a lost reply.', {
       operation: z.enum(['sources', 'preview', 'start', 'status']), sourceId: z.string().optional(),
-      selection: z.object({ previewId: z.string(), requestId: z.string(), name: z.string(), avatarImageBase64: z.string().min(1).max(2_000_000).optional(), entryIds: z.array(z.string()), takeover: z.boolean(), deferSetup: z.boolean().default(true), entryRanges: z.array(z.tuple([z.number().int().nonnegative(), z.number().int().nonnegative()])).optional() }).optional(),
+      selection: z.object({ previewId: z.string(), requestId: z.string(), name: z.string(), avatarImageBase64: z.string().min(1).max(2_000_000).optional(), entryIds: z.array(z.string()), takeover: z.boolean(), deferSetup: z.boolean().default(true), entryRanges: z.array(entryRange).optional() }).optional(),
       requestId: z.string().optional(),
     }, async input => {
       const session = resolveLiziMcpSessionContext(context);
