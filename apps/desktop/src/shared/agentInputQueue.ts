@@ -257,6 +257,10 @@ export interface AgentInputQueuedMessage {
         kind: 'orca';
         senderLabel: string;
         displayText?: string;
+        /** Direction is optional for compatibility with older queue snapshots. */
+        source?: 'lead' | 'worker';
+        /** Original reports retained when several worker results share one Lead turn. */
+        reports?: Array<{ senderLabel: string; content: string }>;
       }
     | {
         /**

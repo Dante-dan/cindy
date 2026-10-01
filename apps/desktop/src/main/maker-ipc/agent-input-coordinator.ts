@@ -511,6 +511,10 @@ export interface AgentInputCoordinatorDeps {
    * 否则被丢弃项的暂存条目会永久泄漏。
    */
   onDiscardedQueuedMessage?: (sessionId: string, item: AgentInputQueuedMessage) => void;
+  /** Optionally combine a contiguous queue head before it becomes one vendor turn. */
+  coalesceQueuedHead?: (
+    items: readonly AgentInputQueuedMessage[],
+  ) => { consumedCount: number; replacement: AgentInputQueuedMessage } | null;
   /**
    * 这个会话的失败 turn 正在重试；`source` 区分人工操作与自动续跑。
    *
@@ -4258,6 +4262,50 @@ export class AgentInputCoordinator {
     return first;
   }
 
+  private coalesceQueuedHeadBeforeDrain(sessionId: string, state: SessionInputState): void {
+    if (
+      !this.deps.coalesceQueuedHead ||
+      state.queuePaused ||
+      state.recovery ||
+      state.queueInteractionLocks.length > 0 ||
+      state.queueEditLocks.length > 0 ||
+      state.steeringQueueClientIds.length > 0
+    ) {
+      return;
+    }
+    const plan = this.deps.coalesceQueuedHead(state.pendingQueue);
+    if (!plan || !Number.isInteger(plan.consumedCount) || plan.consumedCount < 2) return;
+    const consumed = state.pendingQueue.slice(0, plan.consumedCount);
+    const survivor = consumed[0];
+    if (
+      consumed.length !== plan.consumedCount ||
+      !survivor ||
+      plan.replacement.clientId !== survivor.clientId ||
+      plan.replacement.chatMessage.clientId !== survivor.clientId
+    ) {
+      return;
+    }
+    if (survivor.hostAcceptedAtMs === undefined) delete plan.replacement.hostAcceptedAtMs;
+    else plan.replacement.hostAcceptedAtMs = survivor.hostAcceptedAtMs;
+    const removed = consumed.slice(1);
+    state.pendingQueue = [plan.replacement, ...state.pendingQueue.slice(plan.consumedCount)];
+    const removedIds = new Set(removed.map((item) => item.clientId));
+    state.recentEnqueuedClientIds = state.recentEnqueuedClientIds.filter(
+      (id) => !removedIds.has(id),
+    );
+    state.queueEditLocks = state.queueEditLocks.filter((id) => !removedIds.has(id));
+    for (const item of removed) {
+      this.removePendingCompactWaitClientId(state, item.clientId);
+      this.deps.onDiscardedQueuedMessage?.(sessionId, item);
+    }
+    log.debug('coalesced queued messages before drain', {
+      sessionId,
+      count: consumed.length,
+      survivorClientId: survivor.clientId,
+    });
+    this.emit(sessionId);
+  }
+
   private scheduleDrain(sessionId: string, reason: string): void {
     const state = this.getState(sessionId);
     if (state.drainScheduled) return;
@@ -4288,6 +4336,7 @@ export class AgentInputCoordinator {
       await this.dispatchCompact(sessionId, compact, reason);
       return;
     }
+    this.coalesceQueuedHeadBeforeDrain(sessionId, state);
     const head = this.getDrainableHead(sessionId, state);
     if (!head) {
       const hasRunnableWork =
