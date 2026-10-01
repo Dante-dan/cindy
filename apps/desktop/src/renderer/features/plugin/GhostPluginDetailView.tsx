@@ -30,7 +30,7 @@ import { useTranslation } from 'react-i18next';
 
 import { CindyCapabilityPrefs } from '@/cindy-brain/CindyCapabilityPrefs';
 import { GhostLibrarySection } from './GhostLibrarySection';
-import { GhostErrandPrefs } from '@/cindy-brain/GhostErrandPrefs';
+import { PluginTaskPrefs } from '@/cindy-brain/PluginTaskPrefs';
 import { GhostSettingsWebview } from '@/cindy-brain/GhostSettingsWebview';
 import { WINDOW_NO_DRAG_STYLE } from '@/components/layout/windowDrag';
 import {
@@ -125,6 +125,7 @@ export function GhostPluginDetailView({
   const enableSwitchId = useId();
   const [descriptionExpanded, setDescriptionExpanded] = useState(false);
   const [githubConnectionVersion, setGithubConnectionVersion] = useState(0);
+  const [taskApprovalPending, setTaskApprovalPending] = useState(false);
   const [descriptionOverflows, setDescriptionOverflows] = useState(false);
   const descriptionRef = useRef<HTMLParagraphElement>(null);
   // 安装记录不完整时不可运行:enabled 直接门控为 false(说明现状 + 给恢复入口,不让它
@@ -154,7 +155,7 @@ export function GhostPluginDetailView({
     detail.hasSettingsUi ||
     detail.hostCapability === 'ios-simulator' ||
     cindyCapabilities.length > 0 ||
-    detail.hasErrand;
+    detail.hasTaskPreferences;
   const summary = hasGithubConnection
     ? t('ccAgent.gitContext.pr.setup.account.summary')
     : ghostPluginSummary(detail.description, detail.id);
@@ -521,8 +522,9 @@ export function GhostPluginDetailView({
                   appearance="plugin"
                 />
               ) : null}
-              {detail.hasErrand ? (
-                <GhostErrandPrefs ghostId={detail.id} appearance="plugin" />
+              {detail.hasTaskPreferences ? (
+                <PluginTaskPrefs ghostId={detail.id} appearance="plugin"
+                  legacyDefault={ghost?.manifest.agent?.errand === true && !ghost.manifest.agent?.tasks && !ghost.manifest.workspace} />
               ) : null}
             </div>
           </section>
@@ -531,6 +533,20 @@ export function GhostPluginDetailView({
         {detail.tools.length > 0 ? <ToolsSection tools={detail.tools} /> : null}
 
         {detail.permissions.length > 0 ? <PermissionSummary items={detail.permissions} /> : null}
+        {enabled && ghost?.manifest.agent?.tasks === true && ghost.taskCapabilityApproved !== true ? (
+          <Button variant="secondary" size="sm" className="mt-4" disabled={taskApprovalPending} onClick={async () => {
+            setTaskApprovalPending(true);
+            try {
+              await window.electronAPI.ghosts.requestTaskApproval(detail.id);
+            } catch {
+              toast.error(t('settings.ghosts.errors.generic'));
+            } finally {
+              setTaskApprovalPending(false);
+            }
+          }}>
+            {t('settings.ghosts.perm.agentTasksRequest')}
+          </Button>
+        ) : null}
 
         <GhostLibrarySection ghostId={detail.id} enabled={ghost?.manifest.library === true} />
 

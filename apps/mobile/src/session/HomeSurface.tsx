@@ -7,7 +7,7 @@ import { ResidentHomeList, useResidentHomeList } from './ResidentHomeList';
 import { HomeNewTaskButton } from './HomeNewTaskButton';
 import { useRetainedHomeState, getHomeViewSession } from './homeViewSession';
 import { rememberRecentTask } from './recentTasks';
-import { homeListStyles, SESSION_ROW_LONG_PRESS_MS, SessionStatusMark } from '@/session/HomeListVisuals';
+import { homeListStyles, SESSION_ROW_LONG_PRESS_MS, SessionStatusMark, SessionStatusPulse } from '@/session/HomeListVisuals';
 import { useOptionalHeaderHeight } from '@/session/useOptionalHeaderHeight';
 import { SessionHeaderNativeBlur } from "@/session/SessionHeaderNativeControls";
 import { rememberComposerEntry } from './composerMorph';
@@ -254,7 +254,11 @@ import {
   replaceSessionScheduleIndexEntries,
 } from '@/session/scheduleIndex';
 import { createScheduleIndexDeferRegistry } from '@/session/scheduleIndexDefer';
-import { latestMobileSessionRow, resolveMobileSessionRowStatus } from '@/session/sessionRightStatus';
+import {
+  latestMobileSessionRow,
+  resolveMobileCollapsedGroupStatus,
+  resolveMobileSessionRowStatus,
+} from '@/session/sessionRightStatus';
 import { SessionRightSpinner } from '@/session/SessionRightSpinner';
 import { AutomationTimerIcon } from '@/session/AutomationTimerIcon';
 import { RenameSessionModal } from '@/session/RenameSessionModal';
@@ -2854,7 +2858,7 @@ function HomeScreenContent({ active = true, onModeChange, width, onDismiss, newS
       style={[styles.safeArea, { paddingLeft: embedded ? 0 : edgePadding.paddingLeft, paddingRight: embedded ? 0 : edgePadding.paddingRight }]}
       testID="devices.screen"
     >
-      {nativeHomeHeader ? <SessionHeaderNativeBlur height={nativeHeaderHeight + spacing.xxl} /> : null}
+      {nativeHomeHeader ? <SessionHeaderNativeBlur height={nativeHeaderHeight} /> : null}
       {nativeHomeHeader && active ? (
         <HomeNativeStackHeader
           keepMenuTopLeft={keepMenuTopLeft}
@@ -3080,6 +3084,12 @@ function HomeScreenContent({ active = true, onModeChange, width, onDismiss, newS
         onOpenAccounts={() => {
           pendingMenuActionRef.current = () => setAccountSwitcherOpen(true);
           setChromeMenuCloseInstant(false);
+          setChromeMenuOpen(false);
+        }}
+        onOpenPlugins={() => {
+          pendingMenuActionRef.current = null;
+          guardedPush('/plugins');
+          setChromeMenuCloseInstant(true);
           setChromeMenuOpen(false);
         }}
         onOpenDevices={() => {
@@ -3460,12 +3470,11 @@ function RevokedAccessTip({
   const { colors } = useTheme();
   const { t } = useTranslation();
   return (
-    // 说明型提示:只有右上角 × 与「重试访问」,没有「取消」按钮,按 DESIGN.md 关闭规则可点背景关闭;
-    // 重试在父级持有状态,关闭提示不会中断进行中的重试。
+    // 说明型提示:只有右上角 × 与「重试访问」;按 DESIGN.md 关闭规则点背景不关闭,
+    // 只能用 × 或系统返回。重试在父级持有状态,关闭提示不会中断进行中的重试。
     <Modal animationType="fade" transparent visible={deviceName != null} onRequestClose={onClose}>
-      <Pressable style={styles.revokedTipBackdrop} onPress={onClose} testID="home.revokedTip.backdrop">
-        {/* Inner press swallow keeps taps on the card from dismissing via the backdrop. */}
-        <Pressable style={styles.revokedTipCard} onPress={() => undefined}>
+      <View style={styles.revokedTipBackdrop} testID="home.revokedTip.backdrop">
+        <View style={styles.revokedTipCard}>
           <View style={styles.revokedTipHeader}>
             <View style={styles.revokedTipIcon}>
               <Lock color={colors.textPrimary} size={iconSize.lg} strokeWidth={iconStroke.regular} />
@@ -3494,8 +3503,8 @@ function RevokedAccessTip({
             }}
             style={styles.revokedTipRetry}
           />
-        </Pressable>
-      </Pressable>
+        </View>
+      </View>
     </Modal>
   );
 }
@@ -3660,6 +3669,27 @@ function ProjectRow({
       isSessionRunning: (sessionId) => remoteSessionStore.isSessionRunning(sessionId),
     },
   );
+  // 与桌面侧栏收起项目同一规则:仅收起时汇总组内全部任务——任一在跑则组头图标橙色呼吸,
+  // 右槽只放一颗点(出错红 > 等你回复蓝 > 完成未读绿);展开后由子行各自显示,组头不重复。
+  // 运行态命令式读取,依赖 homeStatusVersion 兜底感知变化(理由同上方折叠豁免)。
+  const collapsedStatus = useMemo(
+    () => (collapsed
+      ? resolveMobileCollapsedGroupStatus(project.sessions, (sessionId) => remoteSessionStore.isSessionRunning(sessionId))
+      : null),
+    [collapsed, homeStatusVersion, project.sessions],
+  );
+  const groupIconColor = collapsedStatus?.running ? colors.statusAccent : colors.textSecondary;
+  // 组头按钮是单个无障碍元素(子节点标签不会被读出),汇总状态挂在按钮自身的 value 上。
+  const collapsedStatusA11y = [
+    collapsedStatus?.running ? t('devices.list.a11y.running') : null,
+    collapsedStatus?.dot === 'error'
+      ? t('devices.list.a11y.taskError')
+      : collapsedStatus?.dot === 'awaiting'
+        ? t('devices.list.a11y.awaitingYou')
+        : collapsedStatus?.dot === 'done'
+          ? t('devices.list.a11y.doneUnread')
+          : null,
+  ].filter(Boolean).join(', ');
   const projectHeaderHeight = useSharedValue(HOME_PROJECT_HEADER_HEIGHT);
   const projectRef = useAnimatedRef<View>();
   const prepareDisclosure = useDisclosurePrepare();
@@ -3748,6 +3778,7 @@ function ProjectRow({
         : t('devices.list.a11y.project', { title: displayTitle })}
       accessibilityRole="button"
       accessibilityState={{ expanded: !collapsed }}
+      accessibilityValue={collapsedStatusA11y ? { text: collapsedStatusA11y } : undefined}
       onLayout={(event) => {
         const height = event.nativeEvent.layout.height;
         if (Number.isFinite(height) && height > 0) projectHeaderHeight.value = height;
@@ -3771,20 +3802,37 @@ function ProjectRow({
       ) : (
         <ChevronDown color={colors.textSecondary} size={iconSize.xl} strokeWidth={iconStroke.regular} />
       )}
-      {kind === 'dialogue' ? (
-        <MessagesSquare color={colors.textSecondary} size={iconSize.xl} strokeWidth={iconStroke.thin} />
-      ) : kind === 'cindy-make' ? (
-        <Hammer color={colors.textSecondary} size={iconSize.xl} strokeWidth={iconStroke.thin} />
-      ) : collapsed ? (
-        <Folder color={colors.textSecondary} size={iconSize.xl} strokeWidth={iconStroke.thin} />
-      ) : (
-        <FolderOpen color={colors.textSecondary} size={iconSize.xl} strokeWidth={iconStroke.thin} />
-      )}
+      <SessionStatusPulse running={!!collapsedStatus?.running}>
+        {kind === 'dialogue' ? (
+          <MessagesSquare color={groupIconColor} size={iconSize.xl} strokeWidth={iconStroke.thin} />
+        ) : kind === 'cindy-make' ? (
+          <Hammer color={groupIconColor} size={iconSize.xl} strokeWidth={iconStroke.thin} />
+        ) : collapsed ? (
+          <Folder color={groupIconColor} size={iconSize.xl} strokeWidth={iconStroke.thin} />
+        ) : (
+          <FolderOpen color={colors.textSecondary} size={iconSize.xl} strokeWidth={iconStroke.thin} />
+        )}
+      </SessionStatusPulse>
       <View style={styles.projectLabel}>
         <Text style={[styles.projectTitle, styles.projectFolderTitle]} numberOfLines={1}>{project.title}</Text>
         {machineIdentity ? <HomeProjectMachineLabel identity={machineIdentity} /> : null}
       </View>
       <Text style={styles.projectCount} numberOfLines={1}>{project.sessionCount}</Text>
+      {collapsedStatus?.dot ? (
+        // 与任务行右槽同一 18×18 槽、同一右边缘,点色与任务行同表。
+        <View style={styles.sessionRightStatusCell}>
+          <View
+            style={[styles.sessionRightDot, {
+              backgroundColor: collapsedStatus.dot === 'error'
+                ? colors.statusError
+                : collapsedStatus.dot === 'awaiting'
+                  ? colors.statusAwaiting
+                  : colors.statusDone,
+            }]}
+            testID={`home.projectCollapsedStatus.${collapsedStatus.dot}.${project.key}`}
+          />
+        </View>
+      ) : null}
     </Pressable>
   );
   return (
@@ -4269,17 +4317,19 @@ function HomeSessionRowInner({
           (hideDivider || blockMode || (!!group && groupExpanded)) && styles.sessionListContentNoDivider,
         ]}>
           <View style={styles.sessionTitleRow}>
-            <Text
-              style={styles.sessionTitle}
-              ellipsizeMode="tail"
-              numberOfLines={1}
-              testID={titleTestIDPrefix === 'deviceDetail.sessionRowTitle'
-                ? `deviceDetail.sessionRowTitle.${item.session.id}`
-                : `home.sessionRowTitle.${item.session.id}`}
-            >
-              {item.title}
-            </Text>
-            <TaskTagDots tags={item.session.tags} surfaceColor={colors.surface} />
+            <View style={styles.sessionTitleCluster}>
+              <Text
+                style={styles.sessionTitle}
+                ellipsizeMode="tail"
+                numberOfLines={1}
+                testID={titleTestIDPrefix === 'deviceDetail.sessionRowTitle'
+                  ? `deviceDetail.sessionRowTitle.${item.session.id}`
+                  : `home.sessionRowTitle.${item.session.id}`}
+              >
+                {item.title}
+              </Text>
+              <TaskTagDots tags={item.session.tags} surfaceColor={colors.surface} />
+            </View>
             {sourceLabel ? (
               <Text
                 ellipsizeMode="tail"

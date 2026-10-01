@@ -5,10 +5,61 @@ import { runRecoveryArchiveTask } from '../worktree/recoveryArchiveWorkerClient'
 import type { FileEvidence, WorktreeRecoveryArchive } from '../worktree/recoveryArchiveIO';
 import {
   captureWorktreeContent,
-  worktreeContentBaselineMatches,
+  worktreeStagedContentMatches,
+  WorktreeChangedDuringSnapshotError,
 } from '../worktree/contentSnapshot';
 import { gitExec, GitExecError } from '../worktree/gitExec';
 import { assertDiskCapacity } from './resources';
+import { MANAGED_WORKTREE_DIR_NAMES } from '../../shared/managedWorktreePaths';
+
+const ESTIMATE_CONCURRENCY = 32;
+const STAT_BATCH = 64;
+
+/**
+ * Directories (relative to `root`) a copy leaves behind: other tasks' Cindy worktrees, i.e.
+ * linked worktrees Git has registered for this repository that live in a managed container
+ * (`.cindy-worktrees/<name>`). Anything else in those folders is ordinary project content,
+ * and a root that is not itself a repository root excludes nothing.
+ */
+export async function managedWorktreeExclusions(root: string): Promise<string[]> {
+  let listing: string;
+  try {
+    root = await fs.realpath(root);
+    const probe = await gitExec(['rev-parse', '--show-toplevel'], root, {
+      extraEnv: { LC_ALL: 'C' },
+    });
+    if ((await fs.realpath(probe.stdout.trim())) !== root) return [];
+    listing = (await gitExec(['worktree', 'list', '--porcelain'], root)).stdout;
+  } catch (error) {
+    if (error instanceof GitExecError && error.stderr.includes('not a git repository')) return [];
+    throw error;
+  }
+  const excluded: string[] = [];
+  // Porcelain records are separated by blank lines. A `prunable` record is stale: its path
+  // may since hold ordinary files, which must be copied rather than skipped.
+  for (const record of listing.split('\n\n')) {
+    const lines = record.split('\n');
+    const line = lines.find((entry) => entry.startsWith('worktree '));
+    if (!line || lines.some((entry) => entry.startsWith('prunable'))) continue;
+    // A registered worktree whose directory is gone has nothing to copy or skip.
+    const worktree = await fs.realpath(line.slice('worktree '.length)).catch(() => null);
+    const relative = worktree && path.relative(root, worktree);
+    const parts = relative ? relative.split(path.sep) : [];
+    if (parts.length >= 2 && (MANAGED_WORKTREE_DIR_NAMES as readonly string[]).includes(parts[0]))
+      excluded.push(relative!);
+  }
+  return excluded;
+}
+
+/** Whether `file` lies in (or is) one of `root`'s `excluded` relative directories. */
+export function isExcludedFromWorkspace(
+  root: string,
+  file: string,
+  excluded: readonly string[],
+): boolean {
+  const relative = path.relative(root, file);
+  return excluded.some((entry) => relative === entry || relative.startsWith(entry + path.sep));
+}
 
 export interface PortableWorkspace {
   version: 1;
@@ -17,6 +68,17 @@ export interface PortableWorkspace {
   unpackedBytes: number;
   contextBytes?: number;
   git?: { head: string; headRef: string | null; indexTree: string; ref: string };
+}
+
+/** A project entry that blocks the copy; the path tells the user what to rename or remove. */
+export class MigrationPathError extends Error {
+  constructor(
+    readonly code: string,
+    /** Project-relative, `/`-separated. */
+    readonly relPath: string,
+  ) {
+    super(`${code}: ${relPath}`);
+  }
 }
 
 /** Portable names only. In particular, links must never lead extraction outside its new root. */
@@ -40,10 +102,10 @@ export function validateWorkspaceEntries(files: Record<string, FileEvidence>): v
           /^(con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\.|$)/i.test(part),
       )
     ) {
-      throw new Error('MIGRATION_NONPORTABLE_PATH');
+      throw new MigrationPathError('MIGRATION_NONPORTABLE_PATH', name);
     }
     const key = name.normalize('NFC').toLowerCase();
-    if (folded.has(key)) throw new Error('MIGRATION_PATH_COLLISION');
+    if (folded.has(key)) throw new MigrationPathError('MIGRATION_PATH_COLLISION', name);
     folded.add(key);
     if (
       !entry ||
@@ -65,13 +127,14 @@ export function validateWorkspaceEntries(files: Record<string, FileEvidence>): v
         path.posix.isAbsolute(entry.hash) ||
         /^[a-z]:/i.test(entry.hash)
       )
-        throw new Error('MIGRATION_EXTERNAL_LINK');
+        throw new MigrationPathError('MIGRATION_EXTERNAL_LINK', name);
       const target = path.posix.normalize(path.posix.join(path.posix.dirname(name), entry.hash));
       if (target === '..' || target.startsWith('../') || target.split('/').includes('.git'))
-        throw new Error('MIGRATION_EXTERNAL_LINK');
+        throw new MigrationPathError('MIGRATION_EXTERNAL_LINK', name);
       // Do not accept a link chain or a directory-link ancestor during extraction.
       const targetEntry = files[target];
-      if (!targetEntry || targetEntry.kind === 'link') throw new Error('MIGRATION_EXTERNAL_LINK');
+      if (!targetEntry || targetEntry.kind === 'link')
+        throw new MigrationPathError('MIGRATION_EXTERNAL_LINK', name);
     }
     for (let i = 1; i < parts.length; i++) {
       if (files[parts.slice(0, i).join('/')]?.kind !== 'directory')
@@ -80,7 +143,8 @@ export function validateWorkspaceEntries(files: Record<string, FileEvidence>): v
   }
 }
 
-/** No checkout, reset, stash, or source deletion. Existing recovery code preserves ignored bytes too. */
+/** No checkout, reset, stash, or source deletion. Existing recovery code preserves ignored bytes too;
+ * only other tasks' managed worktrees under the root are left out. */
 export async function snapshotWorkspace(
   root: string,
   directory: string,
@@ -101,7 +165,14 @@ export async function snapshotWorkspace(
       throw new Error('MIGRATION_SUBMODULE_UNSUPPORTED');
     const ref = `refs/cindy/migration/${id}`;
     try {
-      baseline = await captureWorktreeContent(root, ref);
+      // A copy only needs the captured content; another task's `git status` must not fail it.
+      baseline = await captureWorktreeContent(root, ref, { stagedContentOnly: true }).catch(
+        (error: unknown) => {
+          if (error instanceof WorktreeChangedDuringSnapshotError)
+            throw new Error('MIGRATION_WORKSPACE_CHANGED');
+          throw error;
+        },
+      );
       git = {
         head: baseline.head,
         headRef: baseline.headRef ?? null,
@@ -133,6 +204,7 @@ export async function snapshotWorkspace(
       encryptedKey: '',
       iv: randomBytes(12),
       maxBytes: Math.floor((space.bavail * space.bsize) / 1.1),
+      excludePaths: await managedWorktreeExclusions(root),
     });
     archive.files = Object.fromEntries(
       Object.entries(archive.files).map(([name, entry]) => [name.split(path.sep).join('/'), entry]),
@@ -143,7 +215,7 @@ export async function snapshotWorkspace(
       if (entry.kind === 'file') unpackedBytes += (await fs.lstat(path.join(root, name))).size;
     }
     if (!Number.isSafeInteger(unpackedBytes)) throw new Error('MIGRATION_INVALID_MANIFEST');
-    if (baseline && !(await worktreeContentBaselineMatches(root, baseline)))
+    if (baseline && !(await worktreeStagedContentMatches(root, baseline)))
       throw new Error('MIGRATION_WORKSPACE_CHANGED');
     return {
       version: 1,
@@ -243,28 +315,75 @@ export async function restoreWorkspace(
 }
 
 /** Read-only pre-copy inventory: includes hidden/ignored files, never follows links.
- * Root Git metadata is rebuilt separately by snapshotWorkspace, not copied as files.
+ * Root Git metadata is rebuilt separately by snapshotWorkspace and other tasks' managed
+ * worktrees are not copied, so neither is counted. Stops once `maxFiles` is exceeded.
  */
 export async function estimateWorkspace(
   root: string,
   check: () => void,
+  maxFiles = Number.POSITIVE_INFINITY,
 ): Promise<{ fileCount: number; bytes: number }> {
   root = await fs.realpath(root);
+  const excluded = new Set(
+    (await managedWorktreeExclusions(root)).map((entry) => path.join(root, entry)),
+  );
   const result = { fileCount: 0, bytes: 0 };
-  async function walk(directory: string): Promise<void> {
-    for (const name of await fs.readdir(directory)) {
+  const pending = [root];
+  const visit = async (directory: string): Promise<void> => {
+    const files: string[] = [];
+    for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
       check();
-      if (directory === root && name === '.git') continue;
-      const file = path.join(directory, name);
-      const stat = await fs.lstat(file);
-      if (stat.isDirectory()) await walk(file);
-      else if (stat.isFile() || stat.isSymbolicLink()) {
-        result.fileCount++;
-        result.bytes += stat.size;
+      if (directory === root && entry.name === '.git') continue;
+      const file = path.join(directory, entry.name);
+      // Some filesystems (e.g. network mounts) report DT_UNKNOWN; classify those with lstat.
+      const kind =
+        entry.isDirectory() || entry.isFile() || entry.isSymbolicLink()
+          ? entry
+          : await fs.lstat(file);
+      if (kind.isDirectory()) {
+        if (!excluded.has(file)) pending.push(file);
+      } else if (kind.isFile() || kind.isSymbolicLink()) {
+        // Count as each file is recognised, before any per-file work beyond the cap.
+        if (++result.fileCount > maxFiles) throw new Error('MIGRATION_TOO_MANY_FILES');
+        files.push(file);
       } else throw new Error('MIGRATION_NONPORTABLE_PATH');
     }
-  }
-  await walk(root);
+    for (let index = 0; index < files.length; index += STAT_BATCH) {
+      check();
+      const stats = await Promise.all(
+        files.slice(index, index + STAT_BATCH).map((file) => fs.lstat(file)),
+      );
+      for (const stat of stats) result.bytes += stat.size;
+    }
+  };
+  // A sequential walk of a dependency-heavy project takes minutes; unbounded fan-out would
+  // hold the whole tree in memory. At most ESTIMATE_CONCURRENCY × STAT_BATCH stats in flight.
+  await new Promise<void>((resolve, reject) => {
+    let active = 0;
+    let settled = false;
+    const pump = () => {
+      if (settled) return;
+      if (!pending.length && !active) {
+        settled = true;
+        resolve();
+        return;
+      }
+      while (active < ESTIMATE_CONCURRENCY && pending.length) {
+        active++;
+        visit(pending.pop()!).then(
+          () => {
+            active--;
+            pump();
+          },
+          (error: unknown) => {
+            settled = true;
+            reject(error);
+          },
+        );
+      }
+    };
+    pump();
+  });
   check();
   return result;
 }
