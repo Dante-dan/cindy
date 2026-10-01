@@ -1374,6 +1374,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('ghosts:export', id),
     setEnabled: (id: string, enabled: boolean): Promise<{ ok: true }> =>
       ipcRenderer.invoke('ghosts:set-enabled', id, enabled),
+    requestTaskApproval: (id: string): Promise<{ granted: boolean }> =>
+      ipcRenderer.invoke('ghosts:request-task-approval', id),
     /** 目录级禁用清单(插件页项目范围视图;sendSync 保证切换同帧渲染)。 */
     workdirPrefsSync: (workdir: string): { disabled: string[] } =>
       ipcRenderer.sendSync('ghosts:workdir-prefs', workdir),
@@ -6098,6 +6100,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onProvidersChanged: fanOutMakerProvidersChanged,
     localModelStatus: (): Promise<import('../shared/localModelRuntime').LocalRuntimeStatus> =>
       ipcRenderer.invoke('maker:local-model:status'),
+    llamaCppEnsure: (): Promise<void> => ipcRenderer.invoke('maker:llamacpp:ensure'),
+    llamaCppStatus: (): Promise<import('../shared/llamaCpp').LlamaCppSnapshot> => ipcRenderer.invoke('maker:llamacpp:status'),
+    llamaCppInstall: (): Promise<void> => ipcRenderer.invoke('maker:llamacpp:install'),
+    llamaCppFiles: (repo: string): Promise<import('../shared/llamaCpp').LlamaCppFile[]> => ipcRenderer.invoke('maker:llamacpp:files', repo),
+    llamaCppDownload: (input: import('../shared/llamaCpp').LlamaCppDownloadInput): Promise<void> => ipcRenderer.invoke('maker:llamacpp:download', input),
+    llamaCppStart: (): Promise<void> => ipcRenderer.invoke('maker:llamacpp:start'),
+    llamaCppStop: (): Promise<void> => ipcRenderer.invoke('maker:llamacpp:stop'),
+    llamaCppCancel: (action?: 'cancel' | 'pause' | 'resume'): Promise<void> => ipcRenderer.invoke('maker:llamacpp:cancel', action),
     localModelStart: (): Promise<import('../shared/localModelRuntime').LocalRuntimeStatus> =>
       ipcRenderer.invoke('maker:local-model:start'),
     localModelList: (): Promise<{
@@ -6864,6 +6874,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('maker:set-effort', sessionId, effort),
     setPermissionMode: (sessionId: string, mode: string): Promise<void> =>
       ipcRenderer.invoke('maker:set-permission-mode', sessionId, mode),
+    getPluginWriteAccessRecovery: (sessionId: string): Promise<{available: boolean}> =>
+      ipcRenderer.invoke('maker:get-plugin-write-access-recovery', sessionId),
+    retryPluginWriteAccess: (sessionId: string): Promise<{granted: boolean; mode?: 'acceptEdits' | 'auto'}> =>
+      ipcRenderer.invoke('maker:retry-plugin-write-access', sessionId),
     setFastMode: (sessionId: string, enabled: boolean): Promise<void> =>
       ipcRenderer.invoke('maker:set-fast-mode', sessionId, enabled),
     setThinkingEnabled: (sessionId: string, enabled: boolean): Promise<void> =>
@@ -7450,6 +7464,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
       workingDir?: string;
       turnGen: number;
       completionRevision: number;
+      cancel?: false;
+    } | {
+      sessionId: string;
+      completionRevision: number;
+      cancel: true;
     }): Promise<{ prompt: string | null }> => ipcRenderer.invoke('maker:predict-prompt', request),
     helpAsk: (
       request: import('../shared/helpTypes').HelpAskRequest,

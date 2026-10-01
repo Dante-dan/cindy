@@ -1,3 +1,4 @@
+import { listCindyManagedSkills } from './managed-skills.js';
 import { resolveCompanionRuntimeEnvironment } from '../bot-import/runtime.js';
 import { readCachedGenericOAuthAccessToken } from './generic-oauth.js';
 import { providerPresetModelRecord, providerModelAdapterId } from '@cindy/model-providers';
@@ -75,6 +76,7 @@ import {
   matchesManagedOllamaFingerprint,
 } from '../../shared/localModelRuntime.js';
 import { ensureManagedOllamaReadyForSession } from '../local-model-runtime/preflight.js';
+import { MANAGED_LLAMACPP_PROVIDER_ID } from '../../shared/llamaCpp.js';
 import {
   applyQwen38NativeOverlay,
   shouldApplyQwen38Overlay,
@@ -1767,7 +1769,11 @@ export async function resolvePiNativeProviders(ctx: {
     );
   }
   const isRemote = Boolean(ctx.remoteHostId);
-  if (!isRemote && ctx.providerId === MANAGED_OLLAMA_PROVIDER_ID && ctx.purpose !== 'preview') {
+  if (
+    !isRemote &&
+    ctx.purpose !== 'preview' &&
+    (ctx.providerId === MANAGED_OLLAMA_PROVIDER_ID || ctx.providerId === MANAGED_LLAMACPP_PROVIDER_ID)
+  ) {
     await ensureManagedOllamaReadyForSession({
       providerId: ctx.providerId,
       remoteHostId: ctx.remoteHostId ?? null,
@@ -1871,6 +1877,7 @@ export function buildPiAgent(opts: BuildPiAgentOpts): PiAgent | null {
   return new PiAgent({
     resolveSessionEnvironment: resolveCompanionRuntimeEnvironment,
     getDisabledSkillPaths: readDisabledSkillPaths,
+      getManagedSkills: listCindyManagedSkills,
     resolveModelContextLimit: (providerId, modelId) => {
       const catalog = getActiveCatalog();
       const source = resolveModelContextProviderId(catalog, 'pi', providerId, modelId);
