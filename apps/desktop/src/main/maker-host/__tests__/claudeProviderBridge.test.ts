@@ -13,6 +13,7 @@ async function runBridge(
   extras: Partial<Parameters<typeof createClaudeProviderBridge>[0]> = {},
   effort = 'high',
   fast = false,
+  sessionId?: string,
 ) {
   const handler = createClaudeProviderBridge({
     url: `https://supplier.example/v1/${protocol === 'openai-chat' ? 'chat/completions' : 'responses'}`,
@@ -29,7 +30,7 @@ async function runBridge(
     req.on('data', chunk => chunks.push(chunk));
     req.on('end', () => {
       void handler.handle({ parsedBody: JSON.parse(Buffer.concat(chunks).toString()),
-        ctx: { reqId: 1, method: 'POST', url: req.url!, headers: {} }, res,
+        ctx: { reqId: 1, method: 'POST', url: req.url!, headers: sessionId ? { 'x-claude-code-session-id': sessionId } : {} }, res,
         prefs: { reasoningEffort: effort, fast },
       }).catch(() => { res.statusCode = 500; res.end(); });
     });
@@ -78,6 +79,20 @@ describe('Claude Code custom provider translation', () => {
     expect(result.status).toBe(200);
     if (stream) { expect(result.body).toContain('message_stop'); expect(result.body).toContain('Hello'); }
     else expect(JSON.parse(result.body)).toMatchObject({ type: 'message', content: [{ type: 'text', text: 'Hello' }] });
+  });
+
+  it('keeps the Claude session stable through native OpenCode Go requests and isolates conversations', async () => {
+    const row = PROVIDER_MODEL_CATALOG.providers['opencode-go'].find(row => row.execution.pi.api === 'openai-completions')!;
+    const sent: string[] = [];
+    for (const sessionId of ['conversation-a', 'conversation-a', 'conversation-b']) {
+      const result = await runBridge('openai-chat', true, chatStream, (_url, init) => {
+        sent.push(new Headers(init?.headers).get('x-opencode-session')!);
+      }, { model: row, providerId: 'opencode-go', nativeUpstream: row.upstream }, 'high', false, sessionId);
+      expect(result.status).toBe(200);
+    }
+    expect(sent[0]).toMatch(/^[a-f0-9]{32}$/);
+    expect(sent[1]).toBe(sent[0]);
+    expect(sent[2]).not.toBe(sent[0]);
   });
 
   it('keeps Cloudflare header-only credentials on the native Claude bridge', async () => {

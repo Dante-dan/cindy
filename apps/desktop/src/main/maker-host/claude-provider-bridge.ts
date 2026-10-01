@@ -155,8 +155,12 @@ export function createClaudeProviderBridge(options: {
   return createResponsesHandler({
     providers: [{
       prefix: '', reasoningNamespace: claudeProviderReasoningNamespace(options.url, options.providerId), upstreamBase: options.url, wireProtocol: 'openai-responses',
-      buildHeaders: async () => Object.fromEntries(Object.entries(options.headers).filter(([name]) =>
-        !['x-api-key', 'anthropic-version', 'anthropic-beta'].includes(name.toLowerCase()))),
+      buildHeaders: async ({ sessionId }) => ({
+        ...Object.fromEntries(Object.entries(options.headers).filter(([name]) =>
+          !['x-api-key', 'anthropic-version', 'anthropic-beta'].includes(name.toLowerCase())
+          && (!sessionId || name.toLowerCase() !== 'x-claude-code-session-id'))),
+        ...(sessionId ? { 'x-claude-code-session-id': sessionId } : {}),
+      }),
       preserveReasoningState: !!options.model,
       maxOutputTokensSupported: true,
       supportsReasoning: () => options.efforts.length > 0,

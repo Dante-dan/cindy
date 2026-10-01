@@ -12,6 +12,22 @@ const reply = [
   { id: 'fixture-reply', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 9, completion_tokens: 2 } },
 ].map(value => `data: ${JSON.stringify(value)}\n\n`).join('') + 'data: [DONE]\n\n';
 
+it('passes request-local session identity to the native SDK without cross-request leakage', async () => {
+  const stream = vi.spyOn(openaiCompletions, 'streamSimple');
+  try {
+    const row = PROVIDER_MODEL_CATALOG.providers['opencode-go'].find(row => row.execution.pi.api === 'openai-completions')!;
+    const send = createPiProviderFetch({ row, providerId: 'opencode-go', apiKey: 'fixture-key',
+      fetchImpl: async () => new Response(reply, { headers: { 'content-type': 'text/event-stream' } }),
+    });
+    for (const sessionId of ['session-a', 'session-b', undefined]) {
+      await (await send('https://unused.invalid', { body: JSON.stringify({ model: row.id, input: 'hello', stream: true }),
+        headers: sessionId ? { 'X-Claude-Code-Session-Id': sessionId } : {},
+      })).text();
+      expect(stream.mock.lastCall?.[2]?.sessionId).toBe(sessionId);
+    }
+  } finally { stream.mockRestore(); }
+});
+
 describe('Pi-owned transport for Cindy harnesses', () => {
   it.each([true, false, undefined])('sends discovered Sub2API effort and declared Fast (%s) through the native Chat adapter', async supportsFastMode => {
     const upstream = 'https://sub2api.example/custom/v1';

@@ -1,6 +1,7 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { reconcileOutboundReasoningEffort } from './outbound-reasoning-effort.js';
 import { once } from 'node:events';
+import { withOpenCodeGoSessionHeader } from './opencode-go-session.js';
 import type { ServerResponse } from 'node:http';
 import { ChatSseTranslator, translateResponsesRequestWithContext, type ResponsesRequest } from '@cindy/responses-chat-bridge';
 import type { Api, Model, Context, AssistantMessage, TextContent, ImageContent, ThinkingLevel, ProviderStreams } from '@earendil-works/pi-ai';
@@ -200,6 +201,11 @@ export async function probePiProvider(options: PiProviderTransportOptions, signa
 export function createPiProviderFetch(options: PiProviderTransportOptions): typeof fetch {
   return async (_url, init) => {
     const request = JSON.parse(String(init?.body)) as ResponsesRequest;
+    // The bridge is shared across conversations; identity must stay request-local.
+    const sessionId = new Headers(init?.headers).get('x-claude-code-session-id')?.trim() || undefined;
+    const headers = withOpenCodeGoSessionHeader(options.headers, {
+      providerId: options.providerId, upstream: options.upstream ?? options.row.upstream, sessionId,
+    });
     const converted = translateResponsesRequestWithContext(request, { capabilities: {
       imageInput: 'image_url', reasoningHistoryField: 'reasoning_content',
     } });
@@ -266,7 +272,8 @@ export function createPiProviderFetch(options: PiProviderTransportOptions): type
     const cloudflareGateway = model.provider === 'cloudflare-ai-gateway';
     const events = adapter.streamSimple(model, context, {
       apiKey: cloudflareGateway ? undefined : options.apiKey, env: options.env,
-      headers: cloudflareGateway ? cloudflareGatewayHeaders(options.apiKey, options.headers) : options.headers,
+      headers: cloudflareGateway ? cloudflareGatewayHeaders(options.apiKey, headers) : headers,
+      sessionId,
       // Pi's Google SDK rejects injected fetch. Its native transport must be used; all other
       // adapters that support injection use Cindy's existing outbound route.
       ...(!['google-generative-ai', 'google-vertex', 'bedrock-converse-stream'].includes(model.api)
