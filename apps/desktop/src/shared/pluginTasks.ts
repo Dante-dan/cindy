@@ -56,11 +56,14 @@ export function isPluginTeamPlanWithinBudget(plan: unknown): boolean {
     return typeof json === 'string' && json.length <= PLUGIN_TEAM_PLAN_MAX_JSON_CHARS;
   } catch { return false; }
 }
-export type PluginTaskRequest =
-  | { type: 'tasks-request'; kind: 'capabilities' }
+export type PluginTaskRequest = (
+  | { type: 'tasks-request'; kind: 'capabilities' | 'models' }
+  | { type: 'tasks-request'; kind: 'setModel'; taskId: string; expectedRevision: number; route: PluginTaskRoute }
   | {
       type: 'tasks-request';
       kind: 'create';
+      /** Optional active tool-call context; Host resolves its task and checks plugin ownership. */
+      callId?: string;
       requestKey: string;
       title: string;
       route?: PluginTaskRoute;
@@ -83,7 +86,8 @@ export type PluginTaskRequest =
     }
   | { type: 'tasks-request'; kind: 'getRun'; runId: string }
   | { type: 'tasks-request'; kind: 'listRuns'; taskId: string; after?: string; limit?: number }
-  | { type: 'tasks-request'; kind: 'cancel'; runId: string; requestKey: string };
+  | { type: 'tasks-request'; kind: 'cancel'; runId: string; requestKey: string }
+) & { /** Opaque page origin; never a permission grant. */ mobilePageId?: string };
 export type PluginTaskResult =
   | { ok: true; data: unknown }
   | {
