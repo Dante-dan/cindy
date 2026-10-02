@@ -10,8 +10,6 @@
   },
   "renderer": {
     "moreActions": "その他のメッセージ操作",
-    "previousQuestionJump": "前の質問へ移動：{{preview}}",
-    "noPreview": "プレビューなし",
     "newMessagesToBottom": "新着メッセージあり、最下部へ移動",
     "jumpToBottom": "最下部へ移動",
     "openForkOrigin": "分岐元メッセージを開く",
@@ -148,6 +146,8 @@
     "turnTokens": "{{tokens}} tokens"
   },
   "lightbox": {
+    "sourceMissing": "このコンピューターに元の画像がありません。元のファイルを再度インポートしてください。",
+    "deviceOffline": "コンピューターが未接続です。再接続してからお試しください。",
     "cancelAnnotation": "注釈をキャンセル",
     "cancel": "キャンセル",
     "undoLastStroke": "直前の描画を取り消す",

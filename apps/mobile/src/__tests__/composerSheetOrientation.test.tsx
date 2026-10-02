@@ -17,7 +17,7 @@ vi.mock('@expo/ui/swift-ui', () => {
   const Container = ({ children }: any) => <div>{children}</div>;
   return { ScrollView: ({ children }: any) => <section data-native-scroll>{children}</section>,
     Form: Container, Button: Container, Group: Container, HStack: Container, Image: Container,
-    RNHostView: ({ children, matchContents }: any) => <div data-rn-size={matchContents ? "content" : "viewport"}>{children}</div>, Spacer: Container, Text: Container, VStack: Container,
+    RNHostView: ({ children, matchContents }: any) => <div data-rn-size={matchContents ? "content" : "viewport"}>{children}</div>, Spacer: Container, Text: Container, VStack: Container, ZStack: Container,
     BottomSheet: (props: any) => { state.sheet = props; return <div>{props.children}</div>; },
   };
 });
