@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+      - diagnose/4419-existing-windows-ci
   workflow_dispatch:
 
 permissions:
