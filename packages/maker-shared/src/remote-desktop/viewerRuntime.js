@@ -1913,6 +1913,18 @@ export function mountRemoteDesktopViewer(root, postMessage, config) {
           const message = JSON.parse(e.data);
           if (message.type === "cursor") receiveCursor(message.cursor);
           if (
+            message.type === "reply" &&
+            typeof message.id === "string" &&
+            message.id.length <= 64
+          )
+            post({
+              type: "channelReply",
+              id: message.id,
+              ok: message.ok === true,
+              result: message.result,
+              error: typeof message.error === "string" ? message.error : null,
+            });
+          if (
             (video.webkitPresentationMode === "picture-in-picture" ||
               document.pictureInPictureElement === video) &&
             message.type === "viewPing" &&
@@ -2030,6 +2042,27 @@ export function mountRemoteDesktopViewer(root, postMessage, config) {
   listen(video, "webkitpresentationmodechanged", reportPresentation);
   listen(video, "enterpictureinpicture", reportPresentation);
   listen(video, "leavepictureinpicture", reportPresentation);
+  function applyDisplayGeometry(message) {
+    if (
+      !Number.isInteger(message.width) ||
+      !Number.isInteger(message.height) ||
+      message.width < 320 ||
+      message.height < 320 ||
+      (message.restore !== true &&
+        (message.width > 2560 || message.height > 2560))
+    )
+      return;
+    release();
+    stopPanAnimation();
+    viewerSized = message.restore !== true;
+    zoom = 1;
+    desktopScale = null;
+    fx = fy = 0.5;
+    followRest = null;
+    dw = message.width;
+    dh = message.height;
+    render();
+  }
   function receive(event) {
     let message;
     try {
@@ -2038,6 +2071,35 @@ export function mountRemoteDesktopViewer(root, postMessage, config) {
       return;
     }
     switch (message.type) {
+      // A small control request routed over the live data channel. The host
+      // only receives it after advertising support; otherwise the parent uses
+      // the relay. `sent` tells the parent whether the channel took it.
+      case "channelRequest": {
+        const id =
+          typeof message.id === "string" && message.id.length <= 64
+            ? message.id
+            : null;
+        if (!id) break;
+        let sent = false;
+        try {
+          const data = JSON.stringify({
+            type: "request",
+            id,
+            request: message.request,
+          });
+          if (
+            pc?.connectionState === "connected" &&
+            dc?.readyState === "open" &&
+            dc.bufferedAmount < 16384 &&
+            data.length <= 32768
+          ) {
+            dc.send(data);
+            sent = true;
+          }
+        } catch {}
+        post({ type: "channelRequestState", id, sent });
+        break;
+      }
       case "measureViewport":
         post({
           type: "viewportSize",
@@ -2071,28 +2133,14 @@ export function mountRemoteDesktopViewer(root, postMessage, config) {
         }
         break;
       case "videoSettings":
-        if (
-          Number.isInteger(message.width) &&
-          Number.isInteger(message.height) &&
-          message.width >= 320 &&
-          message.height >= 320 &&
-          (message.restore === true ||
-            (message.width <= 2560 && message.height <= 2560))
-        ) {
-          release();
-          stopPanAnimation();
-          viewerSized = message.restore !== true;
-          zoom = 1;
-          desktopScale = null;
-          fx = fy = 0.5;
-          followRest = null;
-          dw = message.width;
-          dh = message.height;
-          render();
-        }
+        applyDisplayGeometry(message);
         video.muted = !message.audio;
         retries = 0;
         if (!config.nativeMedia) connect();
+        break;
+      // The host kept the stream across a display change: layout only.
+      case "displayGeometry":
+        applyDisplayGeometry(message);
         break;
       case "keyboard":
         showKeyboard(message.enabled === true);

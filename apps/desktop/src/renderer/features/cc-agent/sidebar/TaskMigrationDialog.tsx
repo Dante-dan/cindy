@@ -8,7 +8,7 @@ import {
   type TaskMigrationView,
 } from '@cindy/device-link';
 import type { Session } from '@/lib/ccAgent.types';
-import type { TaskMoveDestination } from './TaskMoveSubmenu';
+import { copyDefaultLabelKey, type TaskMoveDestination } from './TaskMoveSubmenu';
 import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
 import { Select } from '@/components/ui/select';
@@ -18,6 +18,15 @@ import {
   getDataOwnerGeneration,
   isDataOwnerGenerationCurrent,
 } from '@/contexts/dataOwnerGeneration';
+
+// Same action-button treatment as the shared confirm dialog: this dialog paints the
+// confirmation surface, where the default button palette has almost no contrast.
+const actionButton = {
+  size: 'lg',
+  palette: 'confirmation',
+  className:
+    'h-auto min-h-9 min-w-[96px] max-w-full whitespace-normal [overflow-wrap:anywhere] py-1.5',
+} as const;
 
 export function TaskMigrationDialog({
   session,
@@ -311,11 +320,11 @@ export function TaskMigrationDialog({
     >
       <Dialog.Portal>
         <Dialog.Overlay
-          className="fixed inset-0 z-[10000] bg-[var(--overlay-modal)]"
+          className="modal-scrim fixed inset-0 z-[10000]"
           onClick={(e) => e.stopPropagation()}
         />
         <Dialog.Content
-          className="fixed left-1/2 top-1/2 z-[10000] w-[calc(100%-32px)] max-w-[480px] -translate-x-1/2 -translate-y-1/2 rounded-xl bg-[var(--confirm-bg)] p-4 shadow-[var(--confirm-shadow)] [-webkit-app-region:no-drag]"
+          className="modal-panel fixed left-1/2 top-1/2 z-[10000] w-[calc(100%-32px)] max-w-[480px] -translate-x-1/2 -translate-y-1/2 p-4 [-webkit-app-region:no-drag]"
           onClick={(e) => e.stopPropagation()}
           onPointerDown={(e) => e.stopPropagation()}
           onKeyDown={(e) => e.stopPropagation()}
@@ -375,7 +384,7 @@ export function TaskMigrationDialog({
             <div className="mt-4 space-y-2 text-sm text-[var(--confirm-title)]">
               <p className="break-all">
                 {t('taskMigration.project')}:{' '}
-                {destination.project ?? t('taskMigration.defaultFolder')}
+                {destination.project ?? t(copyDefaultLabelKey(session))}
               </p>
               <p className="text-[var(--confirm-desc)]">{t('taskMigration.newFolder')}</p>
             </div>
@@ -412,7 +421,7 @@ export function TaskMigrationDialog({
                     value={project || '__default__'}
                     disabled={busy || !target || readyTarget !== target}
                     options={[
-                      { value: '__default__', label: t('taskMigration.defaultFolder') },
+                      { value: '__default__', label: t(copyDefaultLabelKey(session)) },
                       ...projects.map((p) => ({ value: p, label: p })),
                     ]}
                     onValueChange={(value) => setProject(value === '__default__' ? '' : value)}
@@ -495,30 +504,36 @@ export function TaskMigrationDialog({
               )}
             </p>
           )}
-          <div className="mt-4 flex flex-wrap justify-end gap-2">
+          <div className="mt-6 flex flex-wrap justify-end gap-2.5">
             {copying ? (
               <>
                 {status?.cancellable && (
-                  <Button variant="secondary" disabled={busy} onClick={cancelCopy}>
+                  <Button
+                    {...actionButton}
+                    variant="secondary"
+                    disabled={busy}
+                    onClick={cancelCopy}
+                  >
                     {t('taskMigration.cancelCopy')}
                   </Button>
                 )}
-                <Button variant="secondary" disabled={busy} onClick={dismiss}>
+                <Button {...actionButton} variant="secondary" disabled={busy} onClick={dismiss}>
                   {t('taskMigration.runInBackground')}
                 </Button>
               </>
             ) : (
-              <Button variant="secondary" disabled={busy} onClick={dismiss}>
+              <Button {...actionButton} variant="secondary" disabled={busy} onClick={dismiss}>
                 {t(confirming ? 'taskMigration.cancel' : 'taskMigration.close')}
               </Button>
             )}
             {complete && status?.targetSessionId && (
-              <Button disabled={busy} onClick={() => void openTarget()}>
+              <Button {...actionButton} disabled={busy} onClick={() => void openTarget()}>
                 {t('taskMigration.openTarget')}
               </Button>
             )}
             {confirming && (
               <Button
+                {...actionButton}
                 disabled={!status || !estimate || busy || readyTarget !== target || !target}
                 onClick={() =>
                   void act({
