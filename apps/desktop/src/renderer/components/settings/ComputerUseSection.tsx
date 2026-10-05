@@ -178,6 +178,7 @@ export function ComputerUseSection({
   const [driverCheckPending, setDriverCheckPending] = useState(false);
   const [driverCheckFailed, setDriverCheckFailed] = useState(false);
   const [driverUpdatePending, setDriverUpdatePending] = useState(false);
+  const [initialDriverJoinPending, setInitialDriverJoinPending] = useState(false);
   // main 侧采样广播的下载进度;null = 未开始/已结束(显示通用「更新中…」)。
   const [driverUpdateProgress, setDriverUpdateProgress] =
     useState<ComputerDriverUpdateProgress | null>(null);
@@ -788,9 +789,15 @@ export function ComputerUseSection({
     joinDriverUpdateRef.current = joinDriverUpdate;
   }, [joinDriverUpdate]);
 
-  const computerEnabledResolved = computerEnabled !== null;
   useEffect(() => {
-    if (!computerStatus?.installed || !computerEnabledResolved || driverUpdateCheckedRef.current)
+    if (!initialDriverJoinPending || computerEnabled === null) return;
+    setInitialDriverJoinPending(false);
+    setDriverUpdatePending(true);
+    void joinDriverUpdateRef.current(true);
+  }, [initialDriverJoinPending, computerEnabled]);
+
+  useEffect(() => {
+    if (!computerStatus?.installed || driverUpdateCheckedRef.current)
       return;
     driverUpdateCheckedRef.current = true;
     let cancelled = false;
@@ -802,8 +809,9 @@ export function ComputerUseSection({
         if (result.updating) {
           // 上次面板关闭前发起的更新还在 main 侧跑:恢复「更新中」态并以
           // join-only 语义重挂结果(安装恰好已完成时只读状态,不起新安装)。
-          setDriverUpdatePending(true);
-          void joinDriverUpdateRef.current(true);
+          // The passive check need not wait for opt-in, but permission recovery
+          // after joining must see the persisted setting rather than null.
+          setInitialDriverJoinPending(true);
         }
       })
       .catch((err) => {
@@ -812,11 +820,11 @@ export function ComputerUseSection({
       });
     return () => {
       cancelled = true;
-      // Loading the opt-in state can replace joinDriverUpdate before this
-      // request settles. Let the next effect consume the shared main check.
+      // Retry only if this status effect is replaced before the check settles.
+      // Opt-in changes update the join callback ref without cancelling a check.
       if (!settled) driverUpdateCheckedRef.current = false;
     };
-  }, [computerEnabledResolved, computerStatus?.installed, refreshDriverUpdateCheck]);
+  }, [computerStatus?.installed, refreshDriverUpdateCheck]);
 
   const handleUpdateDriver = useCallback(() => {
     if (driverUpdatePending || driverCheckPending) return;

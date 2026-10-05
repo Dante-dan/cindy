@@ -239,7 +239,8 @@ describe('ComputerUseSection browser backend health loading', () => {
       });
       await computerStatus.promise;
     });
-    expect(api.checkComputerUpdate).not.toHaveBeenCalled();
+    expect(api.checkComputerUpdate).toHaveBeenCalledTimes(1);
+    expect(api.updateComputerDriver).not.toHaveBeenCalled();
 
     await act(async () => {
       computerPluginState.resolve({ effectiveEnabled: true });
@@ -285,6 +286,7 @@ describe('ComputerUseSection browser backend health loading', () => {
 
     render(<ComputerUseSection workingDir="/tmp/project" />);
 
+    await waitFor(() => expect(api.checkComputerUpdate).toHaveBeenCalledTimes(1));
     await act(async () => {
       computerPluginState.resolve({ effectiveEnabled: false });
       await computerPluginState.promise;
