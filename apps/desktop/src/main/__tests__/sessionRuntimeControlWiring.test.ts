@@ -1001,6 +1001,10 @@ describe('session runtime control wiring', () => {
     expect(rehydrateCall).toBeGreaterThan(-1);
     expect(rehydrateCall).toBeLessThan(apply);
     expect(setModel).toContain('Pi current runtime could not be verified');
+    expect(rehydrate).toContain("withColdPiWindowVerificationStage('session-read-failed'");
+    expect(rehydrate).toContain("withColdPiWindowVerificationStage('bootstrap-failed'");
+    expect(setModel).toContain('reason: coldPiWindowVerificationFailureReason(error)');
+    expect(setModel).toContain("reason: 'runtime-missing-after-bootstrap'");
   });
 
   it('skips the cold Pi window rehydration when the live usage leaves the target headroom', () => {

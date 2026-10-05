@@ -450,6 +450,11 @@ import {
 } from '../learn-host/invocationGrant.js';
 import { ensurePiManagerInstalled } from '../maker-host/pi-manager-client.js';
 import {
+  ColdPiWindowVerificationError,
+  coldPiWindowVerificationFailureReason,
+  withColdPiWindowVerificationStage,
+} from './coldPiWindowVerificationDiagnostics.js';
+import {
   setRemoteCodexLiveTurnChecker,
   setRemoteSessionStartEnsure,
   getRemoteCcTurnSettledHandler,
@@ -8698,20 +8703,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
 
   async function rehydrateColdPiRuntimeForWindowVerification(sessionId: string): Promise<void> {
     if (maker.getSession(sessionId)) return;
-    const [row] = await getDbClient()
-      .drizzle.select()
-      .from(sessions)
-      .where(eq(sessions.id, sessionId))
-      .limit(1);
-    if (
-      !row ||
-      row.agentKind !== 'pi' ||
-      row.remoteHostId ||
-      !row.sdkSessionId ||
-      !row.workingDir
-    ) {
-      throw new Error(`session ${sessionId} cannot rehydrate a local Pi runtime for verification`);
-    }
+    const [row] = await withColdPiWindowVerificationStage('session-read-failed', async () =>
+      await getDbClient().drizzle.select().from(sessions).where(eq(sessions.id, sessionId)).limit(1),
+    );
+    if (!row) throw new ColdPiWindowVerificationError('session-missing');
+    if (row.agentKind !== 'pi') throw new ColdPiWindowVerificationError('not-pi');
+    if (row.remoteHostId) throw new ColdPiWindowVerificationError('remote-runtime');
+    if (!row.sdkSessionId) throw new ColdPiWindowVerificationError('native-session-missing');
+    if (!row.workingDir) throw new ColdPiWindowVerificationError('working-directory-missing');
     const createOpts = buildCreateOptsWithStderr({
       id: sessionId,
       agentKind: 'pi',
@@ -8726,19 +8725,18 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       resumeSessionId: row.sdkSessionId,
       orcaRole: row.orcaRole ?? undefined,
     });
-    const workDirExists = await checkWorkDirExists(
-      sessionId,
-      createOpts.workingDir,
-      createOpts.agentKind,
-      createOpts.remoteHostId,
+    const workDirExists = await withColdPiWindowVerificationStage('working-directory-check-failed', () =>
+      checkWorkDirExists(sessionId, createOpts.workingDir, createOpts.agentKind, createOpts.remoteHostId),
     );
     if (!workDirExists) {
-      throw new Error(`working directory is missing for session ${sessionId}`);
+      throw new ColdPiWindowVerificationError('working-directory-missing');
     }
-    await synthesizeOrcaVendorOptionsFromDb(sessionId, createOpts);
-    const extraDirs = await readSessionExtraDirsFromDb(sessionId);
-    if (extraDirs.length > 0) createOpts.extraDirs = extraDirs;
-    await bootstrapSession(createOpts);
+    await withColdPiWindowVerificationStage('bootstrap-preparation-failed', async () => {
+      await synthesizeOrcaVendorOptionsFromDb(sessionId, createOpts);
+      const extraDirs = await readSessionExtraDirsFromDb(sessionId);
+      if (extraDirs.length > 0) createOpts.extraDirs = extraDirs;
+    });
+    await withColdPiWindowVerificationStage('bootstrap-failed', async () => await bootstrapSession(createOpts));
   }
 
   const agentSwitchDeps: MakerSessionAgentSwitchHandlerDeps = {
@@ -18264,7 +18262,13 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           } else {
             try {
               await rehydrateColdPiRuntimeForWindowVerification(sessionId);
-            } catch {
+            } catch (error) {
+              // Fixed categories only: bootstrap errors can contain paths, credentials or user content.
+              log.warn('set-model: cold Pi current runtime verification failed', {
+                reason: coldPiWindowVerificationFailureReason(error),
+                nativeSessionPresent: !!runtimeStatus.sdkSessionId,
+                liveRuntimePresent: !!maker.getSession(sessionId),
+              });
               throwIpcError(
                 localModelWindowSwitchErrorCode('MODEL_WINDOW_CURRENT_CONTEXT_UNKNOWN'),
                 'Pi current runtime could not be verified; runtime selection was not changed',
@@ -18272,6 +18276,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
             }
             liveSessionBeforeRouteChange = maker.getSession(sessionId);
             if (!liveSessionBeforeRouteChange) {
+              log.warn('set-model: cold Pi current runtime verification failed', {
+                reason: 'runtime-missing-after-bootstrap',
+                nativeSessionPresent: !!runtimeStatus.sdkSessionId,
+                liveRuntimePresent: false,
+              });
               throwIpcError(
                 localModelWindowSwitchErrorCode('MODEL_WINDOW_CURRENT_CONTEXT_UNKNOWN'),
                 'Pi current runtime could not be verified; runtime selection was not changed',
