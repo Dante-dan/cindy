@@ -106,6 +106,23 @@ describe('normalizeRemoteMessages', () => {
     ]);
   });
 
+  it('hides the trailing /goal verdict block from assistant text like desktop', () => {
+    const verdict = '```json\n{"goal_status":"continue","reason":"下一步补齐合并检查。"}\n```';
+    const [assistant, user] = normalizeRemoteMessages([
+      message({ id: 'goal-a', role: 'assistant', content: `已核对现有 CI。\n\n${verdict}` }),
+      message({
+        id: 'goal-u',
+        role: 'user',
+        content: { text: `看这段\n${verdict}`, images: [] },
+        createdAt: '2026-01-01T00:00:01.000Z',
+      }),
+    ]);
+
+    expect(assistant).toMatchObject({ kind: 'assistant', body: '已核对现有 CI。' });
+    expect(buildMobileMessageCopyText(assistant!)).not.toContain('goal_status');
+    expect(user?.body).toContain('goal_status');
+  });
+
   it('extracts assistant turn cost from desktop agentMeta', () => {
     const items = normalizeRemoteMessages([
       message({
@@ -542,9 +559,9 @@ describe('normalizeRemoteMessages', () => {
       }),
     ]);
 
-    expect(item.secondaryBody).toBe('Full tool output was released (original size 128 KB)');
+    expect(item.secondaryBody).toBe('完整工具输出已释放（原始大小 128 KB）');
     expect(buildMobileMessageCopyText(item)).toContain(
-      'Full tool output was released (original size 128 KB)',
+      '完整工具输出已释放（原始大小 128 KB）',
     );
     expect(buildMobileMessageCopyText(item)).not.toContain('tool_result_compacted');
   });

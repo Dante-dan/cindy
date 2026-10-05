@@ -48,7 +48,9 @@ export async function handlePeerAttachment(peer: string, r: Record<string, unkno
         buildPeerAttachmentRef({ ...r, ticket } as unknown as PeerAttachment),
       );
       if (!parsed) throw new Error('INVALID_PEER_ATTACHMENT');
-      let reserved = 0,
+      // 不设总量上限,只看磁盘:未完成的上传还会继续写入,已写部分已计入可用空间,
+      // 这里按剩余待写字节预留。
+      let pending = 0,
         count = 0;
       for (const name of await fs.readdir(root)) {
         if (!name.endsWith('.json') || !validTicket(name.slice(0, -5))) continue;
@@ -66,16 +68,22 @@ export async function handlePeerAttachment(peer: string, r: Record<string, unkno
             await fs.rm(path.join(root, name.slice(0, -5)), { force: true });
             await fs.rm(path.join(root, name), { force: true });
           } else {
-            reserved += entry.size;
+            if (!entry.complete) {
+              const written = await fs
+                .stat(path.join(root, name.slice(0, -5)))
+                .then((stat) => stat.size)
+                .catch(() => 0);
+              pending += Math.max(0, entry.size - written);
+            }
             count++;
           }
         });
       }
       const space = await fs.statfs(root);
+      // 物化峰值同时存在三份:收件箱保留件、会话临时件、媒体仓/附件缓存的持久副本。
       if (
         count >= 128 ||
-        reserved + parsed.size > 4 * 1024 ** 3 ||
-        space.bavail * space.bsize < parsed.size * 2 + 256 * 1024 ** 2
+        space.bavail * space.bsize < pending + parsed.size * 3 + 256 * 1024 ** 2
       )
         throw new Error('FILE_PEER_STORAGE');
       check();
@@ -101,19 +109,23 @@ export async function handlePeerAttachment(peer: string, r: Record<string, unkno
       return { ok: true };
     }
     if (r.op === 'write') {
+      // Streaming senders deliver raw bytes (attached by the file-peer IPC); older senders base64.
+      const binary = r.data instanceof Uint8Array;
       if (
         entry.complete ||
         !Number.isSafeInteger(r.offset) ||
         Number(r.offset) < 0 ||
-        typeof r.data !== 'string' ||
-        r.data.length > 1400000
+        (!binary && (typeof r.data !== 'string' || r.data.length > 1400000))
       )
         throw new Error('FILE_PEER_BLOCK');
-      const bytes = Buffer.from(r.data, 'base64');
+      const view = r.data as Uint8Array;
+      const bytes = binary
+        ? Buffer.from(view.buffer, view.byteOffset, view.byteLength)
+        : Buffer.from(r.data as string, 'base64');
       if (
         !bytes.length ||
         bytes.length > 1024 * 1024 ||
-        bytes.toString('base64') !== r.data ||
+        (!binary && bytes.toString('base64') !== r.data) ||
         Number(r.offset) + bytes.length > entry.size
       )
         throw new Error('FILE_PEER_BLOCK');

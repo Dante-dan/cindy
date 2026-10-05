@@ -27,6 +27,9 @@ import {
 } from '../remoteResources.js';
 
 describe('REMOTE_INVOKE_ALLOWLIST', () => {
+  it('allows Review start to run on the data-owning Desktop', () => {
+    expect(REMOTE_INVOKE_ALLOWLIST.has('maker:review:start')).toBe(true);
+  });
   it('allows the reduced teammate directory while keeping native configuration local', () => {
     for (const channel of ['local-db:bots:list', 'local-db:bots:get']) {
       expect(REMOTE_INVOKE_ALLOWLIST.has(channel)).toBe(true);
@@ -396,6 +399,8 @@ describe('PUSH_FORWARD_ALLOWLIST', () => {
       'maker:interaction-request',
       'maker:interaction-dismissed',
       'maker:auto-permission:fallback',
+      'maker:session-credential-switch-applied',
+      'maker:session-credential-switch-failed',
       'maker:provider:changed',
       'maker:agents:changed',
       'maker:schedule:event',
