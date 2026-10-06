@@ -1,3 +1,4 @@
+import { formatSessionDuration } from '@/lib/sessionDurationFormat';
 import { shouldShowOpenPathError } from '../../../shared/openPathResult';
 import { shouldShowFailedScheduleNotice } from '@cindy/maker-shared/schedule-model';
 /**
@@ -124,6 +125,7 @@ import { useAutomationScheduleSessionInfo } from './hooks/useAutomationScheduleS
 import { markScheduleRunsReadAndSync } from '../scheduler/lib/scheduleRunReadSync';
 import { useBackgroundBashTasks } from '@/hooks/useBackgroundBashTasks';
 import { useSessionBackgroundActivity } from '@/hooks/useSessionBackgroundActivity';
+import { useRemoteSessionBackgroundTasks } from '@/hooks/useRemoteSessionBackgroundTasks';
 import { workflowAgentVisualState } from '@/features/right-sidebar/plugins/background-tasks/workflowProgressModel';
 import { VendorIcon } from '@/components/sidebar/VendorIcon';
 import {
@@ -2141,10 +2143,21 @@ export function CCAgentSessionView({
   // proxy 活动信号覆盖不到 —— 从 taskUpdates 事件流折算,并在挂载/重载后用 main
   // 快照补回存量。与上面的 proxy 信号一起点亮状态栏后台模式。
   const backgroundBash = useBackgroundBashTasks(sessionId, taskUpdates, historyLoaded);
+  // device-link 远程会话:上面两路本机信号都不覆盖(镜像事件可能丢终态),改为定时
+  // 读被控端的权威快照;停止同样隧道到被控端执行。
+  const remoteBackground = useRemoteSessionBackgroundTasks(
+    sessionId,
+    remoteDeviceId,
+    agentStatus.isRunning || isStreaming,
+  );
+  const backgroundModelActive = remoteDeviceId
+    ? remoteBackground.active
+    : backgroundActivity.active;
+  const backgroundBashTasks = remoteDeviceId ? remoteBackground.tasks : backgroundBash.tasks;
   // 与运行态互斥(turn 一开跑 main 即广播熄灭,这里再加一道渲染守卫防瞬时竞态):
   // 只在「无 turn 在跑」时才把状态栏切到后台子任务模式。
   const backgroundTasksActive =
-    (backgroundActivity.active || backgroundBash.tasks.length > 0) &&
+    (backgroundModelActive || backgroundBashTasks.length > 0) &&
     !agentStatus.isRunning &&
     !isStreaming &&
     Boolean(sessionId);
@@ -4350,9 +4363,9 @@ export function CCAgentSessionView({
     [sessionId, t],
   );
 
-  // delayed-create:device-link / 远程草稿,以及本机斜杠命令首条(含 Pi 空白前缀),把内容登记在
-  // pending 里,等 session 完全 hydrate 后再由 maybeDispatchDesktopSlashCommand /
-  // sendMessage 消费。本机普通文本已在草稿路由发出。一次性消费 + ref guard,防
+  // delayed-create:device-link 远程草稿的协同 / 斜杠命令首条,以及本机斜杠命令首条(含 Pi 空白
+  // 前缀),把内容登记在 pending 里,等 session 完全 hydrate 后再由 maybeDispatchDesktopSlashCommand /
+  // sendMessage 消费。本机与远程的普通文本已在草稿路由发出。一次性消费 + ref guard,防
   // StrictMode 双 mount / 重渲染时重复发送。
   const pendingConsumedRef = useRef(false);
   useEffect(() => {
@@ -5005,7 +5018,10 @@ export function CCAgentSessionView({
         {/* Scroll container — full height, bottom padding reserves space for input overlay.
            key={sessionId}: force a full remount on session switch so scroll state,
            refs, and ResizeObservers are fresh — guarantees per-session isolation. */}
-        <div className="relative min-h-0 flex-1">
+        <div
+          className="wallpaper-message-viewport relative min-h-0 flex-1"
+          style={{ '--wallpaper-composer-height': `${overlayHeight}px` } as CSSProperties}
+        >
           {/* perf/session-switch 探针纯诊断:仅 DEV 用 Profiler 量 MessageStream commit,
             生产直接渲染 el(见上方 messageStreamEl),不引入多余 Profiler fiber。 */}
           {import.meta.env.DEV ? (
@@ -5027,11 +5043,11 @@ export function CCAgentSessionView({
         >
           {/* Gradient mask: transparent → content-area */}
           <div className="pointer-events-none h-8 w-full">
-            <div className="h-full w-full bg-gradient-to-t from-[hsl(var(--content-area))] to-transparent" />
+            <div className="wallpaper-composer-fade h-full w-full bg-gradient-to-t from-[hsl(var(--content-area))] to-transparent" />
           </div>
 
           {/* Solid background zone */}
-          <div className="pointer-events-auto flex w-full flex-col items-center bg-[hsl(var(--content-area))] pb-5">
+          <div className="wallpaper-composer-zone pointer-events-auto flex w-full flex-col items-center bg-[hsl(var(--content-area))] pb-5">
             {/* 单行 composer 状态层：RunningStatusBar 与中央胶囊组合叠在同一个 grid row。
               展开态由「计划 + 完整被控提示」组成真实 flex 组合共同居中,被控提示会把计划
               向左挤且不会互相覆盖；折叠态计划恢复单独居中,呼吸灯移到 token 统计左侧。 */}
@@ -5079,12 +5095,17 @@ export function CCAgentSessionView({
                   // 逐任务 stopTask,不关常驻子进程。proxy 信号在时维持原语义
                   // (关子进程止损,bash 任务随之终止,无需再逐个停)。
                   backgroundBashOnlyCount={
-                    backgroundActivity.active ? 0 : backgroundBash.tasks.length
+                    backgroundModelActive ? 0 : backgroundBashTasks.length
                   }
-                  backgroundStopping={backgroundActivity.stopping || backgroundBash.stopping}
+                  backgroundStopping={
+                    backgroundActivity.stopping ||
+                    backgroundBash.stopping ||
+                    remoteBackground.stopping
+                  }
                   suppressContent={Boolean(pendingPlanReview)}
                   onStopBackgroundTasks={() => {
-                    if (backgroundActivity.active) void backgroundActivity.stopAll();
+                    if (remoteDeviceId) void remoteBackground.stopAll();
+                    else if (backgroundActivity.active) void backgroundActivity.stopAll();
                     else void backgroundBash.stopAll();
                   }}
                   rightLeadingSlot={
@@ -6066,9 +6087,10 @@ function RunningStatusBar({
   // the icon answers "what is it doing right now".
   const isCompacting = typeof status === 'string' && status.toLowerCase().startsWith('compact');
 
-  const minutes = Math.floor(elapsed / 60);
-  const seconds = elapsed % 60;
-  const elapsedText = minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+  const elapsedText = formatSessionDuration(elapsed * 1000, t, {
+    minimumSeconds: 0,
+    alwaysShowRemainder: true,
+  });
 
   // Cadenced shimmer(DESIGN.md §14.4):status-shimmer 已是一次性动画,这里在
   // 每次真实动静(状态文案变化 / token 计数推进)时通过 key 重挂载触发一次呼吸。

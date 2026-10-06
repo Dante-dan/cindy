@@ -1195,7 +1195,12 @@ export function mountRemoteDesktopViewer(root, postMessage, config) {
         }
       } else {
         multi.candidate = null;
-        if (!multi.kind && travel > 8 && travel > span) multi.kind = "scroll";
+        if (!multi.kind && travel > 8 && travel > span) {
+          multi.kind = "scroll";
+          multi.restX = 0;
+          multi.restY = 0;
+          multi.aimed = mode !== "touch";
+        }
       }
     }
     if (multi.kind === "pinch") {
@@ -1226,13 +1231,31 @@ export function mountRemoteDesktopViewer(root, postMessage, config) {
     } else if (multi.kind === "scroll") {
       const dx = next.x - multi.lastX,
         dy = next.y - multi.lastY;
-      if (control && mode !== "pan")
-        queue({
-          kind: "scroll",
-          dx: Math.max(-2000, Math.min(2000, -dx)),
-          dy: Math.max(-2000, Math.min(2000, -dy)),
-        });
-      else pan(dx, dy);
+      if (control && mode !== "pan") {
+        // Hosts scroll whatever is under the desktop cursor. Touch mode has no
+        // visible pointer, so aim it at the fingers once they are over the
+        // desktop; like taps, scrolling over the letterbox does nothing.
+        if (!multi.aimed && insideDesktop(next)) {
+          const p = point(next);
+          cx = p.x;
+          cy = p.y;
+          queue({ kind: "move", x: cx, y: cy });
+          multi.aimed = true;
+        }
+        // Hosts inject whole pixels; carry fractions so slow drags still scroll.
+        const sx = multi.restX - dx,
+          sy = multi.restY - dy,
+          wx = Math.trunc(sx),
+          wy = Math.trunc(sy);
+        multi.restX = sx - wx;
+        multi.restY = sy - wy;
+        if (multi.aimed && (wx || wy))
+          queue({
+            kind: "scroll",
+            dx: Math.max(-2000, Math.min(2000, wx)),
+            dy: Math.max(-2000, Math.min(2000, wy)),
+          });
+      } else pan(dx, dy);
     }
     if (multi.kind) {
       multi.lastX = next.x;
@@ -1421,19 +1444,33 @@ export function mountRemoteDesktopViewer(root, postMessage, config) {
     desktopPan = null;
     if (config.desktop && heldMouse.size) release();
   });
+  let wheelRestX = 0,
+    wheelRestY = 0;
   if (config.desktop)
     listen(
       stage,
       "wheel",
       (e) => {
         e.preventDefault();
-        if (!control) return;
+        if (!control) {
+          wheelRestX = wheelRestY = 0;
+          return;
+        }
         const factor =
           e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? stage.clientHeight : 1;
+        // Hosts inject whole pixels; carry fractions so slow trackpad and
+        // scaled-display deltas still scroll.
+        const sx = wheelRestX + e.deltaX * factor,
+          sy = wheelRestY + e.deltaY * factor,
+          wx = Math.trunc(sx) || 0,
+          wy = Math.trunc(sy) || 0;
+        wheelRestX = sx - wx;
+        wheelRestY = sy - wy;
+        if (!wx && !wy) return;
         queue({
           kind: "scroll",
-          dx: Math.max(-2000, Math.min(2000, e.deltaX * factor)),
-          dy: Math.max(-2000, Math.min(2000, e.deltaY * factor)),
+          dx: Math.max(-2000, Math.min(2000, wx)),
+          dy: Math.max(-2000, Math.min(2000, wy)),
         });
         flush();
       },
@@ -1473,7 +1510,6 @@ export function mountRemoteDesktopViewer(root, postMessage, config) {
         composing
       )
         return;
-      if ((e.metaKey || e.ctrlKey) && e.code === "KeyW") return; // always retain a local close shortcut
       if (
         control &&
         clipboardShortcuts &&
@@ -1890,6 +1926,18 @@ export function mountRemoteDesktopViewer(root, postMessage, config) {
           const message = JSON.parse(e.data);
           if (message.type === "cursor") receiveCursor(message.cursor);
           if (
+            message.type === "reply" &&
+            typeof message.id === "string" &&
+            message.id.length <= 64
+          )
+            post({
+              type: "channelReply",
+              id: message.id,
+              ok: message.ok === true,
+              result: message.result,
+              error: typeof message.error === "string" ? message.error : null,
+            });
+          if (
             (video.webkitPresentationMode === "picture-in-picture" ||
               document.pictureInPictureElement === video) &&
             message.type === "viewPing" &&
@@ -2007,6 +2055,27 @@ export function mountRemoteDesktopViewer(root, postMessage, config) {
   listen(video, "webkitpresentationmodechanged", reportPresentation);
   listen(video, "enterpictureinpicture", reportPresentation);
   listen(video, "leavepictureinpicture", reportPresentation);
+  function applyDisplayGeometry(message) {
+    if (
+      !Number.isInteger(message.width) ||
+      !Number.isInteger(message.height) ||
+      message.width < 320 ||
+      message.height < 320 ||
+      (message.restore !== true &&
+        (message.width > 2560 || message.height > 2560))
+    )
+      return;
+    release();
+    stopPanAnimation();
+    viewerSized = message.restore !== true;
+    zoom = 1;
+    desktopScale = null;
+    fx = fy = 0.5;
+    followRest = null;
+    dw = message.width;
+    dh = message.height;
+    render();
+  }
   function receive(event) {
     let message;
     try {
@@ -2015,6 +2084,35 @@ export function mountRemoteDesktopViewer(root, postMessage, config) {
       return;
     }
     switch (message.type) {
+      // A small control request routed over the live data channel. The host
+      // only receives it after advertising support; otherwise the parent uses
+      // the relay. `sent` tells the parent whether the channel took it.
+      case "channelRequest": {
+        const id =
+          typeof message.id === "string" && message.id.length <= 64
+            ? message.id
+            : null;
+        if (!id) break;
+        let sent = false;
+        try {
+          const data = JSON.stringify({
+            type: "request",
+            id,
+            request: message.request,
+          });
+          if (
+            pc?.connectionState === "connected" &&
+            dc?.readyState === "open" &&
+            dc.bufferedAmount < 16384 &&
+            data.length <= 32768
+          ) {
+            dc.send(data);
+            sent = true;
+          }
+        } catch {}
+        post({ type: "channelRequestState", id, sent });
+        break;
+      }
       case "measureViewport":
         post({
           type: "viewportSize",
@@ -2048,28 +2146,14 @@ export function mountRemoteDesktopViewer(root, postMessage, config) {
         }
         break;
       case "videoSettings":
-        if (
-          Number.isInteger(message.width) &&
-          Number.isInteger(message.height) &&
-          message.width >= 320 &&
-          message.height >= 320 &&
-          (message.restore === true ||
-            (message.width <= 2560 && message.height <= 2560))
-        ) {
-          release();
-          stopPanAnimation();
-          viewerSized = message.restore !== true;
-          zoom = 1;
-          desktopScale = null;
-          fx = fy = 0.5;
-          followRest = null;
-          dw = message.width;
-          dh = message.height;
-          render();
-        }
+        applyDisplayGeometry(message);
         video.muted = !message.audio;
         retries = 0;
         if (!config.nativeMedia) connect();
+        break;
+      // The host kept the stream across a display change: layout only.
+      case "displayGeometry":
+        applyDisplayGeometry(message);
         break;
       case "keyboard":
         showKeyboard(message.enabled === true);
@@ -2353,7 +2437,11 @@ export function mountRemoteDesktopViewer(root, postMessage, config) {
         image.src = "data:image/jpeg;base64," + message.jpeg;
         break;
       }
-      case "control":
+      case "control": {
+        // A local view-only switch keeps host control, so its release must
+        // still reach the host even if a batch was waiting for its ACK.
+        const releaseHost =
+          control && message.enabled !== true && message.release === true;
         release();
         // A new control intent abandons the previous relay batch. Advance the
         // existing sequence fence so a late old ACK cannot unlock a new batch.
@@ -2362,9 +2450,15 @@ export function mountRemoteDesktopViewer(root, postMessage, config) {
         control = message.enabled;
         if (!control) showKeyboard(false);
         pending = [];
+        if (releaseHost) {
+          pending = [{ kind: "release" }];
+          pendingSince = performance.now();
+          flush();
+        }
         updateMouseButtons();
         render();
         break;
+      }
       case "mode":
         release();
         if (message.mode !== "pointer") followRest = null;

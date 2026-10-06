@@ -20,7 +20,7 @@ import { getManagedLlamaCppService } from '../local-model-runtime/llamaCppServic
 import { ensureManagedLlamaCppProvider } from '../local-model-runtime/managedLlamaCppProvider.js';
 import { setBotRemoteMessageService } from './botRemoteMessageReceiver.js';
 import { handleListDevices, defaultDeps as deviceDirectoryDeps } from '../device-link/ipc.js';
-import { getSelfDeviceId, remoteInvoke as invokeBotPeer } from '../device-link/index.js';
+import { getHostSourceDevice, getSelfDeviceId, remoteInvoke as invokeBotPeer } from '../device-link/index.js';
 import { registerModelFavoritesSync } from './modelFavoritesSync.js';
 import { advanceRuntimeRecoveryNotice } from '../im/shared/runtimeRecoveryNotice.js';
 import { markImSessionManualRouteOverride } from '../im/shared/manualRouteOverride.js';
@@ -193,7 +193,6 @@ import {
   getGhostManager,
   getGhostPipeDispatcher,
   getGhostSetupAssessment,
-  getIOSSimulatorPluginAccessDecision,
   isGhostAvailableForActiveSession,
 } from '../cindy-brain/index.js';
 import {
@@ -432,6 +431,8 @@ import {
 } from '../../shared/orca-worker-permission-mode.js';
 import { t } from '../i18n.js';
 import { createLogger } from '../logger.js';
+import { createColdPiRehydrationForWindowVerification } from './coldPiRehydration.js';
+import { ColdPiRehydrationError, reportColdPiRehydrationFailure } from './coldPiRehydrationFailure.js';
 import {
   desktopClaudeAuthAdapter,
   desktopCodexAuthAdapter,
@@ -479,7 +480,8 @@ import {
   createBotDirectMessageService,
   type BotDirectMessageService,
 } from './botDirectMessageService.js';
-import { createBotGroupChatService, type BotGroupChatService } from './botGroupChatService.js';
+import { createBotGroupChatService, type BotGroupChatService, type BotGroupChatServiceDeps } from './botGroupChatService.js';
+import { withChatServer } from './chatServer.js';
 import { createBotGroupPlanDecider } from './botGroupPlanDecider.js';
 import { botGroupMembersVisibleRemotely, registerBotGroupRemoteResourceProvider } from './botGroupRemoteResourceProvider.js';
 import { broadcastBotGroupRemoteResourceChanged } from './botGroupRemoteResourceInvalidation.js';
@@ -700,8 +702,6 @@ import {
   resolveSessionReferences,
 } from './sessionReferenceResolver.js';
 import { registerAndroidAutomationHandlers } from './androidHandlers.js';
-import { registerIOSSimulatorHandlers } from './iosSimulatorHandlers.js';
-import { cancelIOSSimulatorSessionOperations } from '../mcp-integrations/ios-simulator.js';
 import { MAKER_INVOKE, MAKER_PUSH, MAKER_SEND } from './channels.js';
 import type { CollabDispatchOutcome } from './collabSendOutcome.js';
 import {
@@ -785,6 +785,7 @@ import {
   installDesktopInteractionHandler,
   installInteractionLifecycleObserver,
 } from './interactionRouter.js';
+import { createSharedPermission, type SharedPermission } from './sharedPermission';
 import { registerMakerMessageDeleteHandler } from './messageDeleteHandler.js';
 import {
   cleanupOrphanedTempAttachments,
@@ -864,10 +865,13 @@ import {
 import { pendingHarnessRuntimeMutation, setSessionRuntimeHarness } from './sessionRuntimeHarnessSelection.js';
 import {
   extractAgentIslandPromptText,
+  extractPlainText,
   prependNoteToWireUserMessage,
   prependHandoffToUserMessage,
   type HandoffWireMessage,
 } from './agentHandoff.js';
+import { sanitizeSourceName } from '@cindy/maker-shared/message-source';
+import { UI_ACTION_TRIGGER_PREFIX } from '@cindy/maker-shared/synthetic-trigger';
 import {
   createContextOverflowRollover,
   hasModelWindowContextToProtect,
@@ -891,6 +895,7 @@ import {
 } from './sessionLastLiveUsage.js';
 import { clearSealedCodexPlanState, readCodexPlanState } from '../localDb/codexPlanState.js';
 import { buildCompletedPlanGuardNote, buildPlanReconcileNote } from './planReconcile.js';
+import { peekGoalInactiveNote } from '../goal-host/inactiveNote.js';
 import { type MakerSessionCreateOpts, withCreateSessionStderr } from './sessionRequest.js';
 import { persistAndHydrateSessionProvider } from './sessionProviderBootstrap.js';
 import { registerMakerSessionSendHandler } from './sessionSendHandler.js';
@@ -1121,6 +1126,7 @@ import {
   getDeviceLinkInvokeContext,
   isDeviceLinkInvoke,
   isMobileControllerInvoke,
+  readDeviceLinkInvokeSourceDevice,
 } from '../device-link/invoke-context.js';
 import { stampSharedTaskInput } from './sharedTaskInput.js';
 import { createSharedTaskContextUsageGuard } from './sharedTaskContextUsage.js';
@@ -1133,12 +1139,14 @@ function captureSharedTaskSettingGuard(sessionId: string) {
 }
 import {
   attachMainOwnedInputBoundary,
-  buildMobileClientPromptNote,
+  buildClientEnvironmentNote,
   shouldPrependMobileClientPromptNote,
+  stampDirectSendSourceDevice,
   stripMainOnlySendOpts,
   stampMobileClientOrigin,
   type MainOwnedInputBoundaryStamp,
 } from './mobileClientPromptNote.js';
+import { buildWireMessageSourceNote, readWireSourceDevice } from './messageSourceNote.js';
 import { getResolvedMainLocale } from '../i18n.js';
 import {
   buildUiLanguageErrorNote,
@@ -2406,6 +2414,7 @@ interface CodexImageEventData {
 const PERMISSION_INTERACTION_TIMEOUT_MS = 10 * 60 * 1000;
 
 interface PendingInteractionEntry {
+  sharedPermission?: import('./sharedPermission').SharedPermission;
   sessionId: string;
   kind: InteractionRequest['kind'];
   resolve: (decision: InteractionDecision) => void;
@@ -2580,7 +2589,7 @@ function clearPendingInteraction(requestId: string): PendingInteractionEntry | n
 
 /** Permission safety time counts only while its owning task can accept input. */
 function schedulePendingPermissionTimeout(requestId: string, entry: PendingInteractionEntry): void {
-  if (entry.migrated || entry.kind !== 'permission' || entry.timeoutId !== undefined
+  if (entry.migrated || entry.sharedPermission || entry.kind !== 'permission' || entry.timeoutId !== undefined
     || pendingInteractionResolvers.get(requestId) !== entry
     || agentInputCoordinatorHolder?.isExecutionPaused(entry.sessionId)) return;
   const remaining = entry.timeoutRemainingMs ?? PERMISSION_INTERACTION_TIMEOUT_MS;
@@ -2605,7 +2614,7 @@ function setPendingInteractionTimeoutsPaused(sessionId: string, paused: boolean)
   for (const [requestId, entry] of pendingInteractionResolvers) {
     if (entry.sessionId !== sessionId) continue;
     if (!paused && entry.deferredDecision) {
-      if (resolvePendingInteraction(requestId, entry.deferredDecision)) applied.push(requestId);
+      if (resolvePendingInteraction(requestId, entry.deferredDecision, !!entry.sharedPermission)) applied.push(requestId);
       continue;
     }
     if (entry.kind !== 'permission') continue;
@@ -2763,9 +2772,34 @@ function persistInteractionDecision(
   );
 }
 
-function resolvePendingInteraction(requestId: string, decision: InteractionDecision): boolean {
+/** Keep IM answers provisional in the same pause boundary as Desktop answers. */
+function bindSharedPermission(requestId: string, entry: PendingInteractionEntry, shared: SharedPermission): void {
+  entry.sharedPermission = shared;
+  const originalResolve = entry.resolve;
+  entry.resolve = (decision) => {
+    shared.settle(decision);
+    originalResolve(shared.decision ?? decision);
+  };
+  shared.decide = (decision) => {
+    if (decision.kind !== 'permission' || shared.decision || entry.deferredDecision
+      || pendingInteractionResolvers.get(requestId) !== entry) return false;
+    if (agentInputCoordinatorHolder?.isExecutionPaused(entry.sessionId)) {
+      entry.deferredDecision = decision;
+      return true;
+    }
+    return shared.settle(decision);
+  };
+  void shared.result.then((decision) => {
+    if (pendingInteractionResolvers.get(requestId) === entry) {
+      resolvePendingInteraction(requestId, decision, true);
+    }
+  });
+}
+
+function resolvePendingInteraction(requestId: string, decision: InteractionDecision, fromShared = false): boolean {
   const resolver = pendingInteractionResolvers.get(requestId);
-  if (!resolver || agentInputCoordinatorHolder?.isExecutionPaused(resolver.sessionId)) return false;
+  if (!resolver || (!fromShared && agentInputCoordinatorHolder?.isExecutionPaused(resolver.sessionId))) return false;
+  if (resolver.sharedPermission && !fromShared) return resolver.sharedPermission.decide(decision);
   clearPendingInteraction(requestId);
   handleAgentIslandInteractionDismissed(resolver.sessionId, requestId);
   resolver.resolve(decision);
@@ -2897,31 +2931,34 @@ function cleanupPendingInteractionsForSession(sessionId: string, reason: string)
 }
 
 /**
- * 取走该 session 当前所有 pending interaction 的 request + resolve fn,
- * **不 resolve** —— caller (feishu 接管路径) 拿去把卡片重发到飞书,等用户在
- * 飞书答复时再调 resolve。
- *
- * 同时 broadcast INTERACTION_DISMISSED 让 desktop renderer 清掉对话框 UI
- * (resolvedAs 字段省略 —— renderer 默认按 'deny' 处理, 但我们用 reason
- * 'migrated_to_feishu' 让 caller 能区分日志, 实际 UI 只是关掉对话框)。
- *
- * 给 feishu /ctr 接管 in-turn session 用 —— attached=true 路径里 setInteractionListener
- * 覆盖之前调一次, 把 desktop 卡片"原地搬到飞书"。
+ * 接管进行中的会话时,把待确认交互交给 IM 呈现。
+ * 权限保留 Desktop 面板并共用一次决定;问答和计划沿用原有 UI 迁移规则。
+ * 执行的取消、暂停与恢复仍由 Desktop 管理。
  */
 export function takePendingInteractionsForSession(sessionId: string): Array<{
+  sharedPermission?: SharedPermission;
   requestId: string;
   request: InteractionRequest;
   resolve: (decision: InteractionDecision) => void;
 }> {
   const entries = Array.from(pendingInteractionResolvers.entries()).filter(
-    ([, entry]) => entry.sessionId === sessionId && !entry.migrated,
+    ([, entry]) => entry.sessionId === sessionId && !entry.migrated && !entry.sharedPermission,
   );
   const taken: Array<{
+    sharedPermission?: SharedPermission;
     requestId: string;
     request: InteractionRequest;
     resolve: (decision: InteractionDecision) => void;
   }> = [];
   for (const [requestId, entry] of entries) {
+    if (entry.kind === 'permission') {
+      if (entry.timeoutId) clearTimeout(entry.timeoutId);
+      entry.timeoutId = undefined;
+      const shared = createSharedPermission();
+      bindSharedPermission(requestId, entry, shared);
+      taken.push({ requestId, request: entry.request, resolve: shared.decide, sharedPermission: shared });
+      continue;
+    }
     // Transfer the UI, never the raw engine resolver. Keep cancellation and pause
     // ownership here even after the IM registry consumes its one-shot answer.
     if (entry.timeoutId) clearTimeout(entry.timeoutId);
@@ -4321,7 +4358,7 @@ export function installDesktopInteractionListener(session: {
     l: ((req: InteractionRequest) => Promise<InteractionDecision>) | null,
   ) => void;
 }): void {
-  installDesktopInteractionHandler(session, async (req: InteractionRequest) => {
+  installDesktopInteractionHandler(session, async (req: InteractionRequest, sharedPermission) => {
     const agentIslandInteractionEpoch = shouldNotifyAgentIslandForSession(session.id)
       ? (getAgentIslandService()?.captureInteractionEpoch(session.id) ?? null)
       : null;
@@ -4362,6 +4399,7 @@ export function installDesktopInteractionListener(session: {
             }
           : req;
       const entry: PendingInteractionEntry = {
+        sharedPermission,
         sessionId: session.id,
         kind: req.kind,
         resolve,
@@ -4371,7 +4409,11 @@ export function installDesktopInteractionListener(session: {
       // 必须先登记 pending,再广播。否则 renderer / device-link 回得太快会打到
       // 「no pending resolver」,确认卡看起来没反应,Codex 最终却记成用户拒绝。
       pendingInteractionResolvers.set(req.requestId, entry);
-      schedulePendingPermissionTimeout(req.requestId, entry);
+      if (sharedPermission) {
+        bindSharedPermission(req.requestId, entry, sharedPermission);
+      } else {
+        schedulePendingPermissionTimeout(req.requestId, entry);
+      }
       broadcastToAllWindows(MAKER_PUSH.INTERACTION_REQUEST, {
         sessionId: session.id,
         request: boundaryRequest,
@@ -7049,6 +7091,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     didInjectProjectContext: boolean;
   }> {
     assertAccess?.();
+    if (o.id && !o.remoteHostId) worktreeManager.assertPrecreatedSessionNotCancelled(o.id);
     if (o.id && o.workingDir && !o.remoteHostId) {
       o.workingDir = workingDirectoryRecovery.resolve(o.id, o.workingDir);
       await workingDirectoryRecovery.observe(o.id, o.workingDir).catch((error) => {
@@ -8581,6 +8624,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       worktreeManager.discardPrecreatedWorktree(sessionId, expectedPath, options),
     discardByRecoveryKey: (sessionId, recoveryKey, options) =>
       worktreeManager.discardPrecreatedWorktreeByRecoveryKey(sessionId, recoveryKey, options),
+    cancel: (sessionId, locator, options) =>
+      worktreeManager.cancelPrecreatedWorktree(sessionId, locator, options),
   });
 
   // turn 运行中登记的切换意图(下一条消息发送时刻由 send 事务 apply)。
@@ -8660,50 +8705,42 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     }
   }
 
-  async function rehydrateColdPiRuntimeForWindowVerification(sessionId: string): Promise<void> {
-    if (maker.getSession(sessionId)) return;
-    const [row] = await getDbClient()
-      .drizzle.select()
-      .from(sessions)
-      .where(eq(sessions.id, sessionId))
-      .limit(1);
-    if (
-      !row ||
-      row.agentKind !== 'pi' ||
-      row.remoteHostId ||
-      !row.sdkSessionId ||
-      !row.workingDir
-    ) {
-      throw new Error(`session ${sessionId} cannot rehydrate a local Pi runtime for verification`);
-    }
-    const createOpts = buildCreateOptsWithStderr({
-      id: sessionId,
-      agentKind: 'pi',
-      workingDir: row.workingDir,
-      model: row.model,
-      providerId: row.providerId,
-      effort: (row.effort ?? undefined) as CreateOpts['effort'],
-      fastMode: !!row.fastMode,
-      permissionMode: (row.permissionMode ?? 'ask') as CreateOpts['permissionMode'],
-      planMode: !!row.planModeEnabled,
-      title: row.title ?? undefined,
-      resumeSessionId: row.sdkSessionId,
-      orcaRole: row.orcaRole ?? undefined,
-    });
-    const workDirExists = await checkWorkDirExists(
-      sessionId,
-      createOpts.workingDir,
-      createOpts.agentKind,
-      createOpts.remoteHostId,
-    );
-    if (!workDirExists) {
-      throw new Error(`working directory is missing for session ${sessionId}`);
-    }
-    await synthesizeOrcaVendorOptionsFromDb(sessionId, createOpts);
-    const extraDirs = await readSessionExtraDirsFromDb(sessionId);
-    if (extraDirs.length > 0) createOpts.extraDirs = extraDirs;
-    await bootstrapSession(createOpts);
-  }
+  // 冷 Pi 切模核实前的运行时恢复（#5508）：流程在 coldPiRehydration.ts 内，每条失败
+  // 路径都带类别；这里只接 DB、工作目录探测与 bootstrap。
+  const rehydrateColdPiRuntimeForWindowVerification = createColdPiRehydrationForWindowVerification({
+    hasLiveSession: (sessionId) => !!maker.getSession(sessionId),
+    loadSessionRow: async (sessionId) => {
+      const [row] = await getDbClient()
+        .drizzle.select()
+        .from(sessions)
+        .where(eq(sessions.id, sessionId))
+        .limit(1);
+      return row;
+    },
+    buildCreateOpts: (sessionId, row) =>
+      buildCreateOptsWithStderr({
+        id: sessionId,
+        agentKind: 'pi',
+        workingDir: row.workingDir,
+        model: row.model,
+        providerId: row.providerId,
+        effort: (row.effort ?? undefined) as CreateOpts['effort'],
+        fastMode: !!row.fastMode,
+        permissionMode: (row.permissionMode ?? 'ask') as CreateOpts['permissionMode'],
+        planMode: !!row.planModeEnabled,
+        title: row.title ?? undefined,
+        resumeSessionId: row.sdkSessionId,
+        orcaRole: row.orcaRole ?? undefined,
+      }),
+    checkWorkDirExists: (sessionId, workingDir, agentKind, remoteHostId) =>
+      checkWorkDirExists(sessionId, workingDir, agentKind, remoteHostId),
+    prepareCreateOpts: async (sessionId, createOpts) => {
+      await synthesizeOrcaVendorOptionsFromDb(sessionId, createOpts);
+      const extraDirs = await readSessionExtraDirsFromDb(sessionId);
+      if (extraDirs.length > 0) createOpts.extraDirs = extraDirs;
+    },
+    bootstrapSession: (createOpts) => bootstrapSession(createOpts),
+  });
 
   const agentSwitchDeps: MakerSessionAgentSwitchHandlerDeps = {
     withSessionLock: withSendToSessionLock,
@@ -9044,6 +9081,12 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     message: string,
     anchorClientId: string,
     opts: SessionSendOptions,
+    /**
+     * 本条落库行的来源(origin / sourcePlugin),只用于在 wire 上前置 `[消息来源]`;
+     * persistedText 用来识别主机隐藏指令(不加说明)。空闲直发不经 send 事务,
+     * 说明只在这里加一次。
+     */
+    source?: { origin?: unknown; sourcePlugin?: unknown; persistedText?: string },
   ): Promise<SessionSendResult> {
     const dispatchMergeTurn = prepareUpstreamMergeTurn(session.id);
     if (!session.remoteHostId && isCindyMakeWorktreePath(app.getPath('userData'), session.workDir)) {
@@ -9055,12 +9098,23 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       let baselineStarted = false;
       let turnChangeSetStarted = false;
       const pendingHandoff = await agentHandoffPending.peek(session.id);
-      const outgoingMessage: UserMessage = pendingHandoff
+      const withHandoff: UserMessage = pendingHandoff
         ? (prependHandoffToUserMessage(
             { type: 'user', content: message },
             pendingHandoff,
           ) as UserMessage)
         : { type: 'user', content: message };
+      // 来源说明是元信息,排在交接段之前(交接自带「以下是用户的新消息」结束标记);
+      // 原生命令必须留在消息开头,同 send 事务的占位规则。
+      const sourceNote = source && shouldPrependMobileClientPromptNote(message, session.agentKind)
+        ? buildWireMessageSourceNote(
+            { origin: source.origin, sourcePlugin: source.sourcePlugin },
+            { visibleText: source.persistedText ?? message },
+          )
+        : null;
+      const outgoingMessage: UserMessage = sourceNote
+        ? (prependNoteToWireUserMessage(withHandoff as HandoffWireMessage, sourceNote) as UserMessage)
+        : withHandoff;
       try {
         const sendResult = await session.send(outgoingMessage, {
           ...opts,
@@ -9161,6 +9215,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     inheritSourcePermissionMode?: boolean;
     /** Host-owned durable inputs use the coordinator even when idle. */
     forceQueue?: boolean;
+    /** 插件任务派发的来源(只用于标签与 `[消息来源]`,不是权限判据,也不是 origin)。 */
+    sourcePlugin?: AgentInputQueuedMessage['sourcePlugin'];
   }): Promise<SendToSessionInternalResult> {
     const {
       targetSessionId,
@@ -9185,9 +9241,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       message,
       explicitOrigin: origin,
     });
-    const inputAgentMeta: AgentMeta | undefined = queuedOrigin || params.autoReviewUserText !== undefined
+    const inputAgentMeta: AgentMeta | undefined = queuedOrigin || params.sourcePlugin || params.autoReviewUserText !== undefined
       ? {
           ...(queuedOrigin ? { origin: queuedOrigin } : {}),
+          // 插件来源只用于标签(主机在插件派发入口盖章,名字已清洗)。
+          ...(params.sourcePlugin ? { sourcePlugin: params.sourcePlugin } : {}),
           ...(params.autoReviewUserText !== undefined
             ? { autoReviewUserText: params.autoReviewUserText, delivery: 'turn' as const }
             : {}),
@@ -9196,6 +9254,13 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     if (!message) {
       return { ok: false, errorCode: 'INVALID_ARGS', message: 'message required' };
     }
+    const sourcePlugin = params.sourcePlugin;
+    // 空闲直发的 wire 来源说明与落库标签读同一份数据。
+    const directSource = {
+      origin: queuedOrigin,
+      sourcePlugin,
+      persistedText: extractPlainText(persistedContent ?? message),
+    };
 
     if (targetSessionId) {
       try {
@@ -9431,7 +9496,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
             broadcastSessionCreated(session.id);
           },
           onDispatching: () => dispatchAgentIslandUserPrompt(session.id),
-        });
+        }, directSource);
         if (createdPreviewStarted) {
           if (sendResult.accepted) {
             commitAgentIslandUserPrompt(session.id, clientId);
@@ -9552,6 +9617,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           onAcceptedRollback,
           onAcceptedCommit,
           origin: queuedOrigin,
+          sourcePlugin,
           autoReviewUserText: params.autoReviewUserText,
           authorizationGuard: params.authorizationGuard,
         });
@@ -9616,6 +9682,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
             onAcceptedRollback,
             onAcceptedCommit,
             origin: queuedOrigin,
+            sourcePlugin,
             autoReviewUserText: params.autoReviewUserText,
           });
           return {
@@ -9703,7 +9770,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
             planMode: false,
             onAccepted: persistUserMessage,
             onDispatching: () => dispatchAgentIslandUserPrompt(targetSessionId),
-          });
+          }, directSource);
           if (userPromptPreviewStarted) {
             if (sendResult.accepted) {
               commitAgentIslandUserPrompt(targetSessionId, clientId);
@@ -9745,6 +9812,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
               onAcceptedRollback,
               onAcceptedCommit,
               origin: queuedOrigin,
+              sourcePlugin,
               autoReviewUserText: params.autoReviewUserText,
             });
             return {
@@ -9818,7 +9886,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           planMode: false,
           onAccepted: persistUserMessage,
           onDispatching: () => dispatchAgentIslandUserPrompt(targetSessionId),
-        });
+        }, directSource);
         if (userPromptPreviewStarted) {
           if (sendResult.accepted) {
             commitAgentIslandUserPrompt(targetSessionId, clientId);
@@ -9860,6 +9928,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
             onAcceptedRollback,
             onAcceptedCommit,
             origin: queuedOrigin,
+            sourcePlugin,
             autoReviewUserText: params.autoReviewUserText,
           });
           return {
@@ -10120,7 +10189,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     git: async (args, cwd) => (await gitExec(args, cwd, { timeoutMs: 10_000 })).stdout,
     trashItem: (fullPath) => shell.trashItem(fullPath),
   });
-  botGroupChatServiceHolder = createBotGroupChatService({
+  const botGroupChatDeps: BotGroupChatServiceDeps = {
     ensureLane: async (input) => {
       try {
         return await ensureBotGroupLaneSession(input);
@@ -10128,12 +10197,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         return { ok: false as const, errorCode: 'LANE_UNAVAILABLE', message: error instanceof Error ? error.message : String(error) };
       }
     },
-    dispatch: ({ targetSessionId, message, persistedContent, clientId, attachments, onAccepted }) =>
+    dispatch: ({ targetSessionId, message, persistedContent, clientId, attachments, toolsDisabled, onQueued, onAccepted }) =>
       dispatchBotSessionMessage({
         targetSessionId,
         message,
         persistedContent,
         clientId,
+        toolsDisabled,
+        onQueued,
         // Same attachment shape as a task message: images by their media address, files by path.
         ...(attachments && attachments.length > 0
           ? {
@@ -10227,7 +10298,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       });
     },
     log,
-  });
+  };
+  botGroupChatServiceHolder = withChatServer(createBotGroupChatService(botGroupChatDeps), botGroupChatDeps);
   // Phones reach groups through the Remote Resource protocol (bot-group-chat.md §8).
   registerBotGroupRemoteResourceProvider(() => botGroupChatServiceHolder);
   botDelegationServiceHolder?.dispose();
@@ -10443,6 +10515,57 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   );
   // Bot group chat is local to this Desktop in phase 1; device-link does not route these channels.
   const botGroupNotReady = { ok: false as const, errorCode: 'HOST_NOT_READY' as const, message: '伙伴群聊服务尚未就绪' };
+  // Narrow chat operations; credentials and transport stay in main.
+  ipcMain.handle(MAKER_INVOKE.CHAT_SERVER_STATUS, async (event, input) => {
+    assertTrustedAppRendererEvent(event);
+    const chat = botGroupChatServiceHolder?.chatServer;
+    return chat ? chat.status() : { enabled: false, connected: false };
+  });
+  ipcMain.handle(MAKER_INVOKE.CHAT_SERVER_THREAD, async (event, input) => {
+    assertTrustedAppRendererEvent(event);
+    const chat = botGroupChatServiceHolder?.chatServer;
+    return chat ? chat.thread(input) : { ok: false, errorCode: 'HOST_NOT_READY' };
+  });
+  ipcMain.handle(MAKER_INVOKE.CHAT_SERVER_REPLY, async (event, input) => {
+    assertTrustedAppRendererEvent(event);
+    const chat = botGroupChatServiceHolder?.chatServer;
+    return chat ? chat.reply(input) : { ok: false, errorCode: 'HOST_NOT_READY' };
+  });
+  ipcMain.handle(MAKER_INVOKE.CHAT_SERVER_REACT, async (event, input) => {
+    assertTrustedAppRendererEvent(event);
+    const chat = botGroupChatServiceHolder?.chatServer;
+    return chat ? chat.react(input) : { ok: false, errorCode: 'HOST_NOT_READY' };
+  });
+  ipcMain.handle(MAKER_INVOKE.CHAT_SERVER_CREATEINVITE, async (event, input) => {
+    assertTrustedAppRendererEvent(event);
+    const chat = botGroupChatServiceHolder?.chatServer;
+    return chat ? chat.createInvite(input) : { ok: false, errorCode: 'HOST_NOT_READY' };
+  });
+  ipcMain.handle(MAKER_INVOKE.CHAT_SERVER_PREVIEWINVITE, async (event, input) => {
+    assertTrustedAppRendererEvent(event);
+    const chat = botGroupChatServiceHolder?.chatServer;
+    return chat ? chat.previewInvite(input) : { ok: false, errorCode: 'HOST_NOT_READY' };
+  });
+  ipcMain.handle(MAKER_INVOKE.CHAT_SERVER_ACCEPTINVITE, async (event, input) => {
+    assertTrustedAppRendererEvent(event);
+    const chat = botGroupChatServiceHolder?.chatServer;
+    return chat ? chat.acceptInvite(input) : { ok: false, errorCode: 'HOST_NOT_READY' };
+  });
+  ipcMain.handle(MAKER_INVOKE.CHAT_SERVER_MANAGE, async (event, input) => {
+    assertTrustedAppRendererEvent(event);
+    const chat = botGroupChatServiceHolder?.chatServer;
+    return chat ? chat.manage(input) : { ok: false, errorCode: 'HOST_NOT_READY' };
+  });
+  ipcMain.handle(MAKER_INVOKE.CHAT_SERVER_OWNEDBOTS, async (event, input) => {
+    assertTrustedAppRendererEvent(event);
+    const chat = botGroupChatServiceHolder?.chatServer;
+    return chat ? chat.ownedBots() : { ok: false, errorCode: 'HOST_NOT_READY' };
+  });
+  ipcMain.handle(MAKER_INVOKE.CHAT_SERVER_REFRESHPROFILE, async (event, input) => {
+    assertTrustedAppRendererEvent(event);
+    const chat = botGroupChatServiceHolder?.chatServer;
+    return chat ? chat.refreshProfile() : { ok: false, errorCode: 'HOST_NOT_READY' };
+  });
   ipcMain.handle(MAKER_INVOKE.BOT_GROUP_LIST, async (event) => {
     assertTrustedAppRendererEvent(event);
     return botGroupChatServiceHolder ? botGroupChatServiceHolder.listGroups() : botGroupNotReady;
@@ -10580,8 +10703,16 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     catch (error) { return { ok: false, errorCode: 'MODEL_UNAVAILABLE',
       message: error instanceof Error ? error.message : '任务模型不可用，请在任务中重新选择' }; }
 
+    // agent.run 的真正发送方是插件(来源任务只是它运行的地方):三种模式都盖插件来源。
+    const agentRunPluginName = sanitizeSourceName(getInstalledGhostName(request.ghostId));
+    const agentRunSourcePlugin = {
+      pluginId: request.ghostId,
+      ...(agentRunPluginName ? { name: agentRunPluginName } : {}),
+    };
+
     if (request.mode === 'new') {
       const result = await sendToSessionInternal({
+        sourcePlugin: agentRunSourcePlugin,
         dispatcherSessionId: request.sourceSessionId,
         message: request.prompt,
         persistedContent: request.persistedContent,
@@ -10598,6 +10729,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
 
     if (request.mode === 'continue') {
       const result = await sendToSessionInternal({
+        sourcePlugin: agentRunSourcePlugin,
         targetSessionId: request.sourceSessionId,
         message: request.prompt,
         persistedContent: request.persistedContent,
@@ -10653,6 +10785,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     }
 
     const sent = await sendToSessionInternal({
+      sourcePlugin: agentRunSourcePlugin,
       targetSessionId: forkedSessionId,
       message: request.prompt,
       persistedContent: request.persistedContent,
@@ -10791,7 +10924,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       },
       dispatch: async (pluginId, taskId, clientId, text) => {
         assertPlugin(pluginId);
-        const outcome = await sendToSessionInternal({ targetSessionId: taskId, clientId, message: text, autoReviewUserText: { kind: 'delegated-continuation' }, forceQueue: true, onAccepted: async () => { assertPlugin(pluginId); await pluginTaskServiceForCurrentOwner!().assertDispatch(pluginId, taskId); assertPlugin(pluginId); } });
+        // 插件来源只用于标签与 `[消息来源]` 说明;不新增 origin 类型,也不是权限判据。
+        const pluginName = sanitizeSourceName(getInstalledGhostName(pluginId));
+        const outcome = await sendToSessionInternal({ targetSessionId: taskId, clientId, message: text, autoReviewUserText: { kind: 'delegated-continuation' }, forceQueue: true, sourcePlugin: { pluginId, ...(pluginName ? { name: pluginName } : {}) }, onAccepted: async () => { assertPlugin(pluginId); await pluginTaskServiceForCurrentOwner!().assertDispatch(pluginId, taskId); assertPlugin(pluginId); } });
         await awaitAgentInputQueueSnapshotPersistence(taskId);
         assertCurrent();
         return outcome;
@@ -11231,8 +11366,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       normalizeWorkingDir: (dir) => normalizeWorkingDirForStorage(dir),
       isUserPickedDir: isGhostPickedDir,
       isSessionBusy: isSessionInTurn,
-      dispatch: async ({ targetSessionId, message }) => {
-        const r = await sendToSessionInternal({ targetSessionId, message });
+      dispatch: async ({ targetSessionId, message, ghostId }) => {
+        // errand 同样由插件发出:盖插件来源(标签与 `[消息来源]`),不是权限判据。
+        const errandPluginName = sanitizeSourceName(getInstalledGhostName(ghostId));
+        const r = await sendToSessionInternal({
+          targetSessionId,
+          message,
+          sourcePlugin: { pluginId: ghostId, ...(errandPluginName ? { name: errandPluginName } : {}) },
+        });
         if (!r.ok) return { ok: false, errorCode: r.errorCode, message: r.message };
         return { ok: true, wakeKind: r.wakeKind };
       },
@@ -11394,6 +11535,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     onAcceptedRollback?: SchedulerQueuedPromptRequest['onAcceptedRollback'];
     onAcceptedCommit?: () => void | Promise<void>;
     origin?: AgentInputQueuedMessage['origin'];
+    sourcePlugin?: AgentInputQueuedMessage['sourcePlugin'];
     /** Host-only receipt: plugin-authored input is not user-authored permission. */
     autoReviewUserText?: { kind: 'delegated-continuation' };
     authorizationGuard?: BotAuthorizationInputGuard;
@@ -11435,6 +11577,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     meta: NonNullable<Awaited<ReturnType<typeof maker.getSessionMeta>>>;
     files?: AgentInputQueuedMessage['files'];
     origin?: AgentInputQueuedMessage['origin'];
+    sourcePlugin?: AgentInputQueuedMessage['sourcePlugin'];
     /** Host-only receipt: plugin-authored input is not user-authored permission. */
     autoReviewUserText?: { kind: 'delegated-continuation' };
     toolsDisabled?: boolean;
@@ -11468,9 +11611,15 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           files: fileAttachments,
         })
       : params.persistedContent;
+    // 主机隐藏指令(任务回执等):落库行带 [UI_ACTION_TRIGGER] 前缀、发给模型的正文不带。
+    // 排队行的遮蔽按 text 判定,所以 text 保留前缀,只在最终 wire 组装时去掉
+    // (agentOmitsTriggerPrefix → buildMakerUserMessage)。
+    const hiddenTriggerForAgent = !params.message.startsWith(UI_ACTION_TRIGGER_PREFIX)
+      && params.persistedContent === `${UI_ACTION_TRIGGER_PREFIX}${params.message}`;
     return {
       clientId: params.clientId,
-      text: params.message,
+      text: hiddenTriggerForAgent ? params.persistedContent : params.message,
+      ...(hiddenTriggerForAgent ? { agentOmitsTriggerPrefix: true as const } : {}),
       ...(params.autoReviewUserText !== undefined ? { autoReviewUserText: params.autoReviewUserText } : {}),
       ...(params.toolsDisabled === true ? { toolsDisabled: true } : {}),
       persistedContent,
@@ -11490,6 +11639,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       },
       createOpts,
       ...(params.origin ? { origin: params.origin } : {}),
+      ...(params.sourcePlugin ? { sourcePlugin: params.sourcePlugin } : {}),
     };
   }
 
@@ -11765,7 +11915,6 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     for (const w of activeWorkers) {
       await assertCurrent?.();
       orcaTeamService.clearAutoBridgeState(w.sessionId);
-      await cancelIOSSimulatorSessionOperations(w.sessionId);
       await assertCurrent?.();
       const sess = maker.getSession(w.sessionId);
       if (sess) {
@@ -11970,7 +12119,6 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     },
     markWorkerIdleIfStatus,
     restoreWorkerDoneIfIdle,
-    cancelWorkerSessionOperations: cancelIOSSimulatorSessionOperations,
     closeWorkerSession: async (sessionId, beforeClose) => {
       const sess = maker.getSession(sessionId);
       await beforeClose?.();
@@ -12451,14 +12599,12 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       });
     },
     rollbackCreatedWorker: async ({ workerId, workerSessionId }) => {
-      await cancelIOSSimulatorSessionOperations(workerSessionId);
       const workerSession = maker.getSession(workerSessionId);
       if (workerSession) {
         await maker.closeSession(workerSessionId).catch(() => undefined);
       }
       forgetKnownOrcaWorkerSession(workerSessionId);
       await archiveSingleWorkerSession(workerSessionId).catch(() => undefined);
-      await cancelIOSSimulatorSessionOperations(workerSessionId);
       await removeWorker(workerId);
     },
     broadcastSessionCreated,
@@ -14163,10 +14309,15 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       enqueueDurableWrite(`plan-seal-consume:${sessionId}:${turnId}`, () =>
         clearSealedCodexPlanState(sessionId, turnId),
       ),
+    // 读排在持久化 FIFO 之后,与计划对账同口径,避免读到上一条回复尚未落库的旧快照。
+    peekGoalInactiveNote: (sessionId) =>
+      enqueueDurableWrite(`goal-inactive-read:${sessionId}`, () => peekGoalInactiveNote(sessionId)),
     // 手机客户端说明的开关:被控端盖章的来源判据(本机 renderer / 桌面控制端 / 平台
     // 未知一律 false)。必须在这里现取,不能提前求值缓存——同一个装配好的事务会服务
     // 后续所有 send,来源是逐次调用的属性。
     isMobileClientInvoke: () => isMobileControllerInvoke(),
+    // 被控电脑自身身份(设备说明里的「本机」),同样每次现取。
+    readHostDeviceIdentity: () => getHostSourceDevice(),
     // 个人版制作任务说明:按持久化的 sessions.source 判定,每次 send 现读,不信任
     // 调用方自报;与手机说明同层(只进 wire 消息)。
     isCindyMakeSession: async (sessionId) =>
@@ -14498,6 +14649,15 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       /** coordinator 从队列项透传的手机来源(main 构造,非 wire 输入)。 */
       fromMobileClient?: boolean;
       uiLanguage?: string;
+      /**
+       * 消息来源(coordinator 从队列项透传;直连 maker:steer 只有 IPC 边界按 invoke
+       * context 盖的 sourceDevice,其余字段的 wire 值已被 stripMainOnlySendOpts 剥掉)。
+       * 只用于生成发给模型的说明,不是权限判据。
+       */
+      sourceDevice?: unknown;
+      sourceOrigin?: unknown;
+      sourcePlugin?: unknown;
+      sharedTaskAuthor?: unknown;
       expectedClearBoundaryMs?: number | null;
       expectedInputGeneration?: number;
       expectedTurnSession?: object;
@@ -14576,16 +14736,31 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     if (sess !== authorizationSession || sess.getTurnGeneration() !== authorizationTurn) {
       throw new Error(`[STALE_TURN] Session ${sessionId} changed turns while restoring authorization`);
     }
-    // 手机说明同样只进 wire payload(steer 路径不落库用户消息,天然不污染原话)。
-    // 两个来源都要认:IPC 直连 steer 时 async context 在;coordinator 投递时靠透传。
-    const steerNote =
-      (isMobileControllerInvoke() || so.fromMobileClient === true) &&
-      shouldPrependMobileClientPromptNote(normalized, sess.agentKind)
-        ? buildMobileClientPromptNote()
-        : null;
-    const withSteerNote = steerNote
-      ? prependNoteToWireUserMessage(normalized as HandoffWireMessage, steerNote)
+    // 来源说明与客户端说明同样只进 wire payload(steer 路径的落库由 coordinator 写原话,
+    // 天然不污染原话)。steer 不经 send 事务,两段说明只在这里加一次。
+    const steerSourceNote = shouldPrependMobileClientPromptNote(normalized, sess.agentKind)
+      ? buildWireMessageSourceNote({
+          origin: so.sourceOrigin,
+          sourcePlugin: so.sourcePlugin,
+          sharedTaskAuthor: so.sharedTaskAuthor,
+        })
+      : null;
+    const withSteerSourceNote = steerSourceNote
+      ? prependNoteToWireUserMessage(normalized as HandoffWireMessage, steerSourceNote)
       : normalized;
+    // 设备来源只认盖章值(coordinator 透传 / 直连 IPC 边界按 async context 盖);没有设备
+    // 信息时沿用旧手机判据:IPC 直连 steer 时 async context 在;coordinator 投递时靠透传。
+    const steerDevice = readWireSourceDevice(so.sourceDevice);
+    const steerNote = shouldPrependMobileClientPromptNote(normalized, sess.agentKind)
+      ? buildClientEnvironmentNote({
+          device: steerDevice,
+          host: steerDevice ? getHostSourceDevice() : undefined,
+          legacyMobile: isMobileControllerInvoke() || so.fromMobileClient === true,
+        })
+      : null;
+    const withSteerNote = steerNote
+      ? prependNoteToWireUserMessage(withSteerSourceNote as HandoffWireMessage, steerNote)
+      : withSteerSourceNote;
     const steerLanguageNote = shouldPrependMobileClientPromptNote(normalized, sess.agentKind)
       ? buildUiLanguageErrorNote(turnUiLanguageFromSendOpts(so, getResolvedMainLocale()))
       : null;
@@ -14687,8 +14862,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           sessionId,
           message,
           createOpts,
+          // 直连 maker:send 的设备来源只由 main 按 invoke context 盖章(wire 值已在
+          // sessionSendHandler 边界剥掉);本机 renderer 不盖。
           isDeviceLinkInvoke()
-            ? sendOpts
+            ? stampDirectSendSourceDevice(sendOpts, readDeviceLinkInvokeSourceDevice())
             : attachTrustedDesktopSendContext(message, sendOpts),
         );
       },
@@ -14723,7 +14900,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         sessionId,
         message,
         deviceLinkInvoke
-          ? sanitizedSendOpts
+          ? stampDirectSendSourceDevice(sanitizedSendOpts, readDeviceLinkInvokeSourceDevice())
           : attachTrustedDesktopSendContext(message, sanitizedSendOpts),
       );
     },
@@ -15664,7 +15841,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     previewQueuedUserTurn: (sessionId, item) => {
       notifyAgentIslandUserPrompt(
         { id: sessionId, agentKind: item.createOpts?.agentKind, workDir: item.workingDir },
-        item.text || item.persistedContent,
+        // 预览给人看的正文:落库可见内容优先(发给模型的 text 可能带来源 / 回执前缀);
+        // Orca 条目落库的是 {orcaSource, content} JSON,取原话 displayText。
+        item.origin?.kind === 'orca'
+          ? (item.origin.displayText ?? item.text)
+          : item.persistedContent || item.text,
         { source: 'enqueue', clientId: item.clientId },
       );
     },
@@ -16657,7 +16838,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
 
   // device-link 出方向:远程入队消息的 OSS 引用(files[] + persistedContent)在入队前一次性物化成本地
   // 临时文件(共用下载、用后删 OSS),保证喂 agent 的 files[] 与落库的 persistedContent 都是本地路径。
-  // 本机会话无 OSS 引用 → materializeQueuedOssAttachments 原样返回,零开销。
+  // 本机会话无 OSS 引用 → materializeQueuedOssAttachmentsDeferred 原样返回,零开销。
   ipcMain.handle(
     MAKER_INVOKE.INPUT_ENQUEUE,
     async (event, sessionId: unknown, item: unknown, opts?: unknown) => {
@@ -16746,6 +16927,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
               deviceLinkInvoke,
             ),
             deviceLinkInvoke,
+            readDeviceLinkInvokeSourceDevice(),
           ),
           {
             remote: deviceLinkInvoke,
@@ -16983,6 +17165,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
               deviceLinkInvoke,
             ),
             deviceLinkInvoke,
+            readDeviceLinkInvokeSourceDevice(),
           ),
           {
             remote: deviceLinkInvoke,
@@ -17198,6 +17381,29 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     },
   );
 
+  /**
+   * 排队消息被编辑时按**编辑者**所在设备重新盖章:改写后的正文出自这次编辑的设备,原条目的
+   * 设备 / 手机来源(以及插件来源)不再属实。与入队同一套盖章,wire 自报一律不生效;
+   * 设备与平台在 IPC 边界的 invoke context 里读,回调执行时不再依赖 async context。
+   */
+  function readQueuedEditorProvenance(): {
+    sourceDevice: ReturnType<typeof readDeviceLinkInvokeSourceDevice>;
+    isMobile: boolean;
+  } {
+    return { sourceDevice: readDeviceLinkInvokeSourceDevice(), isMobile: isMobileControllerInvoke() };
+  }
+  function stampQueuedEditProvenance(
+    updated: AgentInputQueuedMessage,
+    remote: boolean,
+    editor: ReturnType<typeof readQueuedEditorProvenance>,
+  ): AgentInputQueuedMessage {
+    return stampTrustedDeviceLinkQueuedOrigin(
+      stampTrustedDesktopQueuedOrigin(stampMobileClientOrigin(updated, editor.isMobile), remote, true),
+      remote,
+      editor.sourceDevice,
+    );
+  }
+
   ipcMain.handle(
     MAKER_INVOKE.INPUT_UPDATE_TEXT,
     async (
@@ -17223,6 +17429,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           'remote session references were not resolved by the controller',
         );
       }
+      const editor = readQueuedEditorProvenance();
       return inputCoordinator.updateText(
         sid,
         cid,
@@ -17230,7 +17437,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         refs,
         contexts,
         remote,
-        (updated) => stampTrustedDesktopQueuedOrigin(updated, remote, true),
+        (updated) => stampQueuedEditProvenance(updated, remote, editor),
       );
     },
   );
@@ -17308,11 +17515,12 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           assertExpectedRemoteInputClearBoundary(sid, clearBoundaryPrecondition, row);
         }
         assertCurrentInputGeneration();
+        const editor = readQueuedEditorProvenance();
         const result = inputCoordinator.updateContentWithResult(
           sid,
           cid,
           update,
-          (updated) => stampTrustedDesktopQueuedOrigin(updated, remote, true),
+          (updated) => stampQueuedEditProvenance(updated, remote, editor),
         );
         acceptedByCoordinator = result.updated;
         if (result.updated) {
@@ -18172,19 +18380,39 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
               nextProviderId: targetRouteProviderId,
             });
           } else {
+            // 原始失败原因必须留下来（#5508）：同一条冷路径每次重试都会再失败，
+            // 没有类别与原因就无法区分会话行缺失、工作目录丢失还是 bootstrap 失败。
+            // 完整原因只进 Main 日志；IPC 错误只带类别与脱敏概述，错误码与 fail-closed 不变。
+            const coldPiFailureContext = {
+              sessionId,
+              fromModel: currentRuntimeModel ?? null,
+              toModel: model,
+              currentProviderId,
+              nextProviderId: targetRouteProviderId,
+            };
             try {
               await rehydrateColdPiRuntimeForWindowVerification(sessionId);
-            } catch {
-              throwIpcError(
-                localModelWindowSwitchErrorCode('MODEL_WINDOW_CURRENT_CONTEXT_UNKNOWN'),
-                'Pi current runtime could not be verified; runtime selection was not changed',
+            } catch (error) {
+              reportColdPiRehydrationFailure(
+                {
+                  log,
+                  throwIpcError,
+                  errorCode: localModelWindowSwitchErrorCode('MODEL_WINDOW_CURRENT_CONTEXT_UNKNOWN'),
+                },
+                coldPiFailureContext,
+                error,
               );
             }
             liveSessionBeforeRouteChange = maker.getSession(sessionId);
             if (!liveSessionBeforeRouteChange) {
-              throwIpcError(
-                localModelWindowSwitchErrorCode('MODEL_WINDOW_CURRENT_CONTEXT_UNKNOWN'),
-                'Pi current runtime could not be verified; runtime selection was not changed',
+              reportColdPiRehydrationFailure(
+                {
+                  log,
+                  throwIpcError,
+                  errorCode: localModelWindowSwitchErrorCode('MODEL_WINDOW_CURRENT_CONTEXT_UNKNOWN'),
+                },
+                coldPiFailureContext,
+                new ColdPiRehydrationError('runtime-not-live', 'rehydrated Pi runtime is not live after bootstrap'),
               );
             }
             rehydratedColdPiRuntime = liveSessionBeforeRouteChange;
@@ -20107,17 +20335,6 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   // ── Android automation (Settings →「电脑使用」) ──────────────────────────
   registerAndroidAutomationHandlers(createElectronIpcHandlerRegistry());
 
-  // ── iOS Simulator pane / Agent discovery ────────────────────────────────
-  registerIOSSimulatorHandlers(createElectronIpcHandlerRegistry(), {
-    getPluginAccess: getIOSSimulatorPluginAccessDecision,
-    getSessionContext: async (sessionId) => {
-      const liveSession = maker.getSession(sessionId);
-      if (liveSession) return { workingDir: liveSession.workDir };
-      const snapshot = await getSessionRowSnapshotStrict(sessionId);
-      return snapshot ? { workingDir: snapshot.workingDir } : null;
-    },
-  });
-
   // ── Browser automation (Settings →「电脑使用」) ───────────────────────────
   // Probe local browser detection. Drives the detection status + download
   // guidance UI; only inspects (never launches a browser).
@@ -20259,11 +20476,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     return { cancelled: true };
   });
 
-  // 查询型:checkComputerDriverUpdate 内部已把所有失败兜成
-  // updateAvailable=false,正常不会走到 catch;保留兜底以防实现回归。
-  ipcMain.handle(MAKER_INVOKE.COMPUTER_CHECK_UPDATE, async () => {
+  // 查询型:失败通过 checkStatus 返回，保留已知版本供页面显示和重试。
+  ipcMain.handle(MAKER_INVOKE.COMPUTER_CHECK_UPDATE, async (_event, options?: { force?: boolean }) => {
     try {
-      return await checkComputerDriverUpdate();
+      return await checkComputerDriverUpdate(undefined, { force: options?.force === true });
     } catch (err) {
       throwIpcError('INTERNAL', err instanceof Error ? err.message : String(err));
     }
