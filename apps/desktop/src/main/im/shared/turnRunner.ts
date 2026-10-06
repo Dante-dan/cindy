@@ -99,6 +99,7 @@ import type {
 import { persistUserMessage } from '../messagePersistence';
 import { bindingStore } from '../binding';
 import { buildImUserMessage } from './inboundMessage';
+import { buildImChannelNote, type ImChannelNoteSource } from './channelNote';
 import {
   beginTurnChangeSetAtDispatch,
   wireSessionToIpcExternal,
@@ -116,6 +117,7 @@ import { beginGroupHistoryAccess, type GroupHistoryAccessScope } from './groupHi
 import { agentHandoffPending } from '../../maker-ipc/agentHandoffPendingSingleton';
 import { prependHandoffToUserMessage, prependNoteToWireUserMessage } from '../../maker-ipc/agentHandoff';
 import { buildPlanReconcileNote, summarizeOpenPlan } from '../../maker-ipc/planReconcile';
+import { peekGoalInactiveNote } from '../../goal-host/inactiveNote';
 import { listMessagesForAgentHandoff } from '../../localDb/ipc/messages';
 import {
   enqueueDurableWrite,
@@ -402,6 +404,11 @@ type DefaultRouteTargetResolution =
 
 export interface ImRunAgentTurnArgs {
   sourceDescription?: string;
+  /**
+   * 本条消息的渠道来源事实。turnRunner 按 adapter 的展示渠道（飞书 / Lark …）
+   * 拼成 `[渠道说明]` 一行, 只进模型正文；落库、rawChannelText、imSource 不变。
+   */
+  channelNoteSource?: ImChannelNoteSource;
   contextSnapshot?: ImContextSnapshot;
   /** Main-owned, resolved from an authenticated provider notification receipt. */
   notificationSessionId?: string;
@@ -1068,6 +1075,9 @@ export function createTurnRunner(
         args.agentText ?? text,
         [...attachments, ...(args.contextAttachments ?? [])],
         target.attached || target.notificationReply === true,
+        args.channelNoteSource
+          ? buildImChannelNote(adapter.messageSourceIm?.() ?? channel, args.channelNoteSource)
+          : null,
       ),
       rowId: row.id,
       text,
@@ -1275,12 +1285,23 @@ export function createTurnRunner(
           return null;
         }
       })();
-      const outgoingMessage = planReconcileNote
+      const withPlanReconcile = planReconcileNote
         ? prependNoteToWireUserMessage(
             withHandoff as Parameters<typeof prependNoteToWireUserMessage>[0],
             planReconcileNote,
           )
         : withHandoff;
+      // 目标状态说明:与 makerSendTransaction 同语义,目标已不在运行时提醒模型别再
+      // 吐裁决块、别承诺自动续跑。读库失败静默跳过。
+      const goalInactiveNote = await enqueueDurableWrite(`goal-inactive-read:${rowId}`, () =>
+        peekGoalInactiveNote(rowId),
+      ).catch(() => null);
+      const outgoingMessage = goalInactiveNote
+        ? prependNoteToWireUserMessage(
+            withPlanReconcile as Parameters<typeof prependNoteToWireUserMessage>[0],
+            goalInactiveNote,
+          )
+        : withPlanReconcile;
 
       // 群护栏取缔: 按会话当前权限档决定是否真正挂强确认策略, 见
       // resolveEffectiveTurnPolicy。不挂时走与 DM 轮次相同的无策略路径。
