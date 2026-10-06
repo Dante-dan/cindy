@@ -9134,6 +9134,9 @@
       "missingDir": "Folder not found"
     },
     "pendingQueue": {
+      "viewAction": "View Full Message",
+      "viewAria": "View queued message {{index}} in full",
+      "closeDetails": "Close Message",
       "regionAria": "Pending message queue",
       "listAria": "Queued messages",
       "pausedFooter": "Task stopped, queue paused",

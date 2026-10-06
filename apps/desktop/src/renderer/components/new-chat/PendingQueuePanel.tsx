@@ -1,3 +1,4 @@
+import { PendingQueueMessageDetails } from './PendingQueueMessageDetails';
 import { Button } from '@/components/ui/button';
 /**
  * PendingQueuePanel
@@ -583,6 +584,12 @@ export function PendingQueuePanel({
                 </>
               )}
 
+              {!rowPresentation.isSyntheticTrigger && (
+                <PendingQueueMessageDetails
+                  content={rowPresentation.displayText || t('newChat.pendingQueue.noTextContent')}
+                  index={originalIdx + 1}
+                />
+              )}
               {isPendingEnqueue ? (
                 <span
                   aria-hidden

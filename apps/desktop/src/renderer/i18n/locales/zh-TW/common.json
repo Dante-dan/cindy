@@ -9116,6 +9116,9 @@
       "missingDir": "目錄不存在"
     },
     "pendingQueue": {
+      "viewAction": "查看訊息全文",
+      "viewAria": "查看第 {{index}} 條排隊訊息全文",
+      "closeDetails": "關閉訊息全文",
       "regionAria": "待傳送訊息佇列",
       "listAria": "佇列訊息",
       "pausedFooter": "任務已停止，佇列暫停",

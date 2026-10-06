@@ -9116,6 +9116,9 @@
       "missingDir": "目录不存在"
     },
     "pendingQueue": {
+      "viewAction": "查看消息全文",
+      "viewAria": "查看第 {{index}} 条排队消息全文",
+      "closeDetails": "关闭消息全文",
       "regionAria": "待发送消息队列",
       "listAria": "队列消息",
       "pausedFooter": "任务已停止，队列暂停",

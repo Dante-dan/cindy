@@ -9121,6 +9121,9 @@
       "missingDir": "폴더를 찾을 수 없음"
     },
     "pendingQueue": {
+      "viewAction": "메시지 전체 보기",
+      "viewAria": "대기 중인 메시지 {{index}} 전체 보기",
+      "closeDetails": "메시지 닫기",
       "regionAria": "전송 대기 중인 메시지 큐",
       "listAria": "큐의 메시지",
       "pausedFooter": "작업 중지됨, 대기열 일시정지",

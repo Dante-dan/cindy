@@ -9121,6 +9121,9 @@
       "missingDir": "フォルダが見つかりません"
     },
     "pendingQueue": {
+      "viewAction": "メッセージ全文を表示",
+      "viewAria": "キュー内のメッセージ {{index}} の全文を表示",
+      "closeDetails": "メッセージを閉じる",
       "regionAria": "送信待ちメッセージのキュー",
       "listAria": "キュー内のメッセージ",
       "pausedFooter": "タスク停止、キューは一時停止中",
