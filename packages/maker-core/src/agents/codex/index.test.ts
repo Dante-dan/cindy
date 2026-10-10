@@ -18454,8 +18454,14 @@ describe('CodexAgent MCP thread context hooks', () => {
       now = 25_000;
       handlers.turnCompleted!({ threadId: 'start-thread-id', turn: { id: 'speed-turn', status: 'completed', durationMs: 24_000 } });
       await waitForExpectation(() => expect(events.some((event) => event.type === 'done')).toBe(true));
-      expect(latestSpeed()).toMatchObject({ phase: 'complete', outputTokens: 60, durationMs: observedMs, averageRate: 60_000 / observedMs, estimated: false });
-      expect(events.find((event) => event.type === 'done')?.data.usage).toMatchObject({ completionTokens: 60, durationMs: observedMs });
+      // Tool arguments are not a measured stream: the whole-turn 60 output
+      // tokens must not inflate these two/three observed character estimates.
+      const observedTokens = mode === 'parallel-output' ? 3 : 2;
+      expect(latestSpeed()).toMatchObject({ phase: 'complete', outputTokens: observedTokens,
+        durationMs: observedMs, averageRate: observedTokens * 1_000 / observedMs, estimated: true });
+      const usage = events.find((event) => event.type === 'done')?.data.usage;
+      expect(usage).toMatchObject({ completionTokens: 60 });
+      expect(usage?.durationMs).toBeUndefined();
       now = 26_000;
       handlers.turnStarted!({ threadId: 'start-thread-id', turn: { id: 'next-speed-turn' } });
       now = 26_100;
@@ -18466,6 +18472,72 @@ describe('CodexAgent MCP thread context hooks', () => {
       nowSpy.mockRestore();
     }
   });
+
+  it.each(['commandExecution', 'mcpToolCall', 'fileChange', 'plan'])(
+    'keeps tool-first %s turns approximate and restores calibration on the next text-only turn',
+    async (type) => {
+      let now = 1_000;
+      const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+      const agent = new CodexAgent(createDeps());
+      const host = installFakeHost(agent);
+      const handle = await agent.startSession({ sessionId: `session-tool-first-${type}`, model: 'gpt-5.4', workingDir: '/repo' });
+      const handlers = host.getThreadHandlers()!;
+      const events: AgentEvent[] = [];
+      void (async () => { for await (const event of handle.events()) events.push(event); })();
+      const latestSpeed = () => events.findLast(event => event.type === 'status')?.data.responseSpeed;
+      try {
+        handlers.turnStarted!({ threadId: 'start-thread-id', turn: { id: 'tool-first' } });
+        const item = type === 'commandExecution'
+          ? { id: 'first-tool', type, command: 'pwd', cwd: '/repo', status: 'inProgress' }
+          : type === 'mcpToolCall'
+            ? { id: 'first-tool', type, server: 'test', tool: 'lookup', arguments: { query: 'where' }, status: 'inProgress' }
+            : type === 'fileChange'
+              ? { id: 'first-tool', type, changes: [{ path: '/repo/example', kind: { type: 'update' }, diff: '+answer' }], status: 'completed' }
+              : { id: 'first-tool', type, text: 'Look up the answer' };
+        const execution = type === 'commandExecution' || type === 'mcpToolCall';
+        now = 2_000;
+        if (execution) {
+          handlers.itemStarted!({ threadId: 'start-thread-id', turnId: 'tool-first', item } as never);
+          await waitForExpectation(() => expect(latestSpeed()).toMatchObject({ phase: 'paused', toolActive: true, firstResponseMs: 1_000, durationMs: 0 }));
+          now = 8_000;
+        }
+        handlers.itemCompleted!({ threadId: 'start-thread-id', turnId: 'tool-first', item: { ...item, status: 'completed' } } as never);
+        if (execution) await waitForExpectation(() => expect(latestSpeed()).toMatchObject({ phase: 'waiting', toolActive: false }));
+
+        const finishAnswer = async (turnId: string, start: number, cumulativeOutput: number, lastOutput: number) => {
+          now = start;
+          handlers.agentMessageDelta!({ threadId: 'start-thread-id', turnId, itemId: `${turnId}-answer`, delta: 'a'.repeat(40) });
+          now = start + 1_000;
+          handlers.agentMessageDelta!({ threadId: 'start-thread-id', turnId, itemId: `${turnId}-answer`, delta: 'b'.repeat(40) });
+          await waitForExpectation(() => expect(latestSpeed()).toMatchObject({ phase: 'generating', recentRate: 10 }));
+          now = start + 2_000;
+          handlers.itemCompleted!({ threadId: 'start-thread-id', turnId, item: { id: `${turnId}-answer`, type: 'agentMessage', text: 'a'.repeat(40) + 'b'.repeat(40) } } as never);
+          now = start + 3_000;
+          handlers.tokenUsageUpdated!({ threadId: 'start-thread-id', turnId, tokenUsage: {
+            total: { inputTokens: 20, cachedInputTokens: 0, outputTokens: cumulativeOutput, reasoningOutputTokens: 0, totalTokens: cumulativeOutput + 20 },
+            last: { inputTokens: 10, cachedInputTokens: 0, outputTokens: lastOutput, reasoningOutputTokens: 0, totalTokens: lastOutput + 10 },
+          } } as never);
+          handlers.turnCompleted!({ threadId: 'start-thread-id', turn: { id: turnId, status: 'completed' } });
+          await waitForExpectation(() => expect(latestSpeed()?.phase).toBe('complete'));
+          return events.findLast(event => event.type === 'done')?.data.usage;
+        };
+        const mixedUsage = await finishAnswer('tool-first', 10_000, 150, 150);
+        expect(latestSpeed()).toMatchObject({ estimated: true, outputTokens: 20, durationMs: 2_000, averageRate: 10 });
+        expect(latestSpeed()?.samples.every((sample: { rate: number }) => sample.rate <= 10)).toBe(true);
+        expect(mixedUsage).toMatchObject({ completionTokens: 150 });
+        expect(mixedUsage?.durationMs).toBeUndefined();
+
+        now = 14_000;
+        handlers.turnStarted!({ threadId: 'start-thread-id', turn: { id: 'text-only' } });
+        const textUsage = await finishAnswer('text-only', 15_000, 190, 40);
+        expect(latestSpeed()).toMatchObject({ estimated: false, outputTokens: 40, durationMs: 2_000, averageRate: 20 });
+        expect(textUsage).toMatchObject({ completionTokens: 40, durationMs: 2_000 });
+      } finally {
+        await handle.close();
+        nowSpy.mockRestore();
+      }
+    },
+  );
 
   it('starts response-first generation timing at turn/started and excludes an approval wait', async () => {
     let now = 1_000;

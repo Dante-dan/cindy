@@ -10726,6 +10726,7 @@ assertRouteCurrent();
         text?: unknown;
       } | null | undefined;
       if (!candidate || candidate.type !== 'plan') return false;
+      translatorRt.responseSpeedHasUnobservedOutput = true;
       if (typeof candidate.text === 'string') proposedPlanText = candidate.text;
       return true;
     }
@@ -10897,8 +10898,14 @@ assertRouteCurrent();
       const realTurnUsage = usageTracker.getTurnUsage();
       const realTurnUsageSegments = usageTracker.getTurnUsageSegments();
       finalizeCodexGenerationTurn(translatorRt, turn.id);
-      translatorRt.responseSpeed.finish(realTurnUsageSegments.length > 0 ? realTurnUsage.output : undefined);
-      if (!translatorRt.generationTimingReliable) translatorRt.responseSpeed.invalidate();
+      const unmeasuredOutputOnly = translatorRt.responseSpeedHasUnobservedOutput
+        && translatorRt.responseSpeed.snapshot().outputTokens === 0;
+      // With no sampled units, retain the real total but expose no rate. Mixed
+      // turns retain only their observed estimates, never a whole-turn scale.
+      translatorRt.responseSpeed.finish(realTurnUsageSegments.length > 0
+        && (!translatorRt.responseSpeedHasUnobservedOutput || unmeasuredOutputOnly)
+        ? realTurnUsage.output : undefined);
+      if (!translatorRt.generationTimingReliable || unmeasuredOutputOnly) translatorRt.responseSpeed.invalidate();
       const speedSnapshot = translatorRt.responseSpeed.snapshot();
       const generationDurationMs = calibratedResponseDuration(speedSnapshot, realTurnUsage.output);
       const codexDoneUsage = {

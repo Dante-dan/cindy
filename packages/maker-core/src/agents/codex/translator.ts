@@ -82,6 +82,8 @@ export interface CodexRuntimeState {
   itemTextLen: Map<string, number>;
   /** Current model-active interval start; null while tools/approvals own the turn. */
   responseSpeed: ResponseSpeedTracker;
+  /** Tool inputs arrive after generation, so whole-turn usage cannot calibrate only observed text. */
+  responseSpeedHasUnobservedOutput: boolean;
   generationStartedAt: number | null;
   /** Tool/approval boundaries currently owning the turn. Generation resumes after all finish. */
   generationPendingToolIds: Set<string>;
@@ -133,6 +135,7 @@ export function newCodexRuntimeState(): CodexRuntimeState {
     reasoningTextLen: new Map(),
     itemTextLen: new Map(),
     responseSpeed: new ResponseSpeedTracker(),
+    responseSpeedHasUnobservedOutput: false,
     generationStartedAt: null,
     generationPendingToolIds: new Set(),
     generationDurationMs: 0,
@@ -193,6 +196,7 @@ export function resetCodexGenerationTiming(rt: CodexRuntimeState): void {
   rt.generationOutputDurationMs = 0;
   rt.generationTurnId = null;
   rt.generationTimingReliable = true;
+  rt.responseSpeedHasUnobservedOutput = false;
 }
 
 function closeCodexGenerationInterval(rt: CodexRuntimeState, endedAt: number): void {
@@ -404,6 +408,13 @@ export function observeCodexItemTiming(
     rt.responseSpeed.content();
   }
   noteCodexGenerationBoundary(rt, phase, item, notification);
+  // These inputs have no argument delta/start pair. Their output tokens may be
+  // included in turn usage, but their generation time is not in our samples.
+  // Retain measured streaming estimates without scaling them by that total.
+  if ((CODEX_GENERATION_PAUSE_ITEM_TYPES.has(itemType) && itemType !== 'contextCompaction')
+    || itemType === 'fileChange' || itemType === 'plan') {
+    rt.responseSpeedHasUnobservedOutput = true;
+  }
 }
 
 export function translateItemNotification(
