@@ -1,6 +1,7 @@
 import type { ResponseSpeedSnapshot, RateSample } from '@cindy/maker-shared/usage-format';
 
 const WINDOW_MS = 1_000;
+const WINDOW_BUCKET_MS = 4;
 const REFRESH_MS = 250;
 const MAX_SAMPLES = 60;
 
@@ -77,7 +78,13 @@ export class ResponseSpeedTracker {
     this.units += units;
     this.reported = null;
     this.lastDeltaAt = now;
-    this.window.push({ time: now, units });
+    // Fixed bucket boundaries never move forward as new units arrive. At most
+    // four milliseconds of the oldest edge expire early; old output cannot
+    // keep renewing itself in a high-frequency stream.
+    const bucketAt = Math.floor(now / WINDOW_BUCKET_MS) * WINDOW_BUCKET_MS;
+    const bucket = this.window.at(-1);
+    if (bucket?.time === bucketAt) bucket.units += units;
+    else this.window.push({ time: bucketAt, units });
     this.prune(now);
     if (now - this.lastSampleAt < REFRESH_MS) return false;
     this.lastSampleAt = now;
@@ -171,11 +178,9 @@ export class ResponseSpeedTracker {
   }
   private prune(now: number): void {
     this.window = this.window.filter((point) => now - point.time < WINDOW_MS);
-    // Bound storage even when a provider emits thousands of deltas in one millisecond.
-    if (this.window.length > 256) {
-      const first = this.window.splice(0, this.window.length - 255);
-      this.window.unshift({ time: first.at(-1)!.time, units: first.reduce((sum, p) => sum + p.units, 0) });
-    }
+    // A monotonic one-second window has at most 251 fixed buckets. Bound even
+    // malformed/backwards clocks without renewing discarded output's lifetime.
+    if (this.window.length > 256) this.window = this.window.slice(-256);
   }
   private recent(now: number): number | null {
     if (!this.measurable || this.openAt === null || this.lastDeltaAt === null) return null;

@@ -141,6 +141,31 @@ describe('response speed', () => {
     expect(speed.snapshot(6_000)).toMatchObject({ outputTokens: 0, estimated: false, averageRate: 0 });
   });
 
+  it('expires high-frequency output instead of renewing accumulated units', () => {
+    const speed = new ResponseSpeedTracker();
+    speed.reset('turn', 0);
+    speed.content(0);
+    for (let now = 1; now <= 10_000; now++) {
+      speed.delta('abcd', now); // 1 estimated token, 1000 deltas per second.
+      if (now === 1_000 || now === 5_000 || now === 10_000) {
+        expect(speed.snapshot(now).recentRate).toBeGreaterThanOrEqual(996);
+        expect(speed.snapshot(now).recentRate).toBeLessThanOrEqual(1000);
+      }
+    }
+    expect(speed.snapshot(10_000).samples.every(sample => sample.rate <= 1000)).toBe(true);
+    expect(responseSpeedHistory(speed.snapshot(10_000), 10_000).peak).toBeLessThanOrEqual(1000);
+    expect(speed.snapshot(11_000).recentRate).toBeNull();
+    speed.pause(11_000);
+    for (let now = 20_000; now <= 21_000; now++) speed.delta('abcd', now);
+    expect(speed.snapshot(21_000).recentRate).toBeLessThanOrEqual(1000);
+    expect(speed.snapshot(22_000).recentRate).toBeNull();
+    speed.finish(11_001, 22_000);
+    const done = speed.snapshot(22_000);
+    expect(done).toMatchObject({ estimated: false, outputTokens: 11_001,
+      durationMs: 13_000, averageRate: 11_001_000 / 13_000 });
+    expect(responseSpeedHistory(done, 22_000).peak).toBeLessThanOrEqual(1000);
+  });
+
   it('character estimates are independent of chunk boundaries and samples stay bounded', () => {
     const measure = (chunks: string[]) => {
       const speed = new ResponseSpeedTracker();
