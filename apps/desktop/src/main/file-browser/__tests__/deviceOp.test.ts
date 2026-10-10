@@ -94,6 +94,14 @@ vi.mock('../../localDb/client/current.js', () => ({
     },
   }),
 }));
+const sharedWorkdirMock = vi.hoisted(() =>
+  vi.fn<(...args: unknown[]) => Promise<{ remoteHostId: string | null }>>(async () => ({
+    remoteHostId: null,
+  })),
+);
+vi.mock('../../device-link/sharedTaskFileAccess.js', () => ({
+  assertSharedTaskWorkdir: sharedWorkdirMock,
+}));
 const startDirExportMock = vi.hoisted(() => vi.fn<(...args: unknown[]) => string>(() => 'dir_1'));
 vi.mock('../dir-export.js', () => ({
   createDirExportDeps: () => ({}),
@@ -238,6 +246,76 @@ describe('file-browser device-op', () => {
       await handleRemoteOp({ op: 'deleteEntry', workdir, relPath: 'docs/y.md' }),
     ).toMatchObject({
       ok: true,
+    });
+  });
+
+  describe('shared task guest', () => {
+    let current = true;
+    const sharedTask = {
+      author: { sharedTaskId: 'shared', sessionId: 'task', memberId: 'm', accountId: 'guest', displayName: 'Guest' },
+      isCurrent: () => current,
+      authorize: () => current,
+    };
+    const asGuest = <T>(fn: () => Promise<T>) =>
+      runDeviceLinkInvokeContext(
+        { controllerDeviceId: 'guest', channel: 'file-browser:remote-op', sharedTask },
+        fn,
+      );
+
+    beforeEach(() => {
+      current = true;
+      sharedWorkdirMock.mockResolvedValue({ remoteHostId: null });
+    });
+
+    it('reads and writes the task workdir like the owner after binding it', async () => {
+      const entries = (await asGuest(() => handleRemoteOp({ op: 'listDir', workdir }))) as Array<{
+        name: string;
+      }>;
+      expect(entries.map((e) => e.name)).toContain('src');
+      expect(sharedWorkdirMock).toHaveBeenCalledWith(sharedTask, workdir, 'file.read');
+      expect(
+        await asGuest(() =>
+          handleRemoteOp({ op: 'writeFile', workdir, relPath: 'src/a.ts', content: 'guest\n' }),
+        ),
+      ).toMatchObject({ ok: true });
+      expect(sharedWorkdirMock).toHaveBeenLastCalledWith(sharedTask, workdir, 'file.write');
+      const read = (await handleRemoteOp({ op: 'readFile', workdir, relPath: 'src/a.ts' })) as {
+        data: { content: string };
+      };
+      expect(read.data.content).toBe('guest\n');
+    });
+
+    it('refuses export jobs, foreign workdirs and a different execution endpoint', async () => {
+      expect(
+        await asGuest(() => handleRemoteOp({ op: 'exportFileStart', workdir, relPath: 'src/a.ts' })),
+      ).toEqual({ ok: false, message: 'REMOTE_UNSUPPORTED' });
+      expect(uploadMock).not.toHaveBeenCalled();
+      sharedWorkdirMock.mockRejectedValueOnce(new Error('[PERMISSION_DENIED] not this task'));
+      await expect(asGuest(() => handleRemoteOp({ op: 'listDir', workdir }))).rejects.toThrow(
+        'PERMISSION_DENIED',
+      );
+      expect(guardMock).not.toHaveBeenCalled();
+      // The task lives on an SSH host, but this path resolves locally: never guess.
+      sharedWorkdirMock.mockResolvedValueOnce({ remoteHostId: 'ssh-1' });
+      await expect(asGuest(() => handleRemoteOp({ op: 'listDir', workdir }))).rejects.toThrow(
+        'PERMISSION_DENIED',
+      );
+    });
+
+    it('does not write when membership ends during the endpoint checks', async () => {
+      guardMock.mockImplementationOnce(async () => {
+        current = false;
+        return { allowed: true, source: 'filesystem' };
+      });
+      await expect(
+        asGuest(() =>
+          handleRemoteOp({ op: 'writeFile', workdir, relPath: 'src/a.ts', content: 'late\n' }),
+        ),
+      ).rejects.toThrow('PERMISSION_DENIED');
+      const read = (await handleRemoteOp({ op: 'readFile', workdir, relPath: 'src/a.ts' })) as {
+        data: { content: string };
+      };
+      expect(read.data.content).toBe('export const a = 1;\n');
     });
   });
 

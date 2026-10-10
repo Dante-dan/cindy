@@ -73,6 +73,8 @@ import { throwIpcError } from '../utils/ipcValidate.js';
 import { uploadLocalFile } from '../device-link/mediaTransfer.js';
 import { pushToTopicSubscribers } from '../device-link/dispatch.js';
 import { getDeviceLinkInvokeContext } from '../device-link/invoke-context.js';
+import { sharedTaskFileOperation } from '../device-link/sharedTaskDispatch.js';
+import { assertSharedTaskWorkdir } from '../device-link/sharedTaskFileAccess.js';
 import { getSafeDataOwnerPushStamp } from '../device-link/broadcast-tap.js';
 import * as subscriptions from '../device-link/subscriptions.js';
 import { getRipgrepBinaryPath } from '../maker-host/runtime-configs.js';
@@ -402,6 +404,15 @@ async function handleRemoteOp(args: RemoteOpArgs): Promise<unknown> {
   if (!args || typeof args.op !== 'string' || typeof args.workdir !== 'string' || !args.workdir) {
     return bad('invalid remote-op args');
   }
+  // 共享任务访客:只放行本任务工作目录内的读写(与房主一致);导出类长任务仍只给
+  // 同账号控制端。workdir 必须与本机记录的任务目录一致,先于任何 fs 访问校验。
+  const sharedTask = getDeviceLinkInvokeContext()?.sharedTask;
+  const sharedTaskOperation = sharedTask ? sharedTaskFileOperation(args.op) : null;
+  if (sharedTask && !sharedTaskOperation) return bad('REMOTE_UNSUPPORTED');
+  const sharedTaskEndpoint =
+    sharedTask && sharedTaskOperation && args.op !== 'caps'
+      ? await assertSharedTaskWorkdir(sharedTask, args.workdir, sharedTaskOperation)
+      : null;
   // 能力探测:与 workdir 无关、零 fs 访问,放在 guard 之前。老被控端没有
   // 这个分支,会走到 default 返回 `unknown op: caps`——控制端把它当确定性
   // 的"不支持压缩"信号(见 fileBrowserTransport 的 caps 缓存)。
@@ -460,6 +471,19 @@ async function handleRemoteOp(args: RemoteOpArgs): Promise<unknown> {
     } catch (err) {
       log.warn('remote-op contentGz decode failed', { op: args.op, error: String(err) });
       return bad('invalid contentGz');
+    }
+  }
+
+  if (sharedTaskEndpoint) {
+    // 访客只能落到任务自己的执行端点(本地或任务所属 SSH 主机),不按路径反查到别的会话主机。
+    const expected = sharedTaskEndpoint.remoteHostId;
+    const sameEndpoint = expected
+      ? exec.kind === 'ssh' && exec.hostId === expected
+      : exec.kind === 'local';
+    if (!sameEndpoint) throw new Error('[PERMISSION_DENIED] Shared task working directory endpoint mismatch');
+    // 上面的 guard / 端点判定 / 解压都是 await 边界:撤权后不得再落盘或读出。
+    if (!sharedTask?.isCurrent() || !sharedTask.authorize(sharedTaskOperation!)) {
+      throw new Error('[PERMISSION_DENIED] Shared task access changed');
     }
   }
 
