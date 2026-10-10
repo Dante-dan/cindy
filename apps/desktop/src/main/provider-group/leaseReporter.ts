@@ -4,13 +4,15 @@
  *
  * - 任务开始 / 结束一轮时防抖后报告；有任务在跑时每分钟再报一次(组所在电脑 150s 收不到就作废)；
  * - 每次报告是这台电脑在那台组上的完整一份，序号只增(按时间生成，重启后仍比之前大)；
- * - 只用于分摊负载，报告失败只记日志，不影响任务。
+ * - 只用于分摊负载，报告失败只记日志、稍后重报，不影响任务。
  */
 import type { ProviderGroupRemoteLease } from '../../shared/providerGroup.js';
 import type { ProviderGroupBinding } from './bindings.js';
 
 export const PROVIDER_GROUP_LEASE_DEBOUNCE_MS = 1_000;
 export const PROVIDER_GROUP_LEASE_HEARTBEAT_MS = 60_000;
+/** 报告失败、又没有任务在跑(没有心跳)时多久后重报。 */
+export const PROVIDER_GROUP_LEASE_RETRY_MS = 15_000;
 
 export interface ProviderGroupLeaseReporterDeps {
   listRemoteBindings(): Record<string, ProviderGroupBinding>;
@@ -74,8 +76,15 @@ export function createProviderGroupLeaseReporter(deps: ProviderGroupLeaseReporte
       if (!entries.length) lastSent.delete(owner);
       else lastSent.set(owner, serialized);
       void deps.send(owner, nextSeq(), entries).catch((error) => {
-        // 下次心跳或下一次变化时重报：清掉记录，避免以为已经报过。
-        if (entries.length) lastSent.set(owner, '');
+        // 下次心跳或下一次变化时重报：记成「没报上」(与任何内容都不同)，避免以为已经报过。结束时的空报告
+        // 也要重报——那时没有任务在跑、没有心跳，组所在电脑会把已结束的任务多算到 150 秒，所以另排一次重试。
+        lastSent.set(owner, '');
+        if (!disposed && heartbeat === null) {
+          heartbeat = schedule(() => {
+            heartbeat = null;
+            flush(false);
+          }, PROVIDER_GROUP_LEASE_RETRY_MS);
+        }
         deps.log.warn('provider group: reporting running tasks failed', {
           error: error instanceof Error ? error.message : String(error),
         });

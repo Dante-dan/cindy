@@ -44,6 +44,11 @@ export interface ProviderGroupPickInput {
   agentKind: AgentKind;
   model: string;
   exclude?: ReadonlySet<string>;
+  /**
+   * 选中后在同一步(读负载与选电脑之间没有等待)调用，用来立即记上占用：同时来的几个请求各自读到前一个的
+   * 占用，不会全落到同一台。
+   */
+  onPicked?(memberKey: string): void;
 }
 
 export type ProviderGroupPickResult =
@@ -133,6 +138,7 @@ export function createProviderGroupRouter(deps: ProviderGroupRouterDeps): Provid
       });
       if (!key) return { kind: 'unavailable', resolved };
       lastPicked.set(input.providerId, key);
+      input.onPicked?.(key);
       const chosen = resolved.find((r) => r.member.key === key)!;
       return { kind: 'member', member: chosen.member, label: chosen.label, resolved };
     },

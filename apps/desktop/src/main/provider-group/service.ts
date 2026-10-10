@@ -449,6 +449,15 @@ export function createProviderGroupService(deps: ProviderGroupServiceDeps): Prov
   }
 
   /**
+   * 组所在电脑确认组已删除(读到了、没有这个组)时立即解除绑定，任务成为普通的(远程)任务——之后重建同一个组也不会
+   * 恢复自动换电脑(§9.4)。读不到(undefined)的情况 loadBound 已经挡掉，绑定不动。
+   */
+  async function releaseDeletedGroup(sessionId: string): Promise<void> {
+    await deps.writeBinding(sessionId, null);
+    deps.log.info('provider group: group no longer exists; released the task', { sessionId });
+  }
+
+  /**
    * 登记一次进行中的换电脑：用户在途中接手(重试、发消息、换模型)或那次错误已不是当前状态时，之后的每一步都停手。
    * `handBack` 在不再换电脑时交回原有的报错与额度重置后自动继续；之前的交接若已关掉旧会话，换一个对当前状态
    * 有效的令牌。
@@ -487,8 +496,13 @@ export function createProviderGroupService(deps: ProviderGroupServiceDeps): Prov
     if (!cause) return false;
     if (!deps.readBinding(sessionId)) return guestFailover(sessionId, signals, token, cause);
     const bound = await loadBound(sessionId);
-    if (!bound?.config?.autoSwitch) return false;
+    if (!bound) return false;
     const { binding, source, config } = bound;
+    if (!config) {
+      await releaseDeletedGroup(sessionId);
+      return false;
+    }
+    if (!config.autoSwitch) return false;
     if (!(await deps.isFailoverEligible(sessionId))) return false;
     const row = await deps.readSessionRow(sessionId);
     if (!row?.model || row.remoteHostId) return false;
@@ -802,9 +816,15 @@ export function createProviderGroupService(deps: ProviderGroupServiceDeps): Prov
 
     async beforeSend(sessionId) {
       if (!deps.readBinding(sessionId) || deps.isTurnRunning(sessionId)) return;
-      const bound = await loadBound(sessionId);
-      if (!bound?.config?.autoSwitch) return;
+      // 读组设置也算进发送前检查的上限：组所在电脑断线或不响应时保留绑定、照常发送，不等默认的请求超时。
+      const bound = await withTimeout(loadBound(sessionId), PROVIDER_GROUP_BEFORE_SEND_TIMEOUT_MS);
+      if (!bound) return;
       const { binding, source, config } = bound;
+      if (!config) {
+        await releaseDeletedGroup(sessionId);
+        return;
+      }
+      if (!config.autoSwitch) return;
       if (!(await deps.isFailoverEligible(sessionId))) return;
       const row = await deps.readSessionRow(sessionId);
       if (!row?.model || row.remoteHostId) return;

@@ -74,7 +74,10 @@ export function useOwnRemoteProviderList(): OwnRemoteProviderList {
       const catalog = catalogs.get(device.deviceId);
       if (!catalog) return [];
       return remoteAgentProviders(catalog.providers)
-        .filter((provider) => provider.connected && !provider.suspended)
+        // 带组的项照常列出：组所在电脑自己的这个供应商掉登录或被停用时，组仍按组员分配，组员也仍收在组里，
+        // 不能让组和组员一起从设置里消失。
+        .filter((provider) => (provider.connected && !provider.suspended)
+          || groups.groups.has(remoteProviderEntryKey(device.deviceId, provider.id)))
         .filter((provider) => !groups.hidden.has(remoteProviderEntryKey(device.deviceId, provider.id)))
         .map((provider): OwnRemoteProvider => {
           const key = ownRemoteProviderKey(device.deviceId, provider.id);

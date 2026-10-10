@@ -12,6 +12,7 @@ import type { ProviderGroupDirectory } from '../directory';
 import { createProviderGroupRouter } from '../router';
 import {
   createProviderGroupService,
+  PROVIDER_GROUP_BEFORE_SEND_TIMEOUT_MS,
   PROVIDER_GROUP_UNAVAILABLE_ERROR,
   type ProviderGroupRemoteGroups,
   type ProviderGroupServiceDeps,
@@ -244,6 +245,36 @@ describe('switching computers within a group on another computer', () => {
     expect(h.deps.fallback).toHaveBeenCalled();
     expect(h.deps.switchAgentLocation).not.toHaveBeenCalled();
     expect(h.bindings.has('s1')).toBe(true);
+  });
+
+  it('releases the task as soon as the group computer confirms the group was deleted', async () => {
+    const failing = bound({ config: null });
+    failing.service.onTurnError('s1', { sdkError: 'rate_limit' }, 3);
+    await flush();
+    expect(failing.bindings.has('s1')).toBe(false);
+    expect(failing.deps.switchAgentLocation).not.toHaveBeenCalled();
+    expect(failing.deps.fallback).toHaveBeenCalled();
+
+    const sending = bound({ config: null });
+    await sending.service.beforeSend('s1');
+    expect(sending.bindings.has('s1')).toBe(false);
+    expect(sending.deps.switchAgentLocation).not.toHaveBeenCalled();
+  });
+
+  it('sends as usual without waiting when the group computer does not answer in time', async () => {
+    vi.useFakeTimers();
+    try {
+      const h = bound();
+      h.remote.readGroup.mockImplementation(() => new Promise(() => undefined));
+      const done = vi.fn();
+      void h.service.beforeSend('s1').then(done);
+      await vi.advanceTimersByTimeAsync(PROVIDER_GROUP_BEFORE_SEND_TIMEOUT_MS);
+      expect(done).toHaveBeenCalled();
+      expect(h.bindings.has('s1')).toBe(true);
+      expect(h.deps.switchAgentLocation).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('stops following the group once the user moved the task elsewhere', async () => {

@@ -43,4 +43,25 @@ describe('provider group guest switch tokens', () => {
     now += PROVIDER_GROUP_SWITCH_ARMED_TTL_MS + 1;
     expect(tokens.takeForOpen('s1')).toBeUndefined();
   });
+
+  it('drops a token already armed for the next open when the user takes over during the handoff', () => {
+    const tokens = createProviderGroupGuestSwitch(() => 0);
+    tokens.offer('s1', 'token-a');
+    expect(tokens.claim('s1')).toBe(true);
+    tokens.drop('s1');
+    expect(tokens.takeForOpen('s1')).toBeUndefined();
+  });
+
+  it('marks the next send after the user takes over as a new round, only for tasks that got tokens', () => {
+    const tokens = createProviderGroupGuestSwitch(() => 0);
+    tokens.drop('plain');
+    expect(tokens.takeNewRound('plain')).toBe(false);
+
+    tokens.offer('s1', 'token-a');
+    expect(tokens.claim('s1')).toBe(true);
+    expect(tokens.takeNewRound('s1')).toBe(false);
+    tokens.drop('s1');
+    expect(tokens.takeNewRound('s1')).toBe(true);
+    expect(tokens.takeNewRound('s1')).toBe(false);
+  });
 });

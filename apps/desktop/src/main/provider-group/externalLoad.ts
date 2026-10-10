@@ -18,6 +18,12 @@ export const PROVIDER_GROUP_PROVISIONAL_MS = 30_000;
 const MAX_CONTROLLERS = 256;
 const MAX_PROVISIONAL = 4096;
 
+/** 计入某台组内电脑负载的一个任务(按它是否正在运行一轮)；任务结束时 release。 */
+export interface ProviderGroupLoadHandle {
+  setRunning(running: boolean): void;
+  release(): void;
+}
+
 export interface ProviderGroupExternalLoad {
   /** 这台组内电脑上经本组运行、但不在本机任务表里的任务数。 */
   running(providerId: string, memberKey: string): number;
@@ -26,9 +32,10 @@ export interface ProviderGroupExternalLoad {
   /** 某台电脑的整份报告；返回 false = 比已有的旧，被丢弃。 */
   replaceLeases(controller: string, seq: number, entries: readonly ProviderGroupRemoteLease[]): boolean;
   /**
-   * 本机替受邀者中转到这台组内电脑的任务(本机能看到它是否在运行一轮)：任务结束时 release。
+   * 本机替受邀者运行的任务(中转到这台组内电脑，或组选中本机这一台；本机能看到它是否在运行一轮)：
+   * 任务结束时 release。
    */
-  trackRelay(providerId: string, memberKey: string): { setRunning(running: boolean): void; release(): void };
+  trackRelay(providerId: string, memberKey: string): ProviderGroupLoadHandle;
 }
 
 interface LeaseSet {

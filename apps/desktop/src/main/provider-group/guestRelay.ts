@@ -11,24 +11,20 @@ import type { AgentKind } from '@cindy/maker-core';
 
 import type { ProviderGroupConfig } from '../../shared/providerGroup.js';
 import type { RelayRunFailure } from '../remote-agent/host/groupRelay.js';
-import type { GroupRelayMember, RemoteAgentGroupRelayDeps } from '../remote-agent/host/runHost.js';
+import type { GroupRelayLoad, GroupRelayMember, RemoteAgentGroupRelayDeps } from '../remote-agent/host/runHost.js';
 import type { RemoteAgentInvoke, RemoteAgentPoller } from '../remote-agent/controller/runClient.js';
-import type { ProviderGroupExternalLoad } from './externalLoad.js';
 import { PROVIDER_GROUP_MAX_REMOTE_COOLDOWN_MS } from './remoteHandler.js';
-import {
-  PROVIDER_GROUP_DEFAULT_COOLDOWN_MS,
-  PROVIDER_GROUP_FAILURE_COOLDOWN_MS,
-  type ProviderGroupRouter,
-} from './router.js';
+import { PROVIDER_GROUP_DEFAULT_COOLDOWN_MS, PROVIDER_GROUP_FAILURE_COOLDOWN_MS } from './router.js';
+import type { ProviderGroupOwnerScope } from './runtime.js';
 import { classifyProviderGroupSwitchCause } from './switchCause.js';
 
 /** 同账号电脑不支持接受受邀者任务时，多久内不再试它。 */
 export const PROVIDER_GROUP_GUEST_INCAPABLE_MS = 10 * 60_000;
 
 export interface ProviderGroupGuestRelayDeps {
-  router: ProviderGroupRouter;
+  /** 当前账号的分配器与负载(每次选电脑开头取一次)。 */
+  scope(): ProviderGroupOwnerScope;
   readGroup(providerId: string): ProviderGroupConfig | null;
-  externalLoad: ProviderGroupExternalLoad;
   connect(agentDeviceId: string): { invoke: RemoteAgentInvoke; poller: RemoteAgentPoller };
   /** 组内电脑报错里的用量重置时刻(unix ms)；不提供时用量上限一律按默认时长冷却。 */
   readResetAt?(failure: RelayRunFailure): number | null;
@@ -55,24 +51,39 @@ export function createProviderGroupGuestRelay(deps: ProviderGroupGuestRelayDeps)
   }
 
   return {
-    async plan({ kind, model, providerId, exclude }) {
+    async plan({ kind, model, providerId, exclude, reserve }) {
       const config = deps.readGroup(providerId);
       if (!config) return null;
       const skip = new Set(exclude);
       for (const member of config.members) {
         if (member.kind === 'device' && member.agentDeviceId && isIncapable(member.agentDeviceId)) skip.add(member.key);
       }
-      const pick = await deps.router.pick({ providerId, agentKind: kind as AgentKind, model, exclude: skip });
+      const scope = deps.scope();
+      let load: GroupRelayLoad | undefined;
+      const pick = await scope.router.pick({
+        providerId,
+        agentKind: kind as AgentKind,
+        model,
+        exclude: skip,
+        // 选中的同一步就计入那台的负载：同时来的几个受邀者任务不会读到同一份负载、全落到同一台。
+        ...(reserve ? { onPicked: (memberKey: string) => { load = scope.externalLoad.trackRelay(providerId, memberKey); } } : {}),
+      });
+      // 选电脑期间换了账号：这是上一个账号的组，不再交给它的电脑。
+      if (!scope.isCurrent()) {
+        load?.release();
+        return { kind: 'unavailable' };
+      }
       if (pick.kind === 'none') return null;
       if (pick.kind === 'unavailable') return { kind: 'unavailable' };
       const { member } = pick;
-      if (member.kind === 'local' || !member.agentDeviceId) return { kind: 'local' };
+      if (member.kind === 'local' || !member.agentDeviceId) return { kind: 'local', ...(load ? { load } : {}) };
       return {
         kind: 'member',
         memberKey: member.key,
         agentDeviceId: member.agentDeviceId,
         providerId: member.providerId,
         sameAccount: member.kind === 'device',
+        ...(load ? { load } : {}),
       };
     },
 
@@ -88,7 +99,7 @@ export function createProviderGroupGuestRelay(deps: ProviderGroupGuestRelayDeps)
       const cause = classifyProviderGroupSwitchCause({ message });
       if (!cause) return;
       const now = deps.now();
-      deps.router.markCooling(
+      deps.scope().router.markCooling(
         providerId,
         member.memberKey,
         now + (cause === 'usage-limit' ? PROVIDER_GROUP_DEFAULT_COOLDOWN_MS : PROVIDER_GROUP_FAILURE_COOLDOWN_MS),
@@ -97,7 +108,8 @@ export function createProviderGroupGuestRelay(deps: ProviderGroupGuestRelayDeps)
 
     noteRunFailure(providerId, member: GroupRelayMember, failure) {
       // 没有组，或那台已被移出组：已经在它上面的任务成为普通的远程 Agent 任务，不再自动换电脑(§9 #4)。
-      if (!deps.readGroup(providerId)?.members.some((m) => m.key === member.memberKey)) return false;
+      const config = deps.readGroup(providerId);
+      if (!config?.members.some((m) => m.key === member.memberKey)) return false;
       const cause = classifyProviderGroupSwitchCause(failure);
       if (!cause) return false;
       const now = deps.now();
@@ -108,11 +120,12 @@ export function createProviderGroupGuestRelay(deps: ProviderGroupGuestRelayDeps)
             ? Math.min(resetAt, now + PROVIDER_GROUP_MAX_REMOTE_COOLDOWN_MS)
             : now + PROVIDER_GROUP_DEFAULT_COOLDOWN_MS)
         : now + PROVIDER_GROUP_FAILURE_COOLDOWN_MS;
-      deps.router.markCooling(providerId, member.memberKey, until);
-      return true;
+      deps.scope().router.markCooling(providerId, member.memberKey, until);
+      // 冷却照常(之后的新任务避开它)；组设置里关掉了自动换电脑时不发凭证，受邀者照现有方式看到错误(§6.1)。
+      return config.autoSwitch;
     },
 
-    trackRun: (providerId, memberKey) => deps.externalLoad.trackRelay(providerId, memberKey),
+    trackRun: (providerId, memberKey) => deps.scope().externalLoad.trackRelay(providerId, memberKey),
 
     async forget(agentDeviceId, relay) {
       await deps.connect(agentDeviceId).invoke([{ op: 'forget', relay }]);

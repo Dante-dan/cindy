@@ -107,6 +107,28 @@ describe('useOwnRemoteProviders', () => {
     ]);
     expect([...result.current.hiddenShareIds]).toEqual(['s1']);
   });
+
+  it('keeps the group listed when the group computer’s own provider is logged out or paused', () => {
+    devices.value = [
+      { deviceId: 'mini-a', name: "Magi's Mac Mini", platform: 'darwin' },
+      { deviceId: 'mini-b', name: 'Studio', platform: 'darwin' },
+    ];
+    const group = {
+      strategy: 'least',
+      members: [{ kind: 'local' }, { kind: 'device', agentDeviceId: 'mini-b', providerId: 'anthropic' }],
+    };
+    for (const state of [{ connected: false }, { suspended: true }]) {
+      catalogs.value = new Map([
+        ['mini-a', { providers: [provider('anthropic', { ...state, group })], loading: false, error: null }],
+        ['mini-b', { providers: [provider('anthropic')], loading: false, error: null }],
+      ]);
+      const { result, unmount } = renderHook(() => useOwnRemoteProviderList());
+      expect(result.current.entries.map((entry) => [entry.deviceId, entry.provider.id, entry.group?.members.length ?? 0])).toEqual([
+        ['mini-a', 'anthropic', 2],
+      ]);
+      unmount();
+    }
+  });
 });
 
 describe('OwnRemoteProviderRows / OwnRemoteProviderDetail', () => {

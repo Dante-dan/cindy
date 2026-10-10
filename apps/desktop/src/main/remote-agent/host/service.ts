@@ -18,7 +18,7 @@ import { setRemoteAgentHandler } from '../../device-link/dispatch.js';
 import { remoteBackgroundInvoke } from '../../device-link/index.js';
 import { providerShareGuestAccess } from '../../device-link/providerShareHost.js';
 import { createProviderGroupGuestRelay } from '../../provider-group/guestRelay.js';
-import { getProviderGroupExternalLoad, getProviderGroupRouter } from '../../provider-group/runtime.js';
+import { getProviderGroupOwnerScope } from '../../provider-group/runtime.js';
 import { readProviderGroup } from '../../provider-group/store.js';
 import { remoteAgentPollerFor } from '../controller/service';
 import { getProviderShareUsageStore, installProviderShareUsageStore } from '../../device-link/providerShareUsageStore.js';
@@ -153,9 +153,8 @@ export function installRemoteAgentHost(options: { getMaker: () => Maker; userDat
     },
     // 供应商组(本机是组所在电脑)：受邀者的任务按组分给组内电脑，本机中转(provider-groups.md §4)。
     groupRelay: createProviderGroupGuestRelay({
-      router: getProviderGroupRouter(),
+      scope: getProviderGroupOwnerScope,
       readGroup: readProviderGroup,
-      externalLoad: getProviderGroupExternalLoad(),
       connect: (agentDeviceId) => {
         const poller = remoteAgentPollerFor(agentDeviceId, remoteBackgroundInvoke, log);
         return { invoke: poller.invoke, poller };

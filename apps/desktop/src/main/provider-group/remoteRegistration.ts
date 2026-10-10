@@ -10,13 +10,12 @@ import {
   handleProviderGroupRemote,
   type ProviderGroupRemoteHandlerDeps,
 } from './remoteHandler.js';
-import { getProviderGroupExternalLoad, getProviderGroupRouter } from './runtime.js';
+import { getProviderGroupOwnerScope } from './runtime.js';
 import { readProviderGroup } from './store.js';
 
 export function registerProviderGroupRemoteHandler(): void {
   const deps: ProviderGroupRemoteHandlerDeps = {
-    router: getProviderGroupRouter(),
-    externalLoad: getProviderGroupExternalLoad(),
+    scope: getProviderGroupOwnerScope,
     readGroup: readProviderGroup,
     isRemoteAllowed: isRemoteProviderInvocationAllowed,
     now: () => Date.now(),

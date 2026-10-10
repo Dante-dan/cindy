@@ -2,54 +2,92 @@
  * 本机建的供应商组(只读设置，不读远端)：模型列表与设置页据此收起本机组里的远程供应商与分享，
  * 与其他电脑的组同一条规则(provider-groups.md §10)。组设置变化时 main 广播 CHANGED，重读一次。
  * 全窗口共用一份，多个组件同时用也只发一次 IPC。
+ *
+ * 组设置属于当前账号：快照按账号代次存，换账号后清空重读，旧账号还在路上的结果直接丢弃——否则新账号的
+ * 模型列表会按旧账号的组收起供应商。
  */
 import { useEffect, useState } from 'react';
 
+import {
+  getDataOwnerGeneration,
+  isDataOwnerGenerationCurrent,
+  type DataOwnerGeneration,
+} from '@/contexts/dataOwnerGeneration';
 import type { ProviderGroupConfig } from '../../../shared/providerGroup';
 
 type LocalGroups = Readonly<Record<string, ProviderGroupConfig>>;
 
 const EMPTY: LocalGroups = Object.freeze({});
-let snapshot: LocalGroups = EMPTY;
-let loaded: Promise<void> | null = null;
+
+interface GroupsState {
+  owner: DataOwnerGeneration | null;
+  snapshot: LocalGroups;
+  loaded: Promise<void> | null;
+  /** 每次重读或换账号加一，只认最后一次读取的结果。 */
+  revision: number;
+}
+
+const state: GroupsState = { owner: null, snapshot: EMPTY, loaded: null, revision: 0 };
 let offChanged: (() => void) | null = null;
 const listeners = new Set<(groups: LocalGroups) => void>();
 
-function reload(): Promise<void> {
-  const api = window.electronAPI?.providerGroup;
-  if (typeof api?.command !== 'function') return Promise.resolve();
-  loaded = Promise.resolve()
-    .then(() => api.command({ action: 'list' }))
-    .then((groups) => {
-      snapshot = groups ?? EMPTY;
-      for (const listener of listeners) listener(snapshot);
-    })
-    .catch(() => undefined);
-  return loaded;
+function sameOwner(a: DataOwnerGeneration | null, b: DataOwnerGeneration): boolean {
+  return a?.dataOwnerId === b.dataOwnerId && a.generation === b.generation;
 }
 
-function subscribe(listener: (groups: LocalGroups) => void): () => void {
+function stateFor(owner: DataOwnerGeneration): GroupsState {
+  if (!sameOwner(state.owner, owner)) {
+    // 同一账号只是代次变了(内部修复)：保留快照免得组员闪出来，只重读一次；换了账号才清空。
+    if (state.owner?.dataOwnerId !== owner.dataOwnerId) state.snapshot = EMPTY;
+    state.owner = owner;
+    state.loaded = null;
+    state.revision += 1;
+  }
+  return state;
+}
+
+function reload(owner: DataOwnerGeneration): Promise<void> {
+  const api = window.electronAPI?.providerGroup;
+  if (typeof api?.command !== 'function') return Promise.resolve();
+  stateFor(owner);
+  const revision = ++state.revision;
+  state.loaded = Promise.resolve()
+    .then(() => api.command({ action: 'list' }))
+    .then((groups) => {
+      if (revision !== state.revision || !sameOwner(state.owner, owner) || !isDataOwnerGenerationCurrent(owner)) return;
+      state.snapshot = groups ?? EMPTY;
+      for (const listener of listeners) listener(state.snapshot);
+    })
+    .catch(() => undefined);
+  return state.loaded;
+}
+
+function subscribe(owner: DataOwnerGeneration, listener: (groups: LocalGroups) => void): () => void {
   listeners.add(listener);
-  if (!loaded) void reload();
-  offChanged ??= window.electronAPI?.providerGroup?.onChanged?.(() => void reload()) ?? null;
+  if (!stateFor(owner).loaded) void reload(owner);
+  offChanged ??= window.electronAPI?.providerGroup?.onChanged?.(() => void reload(getDataOwnerGeneration())) ?? null;
   return () => {
     listeners.delete(listener);
   };
 }
 
 export function useLocalProviderGroups(): LocalGroups {
-  const [groups, setGroups] = useState<LocalGroups>(snapshot);
+  const owner = getDataOwnerGeneration();
+  const source = stateFor(owner);
+  const [view, setView] = useState(() => ({ owner, groups: source.snapshot }));
   useEffect(() => {
-    setGroups(snapshot);
-    return subscribe(setGroups);
-  }, []);
-  return groups;
+    setView({ owner, groups: source.snapshot });
+    return subscribe(owner, (groups) => setView({ owner, groups }));
+  }, [owner, source]);
+  return view.owner === owner ? view.groups : source.snapshot;
 }
 
 export const __testing = {
   reset(): void {
-    snapshot = EMPTY;
-    loaded = null;
+    state.owner = null;
+    state.snapshot = EMPTY;
+    state.loaded = null;
+    state.revision = 0;
     offChanged?.();
     offChanged = null;
     listeners.clear();

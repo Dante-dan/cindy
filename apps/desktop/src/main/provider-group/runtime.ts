@@ -67,13 +67,6 @@ const directoryFacade: ProviderGroupDirectory = {
   invalidate: (agentDeviceId) => runtimeForActiveOwner().directory.invalidate(agentDeviceId),
 };
 
-const externalLoadFacade: ProviderGroupExternalLoad = {
-  running: (providerId, memberKey) => runtimeForActiveOwner().externalLoad.running(providerId, memberKey),
-  recordPick: (controller, sessionId, providerId, memberKey) =>
-    runtimeForActiveOwner().externalLoad.recordPick(controller, sessionId, providerId, memberKey),
-  replaceLeases: (controller, seq, entries) => runtimeForActiveOwner().externalLoad.replaceLeases(controller, seq, entries),
-  trackRelay: (providerId, memberKey) => runtimeForActiveOwner().externalLoad.trackRelay(providerId, memberKey),
-};
 
 const routerFacade: ProviderGroupRouter = {
   pick: (input) => runtimeForActiveOwner().router.pick(input),
@@ -94,8 +87,23 @@ export function getProviderGroupRouter(): ProviderGroupRouter {
   return routerFacade;
 }
 
-export function getProviderGroupExternalLoad(): ProviderGroupExternalLoad {
-  return externalLoadFacade;
+/**
+ * 一次分配用的当前账号运行期(不经按调用时账号转发的门面)：选电脑要等目录，等待期间换了账号时，记占用仍
+ * 落在这次分配所属账号的那份里，不会记进新账号；`isCurrent()` 为 false 时调用方丢弃这次结果。
+ */
+export interface ProviderGroupOwnerScope {
+  router: ProviderGroupRouter;
+  externalLoad: ProviderGroupExternalLoad;
+  isCurrent(): boolean;
+}
+
+export function getProviderGroupOwnerScope(): ProviderGroupOwnerScope {
+  const runtime = runtimeForActiveOwner();
+  return {
+    router: runtime.router,
+    externalLoad: runtime.externalLoad,
+    isCurrent: () => activeOwnerScopeKey() === runtime.owner,
+  };
 }
 
 let remoteClient: ProviderGroupRemoteClient | null = null;

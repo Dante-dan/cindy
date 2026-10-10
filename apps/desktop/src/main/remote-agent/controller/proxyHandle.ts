@@ -187,6 +187,8 @@ export interface RemoteHandleDeps {
   onVendorOptions?: (patch: Record<string, unknown>) => void;
   /** 句柄关闭后释放本机资源(执行器、MCP 身份等)。 */
   dispose(): Promise<void>;
+  /** 供应商组(分享的人)：这次发送要不要告诉对方开始新的一轮(用户亲自接手过)。 */
+  takeGroupNewRound?(): boolean;
 }
 
 export interface RemoteAgentHandleController {
@@ -221,6 +223,7 @@ export function createRemoteAgentHandle(deps: RemoteHandleDeps): RemoteAgentHand
 
   async function sendLike(method: 'send' | 'steer', message: UserMessage, opts?: SendOptions): Promise<void> {
     const encoded = await encodeSendOptions(opts, readImage);
+    if (method === 'send' && deps.takeGroupNewRound?.()) encoded.wire.groupNewRound = true;
     const wireMessage = await encodeUserMessage(message, readImage);
     const projectMessage = (wire: typeof wireMessage) => {
       if (typeof wire.content === 'string') wire.content = deps.workspace.mapTextForAgent(wire.content);

@@ -9,6 +9,7 @@ import {
   createProviderGroupLeaseReporter,
   PROVIDER_GROUP_LEASE_DEBOUNCE_MS,
   PROVIDER_GROUP_LEASE_HEARTBEAT_MS,
+  PROVIDER_GROUP_LEASE_RETRY_MS,
 } from '../leaseReporter';
 
 beforeEach(() => {
@@ -89,6 +90,27 @@ describe('provider group lease reporter', () => {
     await vi.advanceTimersByTimeAsync(PROVIDER_GROUP_LEASE_DEBOUNCE_MS);
     expect(restarted.send.mock.calls[0][1] as number).toBeGreaterThan(seqs[1]);
     restarted.reporter.dispose();
+  });
+
+  it('retries the final empty report when it fails, even with no heartbeat running', async () => {
+    const { reporter, running, send } = setup();
+    running.add('s1');
+    reporter.notify('s1');
+    await vi.advanceTimersByTimeAsync(PROVIDER_GROUP_LEASE_DEBOUNCE_MS);
+    expect(send).toHaveBeenCalledTimes(1);
+    running.clear();
+    send.mockRejectedValueOnce(new Error('offline'));
+    reporter.notify('s1');
+    await vi.advanceTimersByTimeAsync(PROVIDER_GROUP_LEASE_DEBOUNCE_MS);
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send).toHaveBeenLastCalledWith('mini', expect.any(Number), []);
+    await vi.advanceTimersByTimeAsync(PROVIDER_GROUP_LEASE_RETRY_MS);
+    expect(send).toHaveBeenCalledTimes(3);
+    expect(send).toHaveBeenLastCalledWith('mini', expect.any(Number), []);
+    // 补报成功后不再重复。
+    await vi.advanceTimersByTimeAsync(PROVIDER_GROUP_LEASE_HEARTBEAT_MS * 2);
+    expect(send).toHaveBeenCalledTimes(3);
+    reporter.dispose();
   });
 
   it('does nothing when no task runs through a group on another computer', async () => {

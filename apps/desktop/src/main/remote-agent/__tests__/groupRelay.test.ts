@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+import { REMOTE_AGENT_MAX_RUNS_PER_CONTROLLER } from '@cindy/device-link';
 import type { AgentEvent, AgentSessionHandle } from '@cindy/maker-core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -39,6 +40,8 @@ interface Started {
   emit(event: AgentEvent): void;
   /** 这台上是否正在运行一轮(写进状态)。 */
   running: boolean;
+  /** 这台上的 Agent 事件流意外结束(进程退出等)。 */
+  end(): void;
 }
 
 function fakeAgentHost(name: string, started: Started[], options: {
@@ -46,18 +49,29 @@ function fakeAgentHost(name: string, started: Started[], options: {
   guestRelayCapable?: boolean;
   purge?: (hostSessionIds: readonly string[], nativeIds: readonly string[]) => Promise<void>;
   groupRelay?: RemoteAgentGroupRelayDeps;
+  /** 这台的 Agent 启动失败(启动前受邀者目录已经建好)。 */
+  failStart?: boolean;
+  /** 这台的 Agent 一启动就结束。 */
+  endImmediately?: boolean;
 }) {
   return createRemoteAgentHost({
     isAgentAvailable: () => true,
     startHosted: async (input) => {
+      if (options.failStart) throw new Error('the agent could not start');
       const queue: AgentEvent[] = [];
       let wake: (() => void) | null = null;
+      let ended = false;
       const record: Started = {
         input,
         sends: [],
         running: false,
         emit(event) {
           queue.push(event);
+          wake?.();
+          wake = null;
+        },
+        end() {
+          ended = true;
           wake?.();
           wake = null;
         },
@@ -77,7 +91,9 @@ function fakeAgentHost(name: string, started: Started[], options: {
         events: () => ({
           [Symbol.asyncIterator]: (): AsyncIterator<AgentEvent> => ({
             next: async () => {
-              while (queue.length === 0) await new Promise<void>((resolve) => { wake = resolve; });
+              if (options.endImmediately) return { value: undefined as unknown as AgentEvent, done: true };
+              while (queue.length === 0 && !ended) await new Promise<void>((resolve) => { wake = resolve; });
+              if (queue.length === 0) return { value: undefined as unknown as AgentEvent, done: true };
               return { value: queue.shift()!, done: false };
             },
           }),
@@ -135,6 +151,10 @@ function setup(options: {
   plans?: GroupRelayPlan[];
   miniCapable?: boolean;
   switchWorthy?: (failure: RelayRunFailure) => boolean;
+  /** mini 这台的 Agent 表现。 */
+  mini?: { failStart?: boolean; endImmediately?: boolean };
+  /** 截住组所在电脑发给组内电脑的请求(模拟回包丢失、应答慢)。 */
+  intercept?: (agentDeviceId: string, request: Record<string, unknown>, forward: () => Promise<unknown>) => Promise<unknown>;
 } = {}) {
   const memberStarted: Record<string, Started[]> = { mini: [], studio: [] };
   const members = {
@@ -142,11 +162,16 @@ function setup(options: {
       trust: () => 'owner',
       guestRelayCapable: options.miniCapable ?? true,
       purge: async () => undefined,
+      ...options.mini,
     }),
     studio: fakeAgentHost('studio', memberStarted.studio, { trust: () => 'owner', purge: async () => undefined }),
   };
-  const memberInvoke = (agentDeviceId: string) => async (args: unknown[]) =>
-    jsonRoundTrip(await members[agentDeviceId as keyof typeof members].handle(OWNER_DEVICE, jsonRoundTrip(args[0])));
+  const memberInvoke = (agentDeviceId: string) => async (args: unknown[]) => {
+    const request = jsonRoundTrip(args[0]) as Record<string, unknown>;
+    // 不在组里的设备 id(模拟连不上的电脑)在这里抛错。
+    const forward = async () => jsonRoundTrip(await members[agentDeviceId as keyof typeof members].handle(OWNER_DEVICE, request));
+    return options.intercept ? options.intercept(agentDeviceId, request, forward) : forward();
+  };
   const pollers = new Map<string, RemoteAgentPoller>();
   const plans = [...(options.plans ?? [{ kind: 'member', ...MEMBER_MINI }])];
   const relay = {
@@ -210,7 +235,7 @@ async function openAsGuest(env: ReturnType<typeof setup>, guest: string, payload
   }, () => `22222222-2222-4222-8222-${String(++counter + runSeq * 100).padStart(12, '0')}`);
   let closedReason: string | null = null;
   const started = await client.open('claude-code', payload);
-  return { client, started, stream, isClosed: () => closedReason !== null };
+  return { client, started, stream, isClosed: () => closedReason !== null, closedReason: () => closedReason };
 }
 
 const USAGE_LIMIT_ERROR: AgentEvent = {
@@ -339,6 +364,158 @@ describe('provider group relay for shared users', () => {
   });
 });
 
+describe('provider group relay: starting, load and cleanup', () => {
+  it('tries every computer in the group before giving up, however many there are', async () => {
+    const unreachable = Array.from({ length: 9 }, (_, i): GroupRelayPlan => ({
+      kind: 'member',
+      memberKey: `device:off${i}:anthropic`,
+      agentDeviceId: `off${i}`,
+      providerId: 'anthropic',
+      sameAccount: true,
+    }));
+    const env = setup({ plans: [...unreachable, { kind: 'member', ...MEMBER_STUDIO }] });
+    const { client } = await openAsGuest(env, GUEST_A, openPayload(SESSION));
+    expect(env.relay.noteStartFailure).toHaveBeenCalledTimes(9);
+    expect(env.memberStarted.studio).toHaveLength(1);
+    await client.close('close', 'navigation');
+  });
+
+  it('counts the load from the moment it picks, including tasks the group runs on this computer', async () => {
+    const localLoad = { setRunning: vi.fn(), release: vi.fn() };
+    const memberLoad = { setRunning: vi.fn(), release: vi.fn() };
+    const env = setup({ plans: [{ kind: 'local', load: localLoad }, { kind: 'member', ...MEMBER_MINI, load: memberLoad }] });
+    const local = await openAsGuest(env, GUEST_A, openPayload(SESSION));
+    expect(env.relay.plan).toHaveBeenLastCalledWith(expect.objectContaining({ reserve: true }));
+    expect(env.ownerStarted).toHaveLength(1);
+    env.ownerStarted[0].emit({ type: 'text', data: { text: 'hi' } } as AgentEvent);
+    await waitFor(() => localLoad.setRunning.mock.calls.length > 0);
+    await local.client.close('close', 'navigation');
+    await waitFor(() => localLoad.release.mock.calls.length > 0);
+
+    const relayed = await openAsGuest(env, GUEST_A, openPayload('task-2'));
+    // 选中时预占的负载直接交给中转任务，不再另记一份。
+    expect(env.relay.trackRun).not.toHaveBeenCalled();
+    await relayed.client.close('close', 'navigation');
+    await waitFor(() => memberLoad.release.mock.calls.length > 0);
+  });
+
+  it('remembers a computer it handed the task to even if the agent failed to start there', async () => {
+    const env = setup({ mini: { failStart: true }, plans: [{ kind: 'member', ...MEMBER_MINI }, { kind: 'member', ...MEMBER_STUDIO }] });
+    const { client } = await openAsGuest(env, GUEST_A, openPayload(SESSION));
+    expect(env.memberStarted.studio).toHaveLength(1);
+    await client.close('close', 'navigation');
+    await env.owner.purgeControllers((controller) => controller === GUEST_A);
+    await waitFor(() => env.relay.forget.mock.calls.length >= 2);
+    expect(env.relay.forget).toHaveBeenCalledWith('mini', relayKeyFor(GUEST_A));
+    expect(env.relay.forget).toHaveBeenCalledWith('studio', relayKeyFor(GUEST_A));
+  });
+
+  it('keeps the computers it could not reach when deleting a shared user, and asks them again later', async () => {
+    const env = setup();
+    const { client } = await openAsGuest(env, GUEST_A, openPayload(SESSION));
+    await client.close('close', 'navigation');
+    const index = (): Record<string, { forgetPending?: string[]; nativeIds: string[] }> => {
+      try {
+        return JSON.parse(fs.readFileSync(path.join(root, 'owner', 'guest-sessions.json'), 'utf8'));
+      } catch {
+        return {};
+      }
+    };
+    env.relay.forget.mockRejectedValueOnce(new Error('DEVICE_OFFLINE'));
+    await env.owner.purgeControllers((controller) => controller === GUEST_A);
+    await waitFor(() => env.relay.forget.mock.calls.length === 1);
+    await waitFor(() => Object.values(index()).some((record) => record.forgetPending?.includes('mini')));
+    // 本机这边已经清掉，只留下还要通知的那台。
+    expect(Object.values(index()).every((record) => record.nativeIds.length === 0)).toBe(true);
+
+    await env.owner.purgeControllers((controller) => controller === GUEST_A);
+    await waitFor(() => env.relay.forget.mock.calls.length === 2);
+    await waitFor(() => Object.keys(index()).length === 0);
+  });
+
+  it('does not let a shared user get more tasks by filling in its own relay key', async () => {
+    const started: Started[] = [];
+    const host = fakeAgentHost('solo', started, { trust: () => 'guest' });
+    const open = (i: number) => host.handle(GUEST_A, {
+      op: 'open',
+      runId: runId(),
+      agentKind: 'claude-code',
+      payload: { json: openPayload(`t${i}`, { relay: `r${i}` }) },
+    });
+    for (let i = 0; i < REMOTE_AGENT_MAX_RUNS_PER_CONTROLLER; i += 1) await open(i);
+    await expect(open(99)).rejects.toThrow(/REMOTE_AGENT_BUSY/);
+    await host.abortAll();
+  });
+
+  it('does not start the task on the computer when it ended while the computer was being checked', async () => {
+    let releaseCaps!: () => void;
+    const capsGate = new Promise<void>((resolve) => {
+      releaseCaps = resolve;
+    });
+    let capsAsked!: () => void;
+    const asked = new Promise<void>((resolve) => {
+      capsAsked = resolve;
+    });
+    const env = setup({
+      intercept: async (_device, request, forward) => {
+        if (request.op === 'caps') {
+          capsAsked();
+          await capsGate;
+        }
+        return forward();
+      },
+    });
+    const id = runId();
+    await env.owner.handle(GUEST_A, { op: 'open', runId: id, agentKind: 'claude-code', payload: { json: openPayload(SESSION) } });
+    await asked;
+    await env.owner.handle(GUEST_A, { op: 'close', runId: id, mode: 'close', reason: 'navigation' });
+    releaseCaps();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(env.memberStarted.mini).toHaveLength(0);
+    expect(env.members.mini.runCount()).toBe(0);
+  });
+
+  it('passes on the end of a task that finished on the computer right after starting', async () => {
+    // 那台的任务启动又结束了才放行拉取：启动与结束在同一次拉取里一起带回。
+    const holder: { env?: ReturnType<typeof setup> } = {};
+    holder.env = setup({
+      mini: { endImmediately: true },
+      intercept: async (_device, request, forward) => {
+        if (request.op === 'poll') {
+          await waitFor(() => holder.env!.memberStarted.mini.length === 1 && holder.env!.members.mini.runCount() === 0);
+        }
+        return forward();
+      },
+    });
+    const guest = await openAsGuest(holder.env, GUEST_A, openPayload(SESSION));
+    await waitFor(() => guest.isClosed());
+  });
+
+  it('closes the task on the computer when the answer to opening it was lost, then tries the next one', async () => {
+    let lostRunId: unknown;
+    const closed: unknown[] = [];
+    const env = setup({
+      plans: [{ kind: 'member', ...MEMBER_MINI }, { kind: 'member', ...MEMBER_STUDIO }],
+      intercept: async (device, request, forward) => {
+        const result = await forward();
+        if (device === 'mini' && request.op === 'close') closed.push(request.runId);
+        if (device === 'mini' && request.op === 'open' && lostRunId === undefined) {
+          // 那台已经收下了打开，回包在路上丢了。
+          lostRunId = request.runId;
+          throw Object.assign(new Error('request timed out'), { code: 'INVOKE_TIMEOUT' });
+        }
+        return result;
+      },
+    });
+    const { client } = await openAsGuest(env, GUEST_A, openPayload(SESSION));
+    expect(env.memberStarted.studio).toHaveLength(1);
+    // 换下一台之前已经用同一个任务 id 请那台关掉，那台上没有留下没人管的任务。
+    expect(closed).toContain(lostRunId);
+    await waitFor(() => env.members.mini.runCount() === 0);
+    await client.close('close', 'navigation');
+  });
+});
+
 describe('provider group "switch to another computer" for shared users', () => {
   it('sends the switch token before the error, and the reopened task avoids the failed computer', async () => {
     const env = setup({
@@ -447,6 +624,25 @@ describe('provider group "switch to another computer" for shared users', () => {
     await reopened.client.close('close', 'navigation');
   });
 
+  it('offers another computer when the agent on the group computer itself ends in the middle of a turn', async () => {
+    const env = setup({ plans: [{ kind: 'local' }, { kind: 'member', ...MEMBER_MINI }] });
+    const guest = await openAsGuest(env, GUEST_A, openPayload(SESSION, { acceptsGroupSwitch: true }));
+    const record = env.ownerStarted[0];
+    record.running = true;
+    record.emit({ type: 'text', data: { text: 'working' } } as AgentEvent);
+    await waitFor(() => guest.stream.some((item) => item.t === 'state' && item.state.turnRunning === true));
+    // 本机的 Agent 进程退出：事件流没有 done 就结束了。
+    record.end();
+    await waitFor(() => guest.isClosed());
+    expect(switchTokenIn(guest.stream)).toMatch(/^[A-Za-z0-9_-]{16,64}$/);
+    expect(guest.closedReason()).toBe('error');
+    expect(env.relay.noteRunFailure).toHaveBeenCalledWith(
+      'shared-provider',
+      expect.objectContaining({ memberKey: 'local' }),
+      expect.objectContaining({ reason: 'remote_agent_closed' }),
+    );
+  });
+
   it('offers another computer when the computer’s task ends unexpectedly in the middle of a turn', async () => {
     const env = setup({ plans: [{ kind: 'member', ...MEMBER_MINI }, { kind: 'member', ...MEMBER_STUDIO }] });
     const guest = await openAsGuest(env, GUEST_A, openPayload(SESSION, { acceptsGroupSwitch: true }));
@@ -472,6 +668,7 @@ describe('provider group "switch to another computer" for shared users', () => {
         { kind: 'member', ...MEMBER_STUDIO },
         { kind: 'member', ...MEMBER_STUDIO },
         { kind: 'unavailable' },
+        { kind: 'member', ...MEMBER_MINI },
       ],
     });
     const first = await openAsGuest(env, GUEST_A, openPayload(SESSION, { acceptsGroupSwitch: true }));
@@ -488,6 +685,12 @@ describe('provider group "switch to another computer" for shared users', () => {
       exclude: new Set([MEMBER_MINI.memberKey, MEMBER_STUDIO.memberKey]),
     }));
     expect(switchTokenIn(second.stream)).toBeUndefined();
+
+    // 用户亲自重试开始新的一轮：已经恢复的那台又能接手。
+    await second.client.call('send', [{ content: 'try again', attachments: [] }, { groupNewRound: true }]);
+    env.memberStarted.studio[0].emit(USAGE_LIMIT_ERROR);
+    await waitFor(() => switchTokenIn(second.stream) !== undefined);
+    expect(env.relay.plan).toHaveBeenLastCalledWith(expect.objectContaining({ exclude: new Set([MEMBER_STUDIO.memberKey]) }));
     await second.client.close('close', 'navigation');
   });
 });

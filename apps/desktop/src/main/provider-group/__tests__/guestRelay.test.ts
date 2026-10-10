@@ -8,7 +8,7 @@ import type { ProviderGroupConfig, ProviderGroupMember } from '../../../shared/p
 import { createProviderGroupExternalLoad } from '../externalLoad';
 import { createProviderGroupGuestRelay, PROVIDER_GROUP_GUEST_INCAPABLE_MS } from '../guestRelay';
 import { PROVIDER_GROUP_MAX_REMOTE_COOLDOWN_MS } from '../remoteHandler';
-import { PROVIDER_GROUP_DEFAULT_COOLDOWN_MS, type ProviderGroupRouter } from '../router';
+import { PROVIDER_GROUP_DEFAULT_COOLDOWN_MS, type ProviderGroupPickInput, type ProviderGroupRouter } from '../router';
 
 function member(key: string, kind: ProviderGroupMember['kind'], agentDeviceId: string | null, providerId: string): ProviderGroupMember {
   return { key, kind, agentDeviceId, providerId, limit: 4, weight: 1, paused: false };
@@ -19,11 +19,13 @@ const MINI = member('device:mini:anthropic-2', 'device', 'mini', 'anthropic-2');
 const FRIEND = member('share:s1:anthropic', 'share', 'share:s1', 'anthropic');
 const CONFIG: ProviderGroupConfig = { strategy: 'order', autoSwitch: true, members: [LOCAL, MINI, FRIEND] };
 
-function setup(picks: ProviderGroupMember[]) {
+function setup(picks: ProviderGroupMember[], config: ProviderGroupConfig = CONFIG) {
   let now = 1_000;
+  let current = true;
   const router = {
-    pick: vi.fn(async ({ exclude }: { exclude?: ReadonlySet<string> }) => {
+    pick: vi.fn(async ({ exclude, onPicked }: ProviderGroupPickInput) => {
       const next = picks.find((m) => !exclude?.has(m.key));
+      if (next) onPicked?.(next.key);
       return next ? { kind: 'member' as const, member: next, label: next.key, resolved: [] } : { kind: 'unavailable' as const, resolved: [] };
     }),
     view: vi.fn(),
@@ -37,14 +39,20 @@ function setup(picks: ProviderGroupMember[]) {
   const externalLoad = createProviderGroupExternalLoad({ now: () => now });
   const invoke = vi.fn(async () => ({}));
   const relay = createProviderGroupGuestRelay({
-    router,
-    readGroup: (id) => (id === 'anthropic' ? CONFIG : null),
-    externalLoad,
+    scope: () => ({ router, externalLoad, isCurrent: () => current }),
+    readGroup: (id) => (id === 'anthropic' ? config : null),
     connect: () => ({ invoke, poller: {} as never }),
     now: () => now,
     log: { warn: vi.fn() },
   });
-  return { relay, router, externalLoad, invoke, advance: (ms: number) => { now += ms; } };
+  return {
+    relay,
+    router,
+    externalLoad,
+    invoke,
+    advance: (ms: number) => { now += ms; },
+    switchAccount: () => { current = false; },
+  };
 }
 
 const PLAN = { kind: 'claude-code' as const, model: 'opus', providerId: 'anthropic', exclude: new Set<string>() };
@@ -103,10 +111,10 @@ describe('provider group guest relay planner', () => {
   it('cools until the reported reset time, trusting it at most 8 days', () => {
     const router = { markCooling: vi.fn() } as unknown as ProviderGroupRouter & { markCooling: ReturnType<typeof vi.fn> };
     let resetAt = 1_000 + 3 * 60 * 60_000;
+    const externalLoad = createProviderGroupExternalLoad({ now: () => 1_000 });
     const relay = createProviderGroupGuestRelay({
-      router,
+      scope: () => ({ router, externalLoad, isCurrent: () => true }),
       readGroup: () => CONFIG,
-      externalLoad: createProviderGroupExternalLoad({ now: () => 1_000 }),
       connect: () => ({ invoke: vi.fn(), poller: {} as never }),
       readResetAt: () => resetAt,
       now: () => 1_000,
@@ -118,6 +126,37 @@ describe('provider group guest relay planner', () => {
     resetAt = 1_000 + 30 * 24 * 60 * 60_000;
     relay.noteRunFailure('anthropic', mini, { usageLimit: true });
     expect(router.markCooling).toHaveBeenLastCalledWith('anthropic', MINI.key, 1_000 + PROVIDER_GROUP_MAX_REMOTE_COOLDOWN_MS);
+  });
+
+  it('still cools the computer but offers no switch when the group has automatic switching turned off', () => {
+    const env = setup([MINI], { ...CONFIG, autoSwitch: false });
+    const mini = { memberKey: MINI.key, agentDeviceId: 'mini', providerId: MINI.providerId, sameAccount: true };
+    expect(env.relay.noteRunFailure('anthropic', mini, { usageLimit: true, message: 'usage limit' })).toBe(false);
+    expect(env.router.markCooling).toHaveBeenCalledWith('anthropic', MINI.key, expect.any(Number));
+  });
+
+  it('counts the picked computer in the same step it is picked, when asked to', async () => {
+    const env = setup([MINI, LOCAL]);
+    const relayed = await env.relay.plan({ ...PLAN, reserve: true });
+    expect(env.externalLoad.running('anthropic', MINI.key)).toBe(1);
+    expect(relayed).toMatchObject({ kind: 'member', memberKey: MINI.key, load: expect.anything() });
+    const local = await env.relay.plan({ ...PLAN, exclude: new Set([MINI.key]), reserve: true });
+    expect(local).toMatchObject({ kind: 'local', load: expect.anything() });
+    expect(env.externalLoad.running('anthropic', LOCAL.key)).toBe(1);
+    // 只是问问有没有能接的电脑时不预占。
+    await env.relay.plan(PLAN);
+    expect(env.externalLoad.running('anthropic', MINI.key)).toBe(1);
+  });
+
+  it('drops a pick made for the previous account', async () => {
+    const env = setup([MINI]);
+    env.router.pick.mockImplementationOnce(async (input: ProviderGroupPickInput) => {
+      env.switchAccount();
+      input.onPicked?.(MINI.key);
+      return { kind: 'member' as const, member: MINI, label: MINI.key, resolved: [] };
+    });
+    expect(await env.relay.plan({ ...PLAN, reserve: true })).toEqual({ kind: 'unavailable' });
+    expect(env.externalLoad.running('anthropic', MINI.key)).toBe(0);
   });
 
   it('counts relayed tasks while they run and asks computers to forget a shared user', async () => {

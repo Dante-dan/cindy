@@ -16,7 +16,14 @@ import {
   PROVIDER_GROUP_MAX_REMOTE_COOLDOWN_MS,
   type ProviderGroupRemoteHandlerDeps,
 } from '../remoteHandler';
-import { PROVIDER_GROUP_DEFAULT_COOLDOWN_MS, PROVIDER_GROUP_FAILURE_COOLDOWN_MS, type ProviderGroupRouter } from '../router';
+import type { ProviderGroupDirectory } from '../directory';
+import {
+  createProviderGroupRouter,
+  PROVIDER_GROUP_DEFAULT_COOLDOWN_MS,
+  PROVIDER_GROUP_FAILURE_COOLDOWN_MS,
+  type ProviderGroupPickInput,
+  type ProviderGroupRouter,
+} from '../router';
 
 const MINI: ProviderGroupMember = {
   key: 'device:mini:anthropic-1a2b3c4d',
@@ -36,8 +43,13 @@ const CONFIG: ProviderGroupConfig = {
 
 function deps(overrides: Partial<ProviderGroupRemoteHandlerDeps> = {}) {
   let now = 10_000;
+  let ownerCurrent = true;
+  const externalLoad = createProviderGroupExternalLoad({ now: () => now });
   const router = {
-    pick: vi.fn(async () => ({ kind: 'member' as const, member: MINI, label: 'Mini', resolved: [] })),
+    pick: vi.fn(async (input: ProviderGroupPickInput) => {
+      input.onPicked?.(MINI.key);
+      return { kind: 'member' as const, member: MINI, label: 'Mini', resolved: [] };
+    }),
     view: vi.fn(async () => ({ providerId: 'anthropic', config: CONFIG, members: [] })),
     running: vi.fn(() => 0),
     markCooling: vi.fn(),
@@ -46,16 +58,20 @@ function deps(overrides: Partial<ProviderGroupRemoteHandlerDeps> = {}) {
     triedThisTurn: vi.fn(() => new Set<string>()),
     resetTurn: vi.fn(),
   } satisfies ProviderGroupRouter;
-  const externalLoad = createProviderGroupExternalLoad({ now: () => now });
   const value = {
-    router,
-    externalLoad,
+    scope: () => ({ router, externalLoad, isCurrent: () => ownerCurrent }),
     readGroup: (id: string) => (id === 'anthropic' ? CONFIG : null),
     isRemoteAllowed: () => true,
     now: () => now,
     ...overrides,
   } satisfies ProviderGroupRemoteHandlerDeps;
-  return { ...value, router, externalLoad, advance: (ms: number) => { now += ms; } };
+  return {
+    ...value,
+    router,
+    externalLoad,
+    advance: (ms: number) => { now += ms; },
+    switchAccount: () => { ownerCurrent = false; },
+  };
 }
 
 const PICK = { action: 'pick', sessionId: 's1', providerId: 'anthropic', agentKind: 'claude-code', model: 'opus', exclude: ['local'] };
@@ -64,7 +80,9 @@ describe('provider-group:remote', () => {
   it('picks a computer, honouring what the caller already tried, and holds it briefly', async () => {
     const d = deps();
     const result = await handleProviderGroupRemote(d, 'laptop', PICK);
-    expect(d.router.pick).toHaveBeenCalledWith({ providerId: 'anthropic', agentKind: 'claude-code', model: 'opus', exclude: new Set(['local']) });
+    expect(d.router.pick).toHaveBeenCalledWith(expect.objectContaining({
+      providerId: 'anthropic', agentKind: 'claude-code', model: 'opus', exclude: new Set(['local']),
+    }));
     expect(result).toEqual({
       kind: 'member',
       member: { key: MINI.key, kind: 'device', agentDeviceId: 'mini', providerId: 'anthropic-1a2b3c4d' },
@@ -126,6 +144,68 @@ describe('provider-group:remote', () => {
     await handleProviderGroupRemote(d, 'laptop', PICK);
     await handleProviderGroupRemote(d, 'laptop', { action: 'leases', seq: 1, entries: [{ sessionId: 's1', providerId: 'anthropic', memberKey: MINI.key }] });
     expect(d.externalLoad.running('anthropic', MINI.key)).toBe(1);
+  });
+
+  it('spreads requests that arrive together instead of sending them all to the same computer', async () => {
+    const now = 10_000;
+    const externalLoad = createProviderGroupExternalLoad({ now: () => now });
+    const config: ProviderGroupConfig = { strategy: 'least', autoSwitch: true, members: [MINI, { ...MINI, key: 'device:studio:anthropic', agentDeviceId: 'studio', providerId: 'anthropic', label: 'Studio' }] };
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const directory: ProviderGroupDirectory = {
+      // 两个请求都在等目录时，读负载与选电脑要在目录回来后的同一步里完成。
+      resolveMembers: async (_providerId, cfg) => {
+        await gate;
+        return cfg.members.map((m) => ({
+          member: m,
+          label: m.label ?? m.key,
+          state: 'ok' as const,
+          view: {
+            id: m.providerId,
+            name: m.providerId,
+            agents: ['claude-code'],
+            connected: true,
+            models: { 'claude-code': [{ id: 'opus', name: 'opus', efforts: [], defaultEffort: null }] },
+            routing: { 'claude-code': {} },
+          } as never,
+        }));
+      },
+      listCandidates: async () => [],
+      readDeviceCatalog: async () => [],
+      invalidate: vi.fn(),
+    };
+    const router = createProviderGroupRouter({
+      directory,
+      readGroup: () => config,
+      listBindings: () => ({}),
+      isTurnRunning: () => false,
+      externalRunning: (p, m) => externalLoad.running(p, m),
+      now: () => now,
+      random: () => 0,
+    });
+    const d = {
+      scope: () => ({ router, externalLoad, isCurrent: () => true }),
+      readGroup: () => config,
+      isRemoteAllowed: () => true,
+      now: () => now,
+    } satisfies ProviderGroupRemoteHandlerDeps;
+    const first = handleProviderGroupRemote(d, 'laptop', { ...PICK, exclude: [] });
+    const second = handleProviderGroupRemote(d, 'desktop', { ...PICK, sessionId: 's2', exclude: [] });
+    release();
+    const picked = (await Promise.all([first, second])).map((r) => (r as { member?: { key: string } }).member?.key);
+    expect(new Set(picked).size).toBe(2);
+  });
+
+  it('drops a pick when the account changed while it waited for the directory', async () => {
+    const d = deps();
+    d.router.pick.mockImplementationOnce(async (input: ProviderGroupPickInput) => {
+      d.switchAccount();
+      input.onPicked?.(MINI.key);
+      return { kind: 'member' as const, member: MINI, label: 'Mini', resolved: [] };
+    });
+    expect(await handleProviderGroupRemote(d, 'laptop', PICK)).toEqual({ kind: 'none' });
   });
 
   it('rejects malformed requests', async () => {

@@ -479,6 +479,11 @@ export interface RemoteAgentWireSendOptions {
   toolsDisabled?: boolean;
   transcriptCallback?: boolean;
   turnPolicy?: WireTurnPolicy;
+  /**
+   * 供应商组(分享的人，provider-groups.md §6.1)：用户亲自接手(发消息、重试、换模型)后的这次发送，组所在电脑据此
+   * 清掉这个任务这一轮已经换下来的电脑。只有组所在电脑读它，不转给组内电脑；旧版本不认识，忽略。
+   */
+  groupNewRound?: true;
   cindy?: {
     /** autoReviewReferences is optional and additive; older peers drop it and review without it. */
     mainOwned?: { origin: TurnPermissionOrigin; rawChannelText?: string; autoReviewReferences?: unknown };

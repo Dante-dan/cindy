@@ -78,9 +78,10 @@ export interface StartRemoteAgentDeps {
   groupAssigned?: boolean;
   /**
    * 供应商组「需要换一台」(分享的人，docs/product-rules/provider-groups.md §6.1)：提供即在打开时声明支持。
-   * `token` 是交接后重新打开时带回的凭证；对方发来新凭证时交给 `offer`。
+   * `token` 是交接后重新打开时带回的凭证；对方发来新凭证时交给 `offer`；`takeNewRound` 为 true 的那次发送告诉
+   * 对方开始新的一轮(用户亲自接手过)。
    */
-  groupSwitch?: { token?: string; offer(token: string): void };
+  groupSwitch?: { token?: string; offer(token: string): void; takeNewRound?(): boolean };
   newId(): string;
   log?: {
     info(message: string, meta?: Record<string, unknown>): void;
@@ -327,6 +328,7 @@ export async function startRemoteAgentSession(
     onInvalidResumeSession: opts.onInvalidResumeSession,
     mapEvent: deps.mapEvent?.(kind),
     newId: deps.newId,
+    ...(deps.groupSwitch?.takeNewRound ? { takeGroupNewRound: deps.groupSwitch.takeNewRound } : {}),
     onPermissionMode: (mode) => {
       permissionMode = mode as typeof permissionMode;
       executor.setGateMode(executorGateModeFor(permissionMode, planMode));

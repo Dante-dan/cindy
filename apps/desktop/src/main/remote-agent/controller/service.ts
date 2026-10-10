@@ -64,6 +64,8 @@ export interface DeviceAgentServiceDeps {
   groupSwitch?: {
     takeForOpen(sessionId: string): string | undefined;
     offer(sessionId: string, token: string): void;
+    /** 用户亲自接手后的这次发送开始新的一轮(取走即用掉)。 */
+    takeNewRound?(sessionId: string): boolean;
   };
   logger: Logger;
 }
@@ -162,6 +164,7 @@ export function createDeviceAgentStarter(deps: DeviceAgentServiceDeps) {
             groupSwitch: {
               ...(switchToken ? { token: switchToken } : {}),
               offer: (token: string) => groupSwitch.offer(sessionId, token),
+              takeNewRound: () => groupSwitch.takeNewRound?.(sessionId) ?? false,
             },
           }
         : {}),

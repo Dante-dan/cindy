@@ -14,19 +14,15 @@ import {
   type ProviderGroupRemotePick,
   type ProviderGroupView,
 } from '../../shared/providerGroup.js';
-import type { ProviderGroupExternalLoad } from './externalLoad.js';
-import {
-  PROVIDER_GROUP_DEFAULT_COOLDOWN_MS,
-  PROVIDER_GROUP_FAILURE_COOLDOWN_MS,
-  type ProviderGroupRouter,
-} from './router.js';
+import { PROVIDER_GROUP_DEFAULT_COOLDOWN_MS, PROVIDER_GROUP_FAILURE_COOLDOWN_MS } from './router.js';
+import type { ProviderGroupOwnerScope } from './runtime.js';
 
 /** 报告来的重置时刻最多信多远(账号用量上限最长按周重置)，避免一台电脑被异常时刻长期冷却。 */
 export const PROVIDER_GROUP_MAX_REMOTE_COOLDOWN_MS = 8 * 24 * 60 * 60_000;
 
 export interface ProviderGroupRemoteHandlerDeps {
-  router: ProviderGroupRouter;
-  externalLoad: ProviderGroupExternalLoad;
+  /** 当前账号的分配器与负载(每个请求开头取一次，整个请求都用这一份)。 */
+  scope(): ProviderGroupOwnerScope;
   readGroup(providerId: string): ProviderGroupConfig | null;
   /** 这个供应商仍对其他电脑开放(「允许被远程调用」)。 */
   isRemoteAllowed(providerId: string): boolean;
@@ -63,19 +59,22 @@ export async function handleProviderGroupRemote(
   raw: unknown,
 ): Promise<ProviderGroupRemotePick | ProviderGroupView | Record<string, never>> {
   const request = parseProviderGroupRemoteRequest(raw);
+  const scope = deps.scope();
   switch (request.action) {
     case 'pick': {
       const { providerId } = request;
       if (!deps.isRemoteAllowed(providerId) || !deps.readGroup(providerId)) return { kind: 'none' };
-      const pick = await deps.router.pick({
+      const pick = await scope.router.pick({
         providerId,
         agentKind: request.agentKind,
         model: request.model,
         exclude: new Set(request.exclude),
+        // 选中的同一步记上临时占用：同时来的几个请求不会读到同一份负载、全落到同一台。
+        onPicked: (memberKey) => scope.externalLoad.recordPick(controller, request.sessionId, providerId, memberKey),
       });
-      if (pick.kind === 'none') return { kind: 'none' };
+      // 等目录期间换了账号：这是上一个账号的组(占用也记在上一个账号那份里，随它作废)，不作数。
+      if (!scope.isCurrent() || pick.kind === 'none') return { kind: 'none' };
       if (pick.kind === 'unavailable') return { kind: 'unavailable' };
-      deps.externalLoad.recordPick(controller, request.sessionId, providerId, pick.member.key);
       const { key, kind, agentDeviceId, providerId: memberProviderId } = pick.member;
       return { kind: 'member', member: { key, kind, agentDeviceId, providerId: memberProviderId }, label: pick.label };
     }
@@ -89,15 +88,15 @@ export async function handleProviderGroupRemote(
           now + PROVIDER_GROUP_MAX_REMOTE_COOLDOWN_MS,
         )
         : now + PROVIDER_GROUP_FAILURE_COOLDOWN_MS;
-      deps.router.markCooling(request.providerId, request.memberKey, until);
+      scope.router.markCooling(request.providerId, request.memberKey, until);
       return {};
     }
     case 'leases':
-      deps.externalLoad.replaceLeases(controller, request.seq, request.entries);
+      scope.externalLoad.replaceLeases(controller, request.seq, request.entries);
       return {};
     case 'view': {
       if (!deps.isRemoteAllowed(request.providerId)) return { providerId: request.providerId, config: null, members: [] };
-      return deps.router.view(request.providerId);
+      return scope.router.view(request.providerId);
     }
   }
 }
