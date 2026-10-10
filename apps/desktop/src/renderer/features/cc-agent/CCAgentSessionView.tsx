@@ -5120,6 +5120,7 @@ export function CCAgentSessionView({
                   outputTokens={agentStatus.outputTokens ?? 0}
                   responseSpeed={agentStatus.responseSpeed}
                   generationDurationMs={agentStatus.generationDurationMs ?? 0}
+                  generationActive={agentStatus.generationActive}
                   generationReliable={agentStatus.generationReliable ?? true}
                   startedAt={agentStatus.startedAt}
                   visible={composerRuntimeVisible || (!pendingPlanReview && activeReconnect !== null)}
@@ -5996,6 +5997,7 @@ function RunningStatusBar({
   outputTokens = 0,
   responseSpeed,
   generationDurationMs = 0,
+  generationActive,
   generationReliable = true,
   startedAt,
   visible,
@@ -6018,6 +6020,7 @@ function RunningStatusBar({
   outputTokens?: number;
   responseSpeed?: ResponseSpeedSnapshot;
   generationDurationMs?: number;
+  generationActive?: boolean;
   generationReliable?: boolean;
   startedAt: number | null;
   visible: boolean;
@@ -6192,6 +6195,7 @@ function RunningStatusBar({
   });
   const rateHistory = useRunningTokenRateHistory({
     responseSpeed,
+    generationActive,
     sessionKey,
     startedAt,
     outputTokens,
@@ -6203,7 +6207,7 @@ function RunningStatusBar({
       !backgroundTasksRunning &&
       !workflowWaiting,
   });
-  const latestRate = rateHistory.latestRate;
+  const latestRate = !responseSpeed && generationActive === false ? null : rateHistory.latestRate;
   const legacyUsageMeta = resolveRunningUsageMeta({
     outputTokens,
     generationDurationMs,
@@ -6329,7 +6333,7 @@ function RunningStatusBar({
                 isTokenCount={usageMeta.kind === 'tokens'}
                 averageRate={usageMeta.kind === 'rate' ? usageMeta.rate : null}
                 outputTokens={responseSpeed?.outputTokens ?? outputTokens}
-                history={rateHistory}
+                history={latestRate === rateHistory.latestRate ? rateHistory : { ...rateHistory, latestRate }}
                 onPinnedChange={setRatePanelPinned}
               />
             )}

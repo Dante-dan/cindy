@@ -272,6 +272,10 @@ it.each(["onPress", "onLongPress"])(
     expect(
       loadCachedRateHistory(base.sessionKey)?.samples.map((s) => s.rate),
     ).toEqual([100]);
+    await renderStatus({ startedAt: null, outputTokens: 100, generationDurationMs: 1000, generationActive: false });
+    expect(card()!.textContent).toContain('session.screen.currentRate—');
+    await renderStatus({ startedAt: null, outputTokens: 100, generationDurationMs: 1000, generationActive: true });
+    expect(card()!.textContent).toContain('session.screen.currentRate—');
     for (const inactive of [
       { sideTaskRunning: true },
       { reconnectAttempt: { attempt: 1, maxAttempts: 3 } },

@@ -168,6 +168,7 @@ import {
   classifyCodexError,
   translateErrorNotification,
   translateItemNotification,
+  observeCodexItemTiming,
   beginCodexGenerationTurn,
   finalizeCodexGenerationTurn,
   pauseCodexGeneration,
@@ -12311,10 +12312,12 @@ assertRouteCurrent();
           params.turnId,
           'started',
         );
+        observeCodexItemTiming(translatorRt, 'started', translatedParams);
         pushItemStatus(translatedItem);
         translateItemNotification('started', translatedParams, eventQueue, {
           rt: translatorRt,
           log,
+          timingObserved: true,
           onCompactBoundary: handleCompactBoundary,
         });
         // 重放帧后发:translator 刚推的 running 帧不得把已重放出的终态盖回去。
@@ -12449,6 +12452,12 @@ assertRouteCurrent();
           log,
           onCompactBoundary: handleCompactBoundary,
         });
+        // Close the observed response after translating any final text that
+        // was absent from deltas. A later usage/turn terminal calibrates the
+        // counts without charging its delivery lag as model generation.
+        if (!isLateCollabTerminal && translatedItem.type === 'agentMessage') {
+          translatorRt.responseSpeed.pause();
+        }
         // A late V1 spawn completion is the spawn tool closing, not necessarily
         // the child closing. Reassert a running compact state, or an explicit
         // failed/stopped tracker state; a completed replay would only duplicate

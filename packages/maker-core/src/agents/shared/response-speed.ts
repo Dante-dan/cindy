@@ -73,7 +73,7 @@ export class ResponseSpeedTracker {
     this.content(now);
     // Additive across arbitrary chunks; no regex word-boundary or per-delta rounding.
     let units = 0;
-    for (const character of text) units += character.codePointAt(0)! > 0xff ? 0.67 : 0.25;
+    for (const character of text) units += character.charCodeAt(0) > 0xff ? 0.67 * character.length : 0.25;
     this.units += units;
     this.reported = null;
     this.lastDeltaAt = now;

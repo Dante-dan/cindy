@@ -23,8 +23,9 @@ export function useRunningTokenRateHistory(input: {
   outputTokens: number;
   generationDurationMs: number;
   generationReliable: boolean;
+  generationActive?: boolean;
 }) {
-  const { sessionKey, startedAt, outputTokens, generationDurationMs, generationReliable } = input;
+  const { sessionKey, startedAt, outputTokens, generationDurationMs, generationReliable, generationActive } = input;
   // 挂载时从按会话的进程内缓存播种：RunningStatusBar 以 sessionId 为 key，
   // 切走再切回是全新挂载，历史从缓存恢复而不是从零开始。
   const [history, setHistory] = useState<RateHistory>(() => {
@@ -35,15 +36,16 @@ export function useRunningTokenRateHistory(input: {
     return startedAt === null ? { ...cached, baseline: null, lastReport: null } : cached;
   });
   useEffect(() => {
-    setHistory((previous) =>
-      recordRunningTokenRate(previous, {
+    setHistory((previous) => {
+      const recorded = recordRunningTokenRate(previous, {
         startedAt,
         outputTokens,
         generationDurationMs,
         generationReliable,
-      }),
-    );
-  }, [startedAt, outputTokens, generationDurationMs, generationReliable]);
+      });
+      return generationActive === false ? { ...recorded, latestRate: null, latestSampleAt: undefined } : recorded;
+    });
+  }, [startedAt, outputTokens, generationDurationMs, generationReliable, generationActive]);
   useEffect(() => {
     if (sessionKey) saveCachedRateHistory(sessionKey, history);
   }, [sessionKey, history]);

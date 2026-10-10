@@ -12077,6 +12077,7 @@ function ComposerActivityStatus({
   const samplerStartedAt = rateStartedAt === undefined ? startedAt : rateStartedAt;
   const legacyRateHistory = useRunningTokenRateHistory({
     sessionKey,
+    generationActive,
     startedAt: samplerStartedAt,
     outputTokens,
     generationDurationMs,
@@ -12084,7 +12085,8 @@ function ComposerActivityStatus({
     streaming,
   });
 
-  const rateHistory = responseSpeed ? responseSpeedHistory(responseSpeed) : legacyRateHistory;
+  const rateHistory = responseSpeed ? responseSpeedHistory(responseSpeed)
+    : generationActive === false ? { ...legacyRateHistory, latestRate: null } : legacyRateHistory;
   const completedSpeed = !visible && responseSpeed?.phase === 'complete';
   const speedActivity = responseSpeed ? responseSpeedActivity(responseSpeed) : null;
   if (!visible && !completedSpeed) return null;

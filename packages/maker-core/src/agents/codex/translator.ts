@@ -278,6 +278,12 @@ export function resumeCodexGeneration(
     return;
   }
   if (rt.generationPendingToolIds.size === 0) rt.generationStartedAt = resumedAt;
+  // Completion of the last tool/approval is a locally observed waiting
+  // boundary, not evidence that the next model response has started. Preserve
+  // a parallel response that already resumed on an actual output delta.
+  if (rt.generationPendingToolIds.size === 0 && rt.responseSpeed.snapshot(resumedAt).phase === 'paused') {
+    rt.responseSpeed.beginRequest(resumedAt);
+  }
   if (rt.generationPendingToolIds.size === 0) startCodexGenerationHeartbeat(rt);
 }
 
@@ -350,6 +356,8 @@ interface TranslatorLog {
 export interface CodexTranslateContext {
   rt: CodexRuntimeState;
   log: TranslatorLog;
+  /** Host observed the boundary before publishing its status frame. */
+  timingObserved?: boolean;
   /**
    * Maker Memory flush 观察器 — codex contextCompaction completed 时调,
    * controller 重置 fired 阈值 (compact 后 context 又有空间, 可重新触发)。
@@ -381,6 +389,23 @@ export interface CodexTranslateContext {
 
 type ItemPhase = 'started' | 'updated' | 'completed';
 
+/** Observe before status publication without changing the established event order. */
+export function observeCodexItemTiming(
+  rt: CodexRuntimeState,
+  phase: ItemPhase,
+  notification: ItemStartedNotification['params'] | ItemUpdatedNotification['params'] | ItemCompletedNotification['params'],
+): void {
+  const item = notification.item;
+  const itemType = item?.type;
+  if (!item || typeof item !== 'object') return;
+  if (phase === 'started' && CODEX_GENERATION_PAUSE_ITEM_TYPES.has(itemType)
+    && rt.generationPendingToolIds.has(`item:${item.id}`)) return;
+  if (phase === 'started' && (itemType === 'reasoning' || CODEX_GENERATION_PAUSE_ITEM_TYPES.has(itemType))) {
+    rt.responseSpeed.content();
+  }
+  noteCodexGenerationBoundary(rt, phase, item, notification);
+}
+
 export function translateItemNotification(
   phase: ItemPhase,
   notification:
@@ -400,15 +425,7 @@ export function translateItemNotification(
     ctx.log.warn('item missing type field', { phase, itemKeys: Object.keys(item) });
     return;
   }
-  if (phase === 'started' && (itemType === 'reasoning' || CODEX_GENERATION_PAUSE_ITEM_TYPES.has(itemType))) {
-    ctx.rt.responseSpeed.content();
-  }
-  noteCodexGenerationBoundary(
-    ctx.rt,
-    phase,
-    item as { id?: unknown; type?: unknown },
-    notification as { turnId?: unknown },
-  );
+  if (!ctx.timingObserved) observeCodexItemTiming(ctx.rt, phase, notification);
 
   switch (itemType) {
     case 'agentMessage':

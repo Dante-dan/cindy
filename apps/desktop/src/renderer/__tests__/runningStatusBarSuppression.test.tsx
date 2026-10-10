@@ -17,7 +17,9 @@ import {
   resolveRunningUsageMeta,
 } from '@/features/cc-agent/lib/runningTokenUsage';
 
-vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
+vi.mock('react-i18next', () => ({ useTranslation: () => ({
+  t: (key: string, values?: { value?: unknown; rate?: unknown }) => `${key}${values?.value ?? values?.rate ?? ''}`,
+}) }));
 
 // Execute the actual status bar without loading the entire session view's IPC/store graph.
 const source = readFileSync(
@@ -46,7 +48,9 @@ const deps = {
   useEffect,
   useRef,
   useState,
-  useTranslation: () => ({ t: (key: string) => key }),
+  useTranslation: () => ({
+    t: (key: string, values?: { value?: unknown; rate?: unknown }) => `${key}${values?.value ?? values?.rate ?? ''}`,
+  }),
   useReducedMotion: () => true,
   useAnimatedNumber: (value: number) => value,
   localizeAgentStatus: (status: string) => status,
@@ -80,10 +84,30 @@ const RunningStatusBar = new Function(
   tokenUsage: number;
   outputTokens: number;
   generationDurationMs: number;
+  generationActive?: boolean;
   generationReliable?: boolean;
 }>;
 
 afterEach(cleanup);
+
+it('clears an older host recent interval immediately when native generation pauses, keeping history', () => {
+  const props = { visible: true, status: 'Generating...', startedAt: Date.now(), tokenUsage: 0,
+    outputTokens: 0, generationDurationMs: 0, generationReliable: true, generationActive: true };
+  const view = render(<RunningStatusBar {...props} />);
+  const measured = { ...props, outputTokens: 370, generationDurationMs: 1000 };
+  view.rerender(<RunningStatusBar {...measured} />);
+  const trigger = () => view.container.querySelector('[data-running-status-meta] button')!;
+  expect(trigger().textContent).toContain('chat.runningStatus.tokenRate');
+  fireEvent.click(trigger());
+  view.rerender(<RunningStatusBar {...measured} generationActive={false} status="Running bash…" />);
+  expect(trigger().textContent).not.toContain('chat.runningStatus.tokenRate');
+  expect(screen.getByRole('dialog').textContent).toContain('370');
+  expect(screen.getByRole('dialog').textContent).toContain('chat.runningStatus.observedPeak');
+  view.rerender(<RunningStatusBar {...measured} generationActive />);
+  expect(trigger().textContent).not.toContain('chat.runningStatus.tokenRate');
+  view.rerender(<RunningStatusBar {...measured} generationActive outputTokens={470} generationDurationMs={2000} />);
+  expect(trigger().textContent).toContain('chat.runningStatus.tokenRate');
+});
 
 it.each([false, true])('reconnect hides stale speed and pinned history, then waits for fresh samples (pinned=%s)', (pinned) => {
   const props = {

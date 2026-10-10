@@ -149,6 +149,7 @@ describe('response speed', () => {
       return speed.snapshot(2_000).outputTokens;
     };
     expect(measure(['hello 世界 👋'])).toBe(measure(['h', 'ello ', '世', '界 ', '👋']));
+    expect(measure(['👋'.repeat(10)])).toBe(measure('👋'.repeat(10).split('')));
     const speed = new ResponseSpeedTracker();
     speed.reset('turn', 0);
     for (let i = 1; i < 500; i++) speed.delta('a', i * 250);

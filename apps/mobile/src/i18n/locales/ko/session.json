@@ -269,7 +269,7 @@
     "waitSeconds": "{{seconds}}초",
     "firstResponse": "첫 응답",
     "streamWait": "스트림 내 대기",
-    "turnWaitDescription": "로컬 실행 시작부터 첫 텍스트, 사고 또는 도구 내용까지의 시간입니다. 네트워크 지연과는 다릅니다.",
+    "turnWaitDescription": "로컬 공급자 턴 시작부터 첫 텍스트, 사고 또는 도구 내용까지의 시간입니다. 네트워크 지연과는 다릅니다.",
     "streamWaitDescription": "SDK 스트림 시작부터 첫 콘텐츠까지의 시간입니다. 그 이전의 요청 대기는 측정할 수 없습니다.",
     "lastGeneration": "지난 생성",
     "finalAverage": "최종 평균",
