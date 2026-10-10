@@ -1,3 +1,4 @@
+import { calibratedResponseDuration } from '@cindy/maker-shared/usage-format';
 import { captureTurnUsageContext, type TurnUsageContext } from './turnUsageContext.js';
 import { isOpenAiSubscriptionProviderId } from '../maker-host/codex-account-auth.js';
 import type { AgentEvent, Session } from '@cindy/maker-core';
@@ -99,6 +100,7 @@ export function recordSessionClaudeTurnUsage(
           total_cost_usd?: unknown;
           duration_ms?: unknown;
           duration_api_ms?: unknown;
+          responseSpeed?: unknown;
           usage?: {
             input_tokens?: number;
             output_tokens?: number;
@@ -169,9 +171,13 @@ export function recordSessionClaudeTurnUsage(
     );
     const claudeGenerationDurationMs = outputLagTiming.suppressTiming
       ? undefined
-      : typeof doneData?.duration_api_ms === 'number'
-        ? doneData.duration_api_ms
-        : undefined;
+      : doneData?.responseSpeed !== undefined
+        ? calibratedResponseDuration(doneData.responseSpeed, modelUsageDeltas?.length
+          ? modelUsageDeltas.reduce((sum, delta) => sum + delta.outputTokensDelta, 0)
+          : doneData?.usage?.output_tokens ?? 0)
+        : typeof doneData?.duration_api_ms === 'number'
+          ? doneData.duration_api_ms
+          : undefined;
     // total_cost_usd 累计基线: 主路径不靠它算钱, 但仍跟住, 以便万一某轮缺 modelUsage
     // 走兜底时累计差才准。先取"更新前"基线给兜底用, 再写入本轮累计。
     const prevReportedCost = deps.lastReportedCostUsdBySession.get(session.id);

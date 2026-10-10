@@ -1,3 +1,5 @@
+import { responseSpeedActivity, responseSpeedHistory } from "@cindy/maker-shared/usage-format";
+import type { ResponseSpeedSnapshot } from "@cindy/maker-shared/usage-format";
 import { modelNeedsReselection } from '@/session/modelReselection';
 import { getCachedDeviceProviders } from '@/device-link/deviceProvidersCache';
 import { MountOnFirstOpen } from '@/session/MountOnFirstOpen';
@@ -10133,7 +10135,7 @@ export default function SessionScreen() {
                   紧接着消息落屏时这条又要重排一次。等有内容了再显示活动条。
                   判据必须带 messageCount:syncingWhileEmpty 只要 loading 就为真,而收口后
                   还会再来几轮 load(实测日志),只看它会让已有消息的会话反复熄灭活动条。 */}
-              {!companionChat && showComposerActivity && !(syncingWhileEmpty && !hasRenderedMessages) ? (
+              {!companionChat && (showComposerActivity || remoteSessionRunStatus.responseSpeed?.phase === 'complete') && !(syncingWhileEmpty && !hasRenderedMessages) ? (
                 <View
                   style={[
                     styles.composerActivityFrame,
@@ -10151,6 +10153,7 @@ export default function SessionScreen() {
                     streaming={isSessionStreaming}
                     tokenUsage={composerActivityTokenUsage}
                     outputTokens={remoteSessionRunStatus.outputTokens}
+                    responseSpeed={remoteSessionRunStatus.responseSpeed}
                     generationDurationMs={remoteSessionRunStatus.generationDurationMs}
                     generationReliable={remoteSessionRunStatus.generationReliable}
                     generationActive={remoteSessionRunStatus.generationActive}
@@ -12029,6 +12032,7 @@ function ComposerActivityStatus({
   rateStartedAt = startedAt,
   streaming = false,
   tokenUsage,
+  responseSpeed,
   outputTokens,
   generationDurationMs,
   generationReliable,
@@ -12043,6 +12047,7 @@ function ComposerActivityStatus({
   rateStartedAt?: number | null;
   streaming?: boolean;
   tokenUsage: number;
+  responseSpeed?: ResponseSpeedSnapshot;
   outputTokens: number;
   generationDurationMs: number;
   generationReliable: boolean;
@@ -12070,7 +12075,7 @@ function ComposerActivityStatus({
   // Elapsed uses the local fallback. Sampling keeps the raw remote start so a
   // terminal null is not a new turn, and a local send is not the previous rate.
   const samplerStartedAt = rateStartedAt === undefined ? startedAt : rateStartedAt;
-  const rateHistory = useRunningTokenRateHistory({
+  const legacyRateHistory = useRunningTokenRateHistory({
     sessionKey,
     startedAt: samplerStartedAt,
     outputTokens,
@@ -12079,22 +12084,30 @@ function ComposerActivityStatus({
     streaming,
   });
 
-  if (!visible) return null;
+  const rateHistory = responseSpeed ? responseSpeedHistory(responseSpeed) : legacyRateHistory;
+  const completedSpeed = !visible && responseSpeed?.phase === 'complete';
+  const speedActivity = responseSpeed ? responseSpeedActivity(responseSpeed) : null;
+  if (!visible && !completedSpeed) return null;
 
-  const elapsedText = formatComposerActivityElapsed(elapsed);
+  const elapsedText = completedSpeed
+    ? t('session.screen.lastGeneration')
+    : responseSpeed?.phase === 'waiting'
+    ? t('session.screen.responseWaiting', { seconds: ((responseSpeed.waitingMs + Math.max(0, Date.now() - responseSpeed.sampledAt)) / 1000).toFixed(1) })
+    : speedActivity === 'quiet' ? t('session.screen.noRecentSample') : formatComposerActivityElapsed(elapsed);
   const tokenCount = formatComposerActivityTokenCount(tokenUsage);
   const tokenText = t('session.screen.tokenCount', { tokens: tokenCount });
   const tokenA11yText = t('session.screen.tokenCountFull', { tokens: tokenCount });
   const showElapsedOnly = sideTaskRunning || Boolean(reconnectAttempt);
   const rateValue = formatComposerActivityRateValue(showElapsedOnly ? null : rateHistory.latestRate);
-  const canShowRateDetails = !showElapsedOnly
-    && generationReliable
+  const canShowRateDetails = !showElapsedOnly && (Boolean(responseSpeed) || (generationReliable
     && outputTokens > 0
     && Number.isFinite(outputTokens)
     && Number.isFinite(generationDurationMs)
-    && generationDurationMs > 0;
+    && generationDurationMs > 0));
   const rateText = rateValue
-    ? t('session.screen.tokenRate', { rate: rateValue })
+    ? responseSpeed && (responseSpeed.phase !== 'complete' || responseSpeed.estimated)
+      ? t('session.screen.estimatedTokenRate', { rate: rateValue })
+      : t('session.screen.tokenRate', { rate: rateValue })
     : null;
   const showUsageMeta = !showElapsedOnly && (Boolean(rateText) || tokenUsage > 0);
   // iOS pills share the header/composer edge glass; Android's blur is too weak
@@ -12139,7 +12152,11 @@ function ComposerActivityStatus({
             ? 'session.screen.rateLimitRetrying'
             : 'session.screen.networkReconnecting',
       )
-    : t('session.screen.thinking');
+    : t(speedActivity === 'waiting' ? 'session.screen.responsePending'
+      : speedActivity === 'quiet' ? 'session.screen.noRecentSample'
+        : speedActivity === 'tool' ? 'session.screen.toolRunning'
+          : speedActivity === 'paused' ? 'session.screen.generationPaused'
+            : speedActivity === 'generating' ? 'session.screen.responseGenerating' : 'session.screen.thinking');
 
   return (
     <View
@@ -12147,7 +12164,7 @@ function ComposerActivityStatus({
       style={styles.composerActivityStatus}
       testID="session.composerActivityStatus"
     >
-      <View pointerEvents="none" style={[styles.composerActivityPill, styles.composerActivityPrimary]}>
+      {visible && <View pointerEvents="none" style={[styles.composerActivityPill, styles.composerActivityPrimary]}>
         <BlurBackdrop intensity={FLOATING_CHROME_BLUR_INTENSITY} overlayColor={pillOverlayColor} style={styles.composerActivityPillBackdrop} />
         <Sparkles color={colors.statusAccent} size={iconSize.sm} strokeWidth={iconStroke.regular} />
         <Text numberOfLines={1} style={styles.composerActivityStatusText}>{activityText}</Text>
@@ -12156,8 +12173,9 @@ function ComposerActivityStatus({
             {reconnectAttempt.attempt}/{reconnectAttempt.maxAttempts}
           </Text>
         ) : null}
-      </View>
+      </View>}
       <RunningTokenRatePopover
+        responseSpeed={responseSpeed}
         key={sessionKey}
         enabled={canShowRateDetails}
         availableRegion={availableRegion}

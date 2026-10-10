@@ -1,6 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+vi.mock('@/lib/makerTransport', () => ({
+  makerApiFor: () => ({ input: { stop: vi.fn(async () => ({ queue: [], paused: false })) } }),
+}));
 
 import { makerChatStore } from '@/lib/makerChatStore';
+import type { ResponseSpeedSnapshot } from '@cindy/maker-shared/usage-format';
 
 function applyStatus(
   sessionId: string,
@@ -12,6 +17,7 @@ function applyStatus(
     generationDurationMs?: number;
     generationActive?: boolean;
     generationReliable?: boolean;
+    responseSpeed?: ResponseSpeedSnapshot;
   },
 ): void {
   makerChatStore.__applyStatusUpdateForTest(sessionId, {
@@ -21,6 +27,7 @@ function applyStatus(
     contextTokens: 0,
     contextWindow: 0,
     isRunning: partial.isRunning,
+    ...(partial.responseSpeed ? { responseSpeed: partial.responseSpeed } : {}),
     ...(partial.outputTokens !== undefined ? { outputTokens: partial.outputTokens } : {}),
     ...(partial.generationDurationMs !== undefined
       ? { generationDurationMs: partial.generationDurationMs }
@@ -35,6 +42,26 @@ function applyStatus(
 }
 
 describe('makerChatStore live generation at turn start', () => {
+  it('retains an interrupted measurement across stop and task switching, then resets on the next turn', () => {
+    const sessionId = `live-gen-stop-${Math.random().toString(36).slice(2, 8)}`;
+    const speed: ResponseSpeedSnapshot = { phase: 'generating', waitOrigin: 'turn', firstResponseMs: 1000,
+      waitingMs: 0, outputTokens: 50, durationMs: 2000, estimated: true, recentRate: 30,
+      averageRate: 25, samples: [{ durationMs: 2000, outputTokens: 50, rate: 30 }], sampledAt: Date.now() };
+    try {
+      applyStatus(sessionId, { isRunning: true, responseSpeed: speed });
+      makerChatStore.stopSession(sessionId);
+      makerChatStore.getSnapshot('another-task');
+      expect(makerChatStore.getSnapshot(sessionId).agentStatus).toMatchObject({
+        isRunning: false, generationActive: false,
+        responseSpeed: { phase: 'complete', estimated: true, recentRate: 25, samples: speed.samples },
+      });
+      applyStatus(sessionId, { isRunning: true });
+      expect(makerChatStore.getSnapshot(sessionId).agentStatus.responseSpeed).toBeUndefined();
+    } finally {
+      makerChatStore.purgeSession(sessionId);
+      makerChatStore.purgeSession('another-task');
+    }
+  });
   it('keeps live fields when the first running status already carries them', () => {
     const sessionId = `live-gen-keep-${Math.random().toString(36).slice(2, 8)}`;
     try {

@@ -1,3 +1,4 @@
+import { ResponseSpeedTracker } from '../shared/response-speed.js';
 /**
  * Codex app-server v2 Notification → maker-core 语义 AgentEvent 翻译器。
  *
@@ -80,6 +81,7 @@ export interface CodexRuntimeState {
   /** item.id → agentMessage 已 emit 文本字符长度(citation 归一化后的空间,见 handleAgentMessage)。 */
   itemTextLen: Map<string, number>;
   /** Current model-active interval start; null while tools/approvals own the turn. */
+  responseSpeed: ResponseSpeedTracker;
   generationStartedAt: number | null;
   /** Tool/approval boundaries currently owning the turn. Generation resumes after all finish. */
   generationPendingToolIds: Set<string>;
@@ -130,6 +132,7 @@ export function newCodexRuntimeState(): CodexRuntimeState {
     reasoningStartedAt: new Map(),
     reasoningTextLen: new Map(),
     itemTextLen: new Map(),
+    responseSpeed: new ResponseSpeedTracker(),
     generationStartedAt: null,
     generationPendingToolIds: new Set(),
     generationDurationMs: 0,
@@ -166,6 +169,7 @@ function sampleCodexGenerationHeartbeat(rt: CodexRuntimeState, now = Date.now())
     now - previous > CODEX_GENERATION_HEARTBEAT_MS + CODEX_GENERATION_SUSPEND_GAP_MS
   ) {
     rt.generationTimingReliable = false;
+    rt.responseSpeed.invalidate();
   }
   rt.generationHeartbeatAt = now;
 }
@@ -212,6 +216,7 @@ export function beginCodexGenerationTurn(
   if (rt.generationTurnId !== turnId) {
     resetCodexGenerationTiming(rt);
     rt.generationTurnId = turnId;
+    rt.responseSpeed.reset('turn', startedAt);
   }
   if (rt.generationStartedAt === null && rt.generationPendingToolIds.size === 0) {
     rt.generationStartedAt = startedAt;
@@ -257,6 +262,7 @@ export function pauseCodexGeneration(
     return;
   }
   if (rt.generationPendingToolIds.has(pauseId)) return;
+  rt.responseSpeed.pause(pausedAt);
   if (rt.generationPendingToolIds.size === 0) closeCodexGenerationInterval(rt, pausedAt);
   rt.generationPendingToolIds.add(pauseId);
 }
@@ -324,10 +330,12 @@ function noteCodexGenerationBoundary(
   }
   const pauseId = `item:${item.id}`;
   if (phase === 'started') {
+    if (item.type !== 'contextCompaction') rt.responseSpeed.toolStarted(pauseId);
     pauseCodexGeneration(rt, turnId, pauseId, receivedAt);
     return;
   }
   if (phase !== 'completed') return;
+  rt.responseSpeed.toolEnded(pauseId);
   resumeCodexGeneration(rt, turnId, pauseId, receivedAt);
 }
 
@@ -391,6 +399,9 @@ export function translateItemNotification(
   if (typeof itemType !== 'string') {
     ctx.log.warn('item missing type field', { phase, itemKeys: Object.keys(item) });
     return;
+  }
+  if (phase === 'started' && (itemType === 'reasoning' || CODEX_GENERATION_PAUSE_ITEM_TYPES.has(itemType))) {
+    ctx.rt.responseSpeed.content();
   }
   noteCodexGenerationBoundary(
     ctx.rt,
@@ -1106,6 +1117,7 @@ function emitAgentMessageProgress(
   ctx.rt.itemRawText.set(itemId, rawText);
   ctx.rt.itemTextLen.set(itemId, emitted.length);
   if (delta.length === 0) return;
+  ctx.rt.responseSpeed.delta(delta);
   queue.push({
     type: 'text',
     data: { text: delta, isFinal: false, agentMessageId: itemId,
@@ -1321,6 +1333,7 @@ export function translateReasoningSummaryTextDelta(
   ctx: CodexTranslateContext,
 ): void {
   if (!params.delta) return;
+  ctx.rt.responseSpeed.delta(params.delta);
   ensureReasoningStarted(params.itemId, queue, ctx);
   const prevLen = ctx.rt.reasoningTextLen.get(params.itemId) ?? 0;
   ctx.rt.reasoningTextLen.set(params.itemId, prevLen + params.delta.length);
@@ -1355,6 +1368,7 @@ export function translateReasoningTextDelta(
   ctx: CodexTranslateContext,
 ): void {
   if (!params.delta) return;
+  ctx.rt.responseSpeed.delta(params.delta);
   ensureReasoningStarted(params.itemId, queue, ctx);
   const prevLen = ctx.rt.reasoningTextLen.get(params.itemId) ?? 0;
   ctx.rt.reasoningTextLen.set(params.itemId, prevLen + params.delta.length);

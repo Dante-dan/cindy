@@ -2,8 +2,9 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import ts from 'typescript';
+import { responseSpeedActivity } from '@cindy/maker-shared/usage-format';
 import { afterEach, expect, it, vi } from 'vitest';
 import { formatSessionDuration } from '@/lib/sessionDurationFormat';
 import {
@@ -40,6 +41,7 @@ const compiled = ts.transpileModule(component.getText(ast), {
 const Icon = () => null;
 const deps = {
   React,
+  responseSpeedActivity,
   useCallback,
   useEffect,
   useRef,
@@ -69,11 +71,12 @@ const RunningStatusBar = new Function(
   `const {${Object.keys(deps).join(',')}} = deps; ${compiled}; return RunningStatusBar;`,
 )(deps) as React.ComponentType<{
   visible: boolean;
+  responseSpeed?: import('@cindy/maker-shared/usage-format').ResponseSpeedSnapshot;
   suppressContent?: boolean;
   rightLeadingSlot?: React.ReactNode;
   status: string;
   reconnectStatus?: string | null;
-  startedAt: number;
+  startedAt: number | null;
   tokenUsage: number;
   outputTokens: number;
   generationDurationMs: number;
@@ -191,3 +194,58 @@ it.each([true, false])(
     expect(container.childElementCount).toBe(0);
   },
 );
+
+it('retains a completed response after fade, navigation/remount, then replaces it at the next turn', () => {
+  vi.useFakeTimers();
+  try {
+    const speed = { phase: 'complete', waitOrigin: 'turn', firstResponseMs: 2000, waitingMs: 0,
+      durationMs: 4000, outputTokens: 300, estimated: false, averageRate: 75, recentRate: 75,
+      samples: [{ durationMs: 1000, outputTokens: 100, rate: 100 }], sampledAt: Date.now() } as const;
+    const props = { visible: false, status: 'Done', startedAt: null, tokenUsage: 500,
+      outputTokens: 300, generationDurationMs: 4000, responseSpeed: { ...speed, samples: [...speed.samples] } };
+    const view = render(<RunningStatusBar {...props} />);
+    act(() => vi.advanceTimersByTime(60_000));
+    const trigger = () => view.container.querySelector('[data-running-status-meta] button');
+    expect(trigger()?.textContent).toContain('chat.runningStatus.lastGeneration');
+    fireEvent.click(trigger()!);
+    expect(screen.getByRole('dialog').textContent).toContain('chat.runningStatus.finalAverage');
+    expect(screen.getByRole('dialog').textContent).toContain('75');
+    view.unmount();
+    const restored = render(<RunningStatusBar {...props} />);
+    expect(restored.container.textContent).toContain('chat.runningStatus.lastGeneration');
+    restored.rerender(<RunningStatusBar {...props} visible startedAt={Date.now()}
+      responseSpeed={{ ...props.responseSpeed, phase: 'waiting', firstResponseMs: null, waitingMs: 0,
+        outputTokens: 0, durationMs: 0, recentRate: null, averageRate: null, samples: [] }} />);
+    expect(restored.container.textContent).not.toContain('chat.runningStatus.lastGeneration');
+    expect(restored.container.textContent).toContain('chat.runningStatus.responseWaiting');
+  } finally { vi.useRealTimers(); }
+});
+
+it('expires a stalled live rate while preserving an inspectable curve, and distinguishes tool pause', () => {
+  vi.useFakeTimers();
+  try {
+    const speed = { phase: 'generating', waitOrigin: 'turn', firstResponseMs: 1000, waitingMs: 0,
+      durationMs: 2000, outputTokens: 80, estimated: true, averageRate: 40, recentRate: 370,
+      samples: [{ durationMs: 2000, outputTokens: 80, rate: 370 }], sampledAt: Date.now() } as const;
+    const props = { visible: true, status: 'Generating...', startedAt: Date.now(), tokenUsage: 500,
+      outputTokens: 0, generationDurationMs: 0, responseSpeed: { ...speed, samples: [...speed.samples] } };
+    const view = render(<RunningStatusBar {...props} />);
+    fireEvent.click(view.container.querySelector('[data-running-status-meta] button')!);
+    expect(screen.getByRole('dialog').textContent).toContain('chat.runningStatus.currentRate');
+    act(() => vi.advanceTimersByTime(1000));
+    expect(screen.getByRole('dialog').textContent).toContain('chat.runningStatus.noRecentSample');
+    expect(view.container.querySelector('[data-running-status-meta] button')?.textContent)
+      .not.toContain('chat.runningStatus.estimatedTokenRate');
+    view.rerender(<RunningStatusBar {...props} status="Tool running"
+      responseSpeed={{ ...props.responseSpeed, phase: 'paused', recentRate: null }} />);
+    expect(screen.getByRole('dialog').textContent).toContain('chat.runningStatus.generationPaused');
+    view.rerender(<RunningStatusBar {...props} status="Running bash…"
+      responseSpeed={{ ...props.responseSpeed, phase: 'paused', toolActive: true, recentRate: null }} />);
+    expect(view.container.textContent).toContain('chat.runningStatus.toolRunning');
+    expect(screen.getByRole('dialog').textContent).toContain('chat.runningStatus.toolRunning');
+    view.rerender(<RunningStatusBar {...props}
+      responseSpeed={{ ...props.responseSpeed, phase: 'waiting', waitingMs: 1000, recentRate: null }} />);
+    expect(view.container.textContent).toContain('chat.runningStatus.responsePending');
+    expect(screen.getByRole('dialog').textContent).toContain('chat.runningStatus.responsePending');
+  } finally { vi.useRealTimers(); }
+});

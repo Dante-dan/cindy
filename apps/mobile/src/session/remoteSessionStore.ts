@@ -1,3 +1,4 @@
+import { readResponseSpeedSnapshot, stopResponseSpeed, type ResponseSpeedSnapshot } from '@cindy/maker-shared/usage-format';
 import { normalizeTaskTags, reconcileTaskTags } from '@cindy/maker-shared';
 import {
   createContext,
@@ -148,6 +149,7 @@ export interface RemoteSessionRunStatus {
   status: string;
   tokenUsage: number;
   outputTokens: number;
+  responseSpeed?: ResponseSpeedSnapshot;
   generationDurationMs: number;
   generationActive: boolean;
   generationReliable: boolean;
@@ -5016,6 +5018,7 @@ export const remoteSessionStore = {
         status: rawStatus ?? current.status,
         tokenUsage,
         outputTokens,
+        responseSpeed: readResponseSpeedSnapshot(data?.responseSpeed, Date.now()) ?? (isTurnStart ? undefined : current.responseSpeed),
         generationDurationMs,
         generationActive,
         generationReliable,
@@ -5596,6 +5599,7 @@ function clearLiveGenerationOnWideRunStart(
   return {
     ...next,
     outputTokens: 0,
+    responseSpeed: undefined,
     generationDurationMs: 0,
     generationActive: false,
     generationReliable: true,
@@ -5616,6 +5620,9 @@ function writeMakerTurnRunning(sessionId: string, running: boolean): boolean {
 
 function writeSessionRunStatus(sessionId: string, next: RemoteSessionRunStatus): boolean {
   const current = readSessionRunStatus(sessionId);
+  if (!next.isRunning && next.responseSpeed?.phase !== 'complete') {
+    next = { ...next, responseSpeed: stopResponseSpeed(next.responseSpeed), generationActive: false };
+  }
   if (next.isRunning && !current.isRunning && current.hasTerminalError) {
     next = { ...next, hasTerminalError: false };
   }

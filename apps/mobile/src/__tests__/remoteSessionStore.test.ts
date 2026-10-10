@@ -6691,3 +6691,27 @@ describe('list message reuse', () => {
     expect(remoteSessionStore.getMessages('s1')).toEqual([]);
   });
 });
+
+it('retains response speed per session at completion, freezes aborts and clears the next turn', () => {
+  remoteSessionStore.setDeviceSessions('dev-1', 'Mac', [session('tps-one'), session('tps-two')]);
+  const speed = { phase: 'generating', waitOrigin: 'turn', firstResponseMs: 2000, waitingMs: 0,
+    durationMs: 3000, outputTokens: 50, estimated: true, averageRate: 16.7, recentRate: 20,
+    samples: [{ durationMs: 1000, outputTokens: 20, rate: 20 }], sampledAt: 1 };
+  pushMakerStatus('tps-one', { isRunning: true, responseSpeed: speed });
+  remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
+    sessionId: 'tps-one', event: { type: 'error', data: { message: 'cancelled', isTerminal: true } },
+  });
+  expect(remoteSessionStore.getSessionRunStatus('tps-one').responseSpeed)
+    .toMatchObject({ phase: 'complete', estimated: true, outputTokens: 50 });
+  expect(remoteSessionStore.getSessionRunStatus('tps-two').responseSpeed).toBeUndefined();
+  pushMakerStatus('tps-two', { isRunning: true });
+  expect(remoteSessionStore.getSessionRunStatus('tps-one').responseSpeed?.outputTokens).toBe(50);
+  pushMakerStatus('tps-one', { isRunning: true, responseSpeed: { ...speed, phase: 'waiting',
+    firstResponseMs: null, outputTokens: 0, durationMs: 0, samples: [] } });
+  expect(remoteSessionStore.getSessionRunStatus('tps-one').responseSpeed)
+    .toMatchObject({ phase: 'waiting', firstResponseMs: null, outputTokens: 0, samples: [] });
+  pushMakerStatus('tps-one', { isRunning: false, responseSpeed: { ...speed, phase: 'complete',
+    outputTokens: 300, estimated: false, averageRate: 100, recentRate: 100 } });
+  expect(remoteSessionStore.getSessionRunStatus('tps-one').responseSpeed)
+    .toMatchObject({ phase: 'complete', estimated: false, outputTokens: 300 });
+});

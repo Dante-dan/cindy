@@ -15,6 +15,9 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import {
   clearRateHistoryCache,
   loadCachedRateHistory,
+  responseSpeedActivity,
+  responseSpeedHistory,
+  type ResponseSpeedSnapshot,
 } from "@cindy/maker-shared/usage-format";
 import { useRunningTokenRateHistory } from "../session/useRunningTokenRateHistory";
 import { RunningTokenRatePopover } from "@/session/RunningTokenRatePopover";
@@ -193,6 +196,8 @@ const bindings = {
   iconStroke: {},
   RunningTokenRatePopover,
   useRunningTokenRateHistory,
+  responseSpeedActivity,
+  responseSpeedHistory,
   formatComposerActivityElapsed: () => "1s",
   formatComposerActivityTokenCount: () => "100",
 };
@@ -200,6 +205,40 @@ const ActivityStatus = new Function(
   ...Object.keys(bindings),
   `${compiledStatus}; return ComposerActivityStatus;`,
 )(...Object.values(bindings));
+
+it('shows waiting, execution, silent output and retained completion consistently in the status and card', async () => {
+  vi.useFakeTimers();
+  try {
+    const speed: ResponseSpeedSnapshot = { phase: 'waiting', waitOrigin: 'turn', firstResponseMs: null,
+      waitingMs: 1000, durationMs: 0, outputTokens: 0, estimated: false, recentRate: null,
+      averageRate: null, samples: [], sampledAt: Date.now() };
+    const show = async (responseSpeed: ResponseSpeedSnapshot, visible = true) => act(async () =>
+      root.render(createElement(ActivityStatus, { ...base, visible, tokenUsage: 0,
+        sideTaskRunning: false, reconnectAttempt: null, responseSpeed })),
+    );
+    await show(speed);
+    expect(host.textContent).toContain('session.screen.responsePending');
+    await gesture('onPressIn'); await gesture('onPress');
+    expect(card()!.textContent).toContain('session.screen.responsePending');
+    const generating = { ...speed, phase: 'generating' as const, firstResponseMs: 1000,
+      hasRecentOutput: true, durationMs: 2000, outputTokens: 80, estimated: true, recentRate: 40,
+      averageRate: 40, samples: [{ durationMs: 2000, outputTokens: 80, rate: 40 }] };
+    await show(generating);
+    expect(host.textContent).toContain('session.screen.responseGenerating');
+    await act(async () => vi.advanceTimersByTime(1000));
+    expect(host.textContent).toContain('session.screen.noRecentSample');
+    expect(card()!.textContent).not.toContain('40 tok/s—');
+    await show({ ...generating, phase: 'paused', toolActive: true, recentRate: null });
+    expect(host.textContent).toContain('session.screen.toolRunning');
+    expect(card()!.textContent).toContain('session.screen.toolRunning');
+    await show({ ...generating, phase: 'complete', estimated: false, recentRate: 40 }, false);
+    await act(async () => vi.advanceTimersByTime(60000));
+    expect(host.textContent).toContain('session.screen.lastGeneration');
+    expect(card()!.textContent).toContain('session.screen.finalAverage');
+    await show({ ...speed, sampledAt: Date.now() });
+    expect(host.textContent).not.toContain('session.screen.lastGeneration');
+  } finally { vi.useRealTimers(); }
+});
 
 it.each(["onPress", "onLongPress"])(
   "records the first completed interval before enabling %s, without sampling inactive gaps",
@@ -527,7 +566,7 @@ it("uses paired generation samples, expires recent speed, and isolates a differe
   expect(card()!.textContent).toContain("50");
   expect(card()!.textContent).toContain("75 tok/s");
   expect(card()!.textContent).toContain("100 tok/s");
-  await act(async () => vi.advanceTimersByTime(60_000));
+  await act(async () => vi.advanceTimersByTime(1_000));
   expect(card()!.textContent).toContain("—");
   await render({ key: "other", sessionKey: "account/device/other" });
   expect(card()).toBeNull();

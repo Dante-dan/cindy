@@ -1,3 +1,5 @@
+import { calibratedResponseDuration } from '@cindy/maker-shared/usage-format';
+import { ResponseSpeedTracker } from '../shared/response-speed.js';
 /**
  * pi RPC 事件 → AgentEvent 翻译层。
  *
@@ -160,6 +162,7 @@ export interface PiTranslateContext {
   terminalAssistantErrorEmitted: boolean;
   /** 整轮 wall-clock 起点；只用于诊断，不参与 TPS。 */
   turnWallClockStartedAt: number;
+  responseSpeed: ResponseSpeedTracker;
   generationDurationMs: number;
   /** Open generation interval start; 0 while tools/user waits own the turn. */
   generationOpenAt: number;
@@ -224,6 +227,7 @@ export function createPiTranslateContext(logger: Logger): PiTranslateContext {
     finalAssistantText: '',
     finalAssistantStopReason: null,
     turnWallClockStartedAt: 0,
+    responseSpeed: new ResponseSpeedTracker(),
     generationDurationMs: 0,
     generationOpenAt: 0,
     generationTimingReliable: true,
@@ -332,6 +336,7 @@ function samplePiGenerationHeartbeat(ctx: PiTranslateContext, now = Date.now()):
       PI_GENERATION_HEARTBEAT_MS + PI_GENERATION_SUSPEND_GAP_MS
   ) {
     ctx.generationHeartbeatReliable = false;
+    ctx.responseSpeed.invalidate();
   }
   ctx.generationHeartbeatAt = now;
 }
@@ -356,6 +361,7 @@ export function usageSnapshotOf(ctx: PiTranslateContext): UsageSnapshot {
       costUsd: ctx.costUsd,
     },
     {
+      responseSpeed: ctx.responseSpeed.snapshot(),
       outputTokens: ctx.turnOutput,
       // Pi reports output only at message_end, alongside the closed duration.
       durationMs: ctx.generationDurationMs,
@@ -676,6 +682,7 @@ export function translatePiEvent(
       ctx.pendingAssistantError = null;
       ctx.terminalAssistantErrorEmitted = false;
       ctx.turnWallClockStartedAt = Date.now();
+      ctx.responseSpeed.reset('turn');
       ctx.generationDurationMs = 0;
       ctx.generationTimingReliable = true;
       stopPiGenerationHeartbeat(ctx);
@@ -695,6 +702,9 @@ export function translatePiEvent(
       return;
 
     case 'message_start': {
+      const role = (event.message as { role?: string } | undefined)?.role;
+      if (role && role !== 'assistant') return;
+      ctx.responseSpeed.beginRequest();
       ctx.thinkingBlocks.clear();
       ctx.streamStopTokenByIndex.clear();
       const message = event.message as { usage?: PiUsage } | undefined;
@@ -709,6 +719,10 @@ export function translatePiEvent(
     case 'message_update': {
       const delta = event.assistantMessageEvent as Record<string, unknown> | undefined;
       if (!delta || typeof delta.type !== 'string') return;
+      if (['text_start', 'thinking_start', 'toolcall_start'].includes(delta.type)) ctx.responseSpeed.content();
+      if (['text_delta', 'thinking_delta', 'toolcall_delta'].includes(delta.type) && typeof delta.delta === 'string') {
+        if (ctx.responseSpeed.delta(delta.delta)) pushStatus(queue, ctx, 'Generating...', true);
+      }
       handleAssistantDelta(delta, queue, ctx);
       return;
     }
@@ -716,6 +730,7 @@ export function translatePiEvent(
     case 'message_end': {
       const message = event.message as PiAssistantMessage | undefined;
       if (!message || message.role !== 'assistant') return;
+      ctx.responseSpeed.endResponse(message.usage?.output);
       const pendingPriceVariant = ctx.pendingPriceVariants.shift();
       const reportedPriceVariant = priceVariantFromServiceTier(message.usage?.service_tier);
       const executionPriceVariant = message.usage && ctx.resolveUsagePriceVariant?.({
@@ -788,6 +803,7 @@ export function translatePiEvent(
 
     case 'tool_execution_start': {
       const toolUseId = String(event.toolCallId ?? '');
+      ctx.responseSpeed.toolStarted(toolUseId);
       const toolName = String(event.toolName ?? 'tool');
       const toolArgs = (event.args as Record<string, unknown>) ?? {};
       if (toolUseId) ctx.toolNamesByCallId.set(toolUseId, toolName);
@@ -881,6 +897,7 @@ export function translatePiEvent(
 
     case 'tool_execution_end': {
       const toolUseId = String(event.toolCallId ?? '');
+      ctx.responseSpeed.toolEnded(toolUseId);
       const isError = event.isError === true;
       const rawText = toolResultFullText(event.result);
       const toolName = String(
@@ -948,6 +965,7 @@ export function translatePiEvent(
       ctx.turnSettled = true;
       ctx.isStreaming = false;
       ctx.pendingPriceVariants = [];
+      ctx.responseSpeed.finish();
       stopPiGenerationHeartbeat(ctx);
       const hostAbortRequested = isCurrentTurnHostAbortRequested(ctx);
       const pendingAssistantError = hostAbortRequested ? null : ctx.pendingAssistantError;
@@ -956,6 +974,7 @@ export function translatePiEvent(
       const outputLimited = !hostAbortRequested
         && !ctx.terminalAssistantErrorEmitted
         && ctx.finalAssistantStopReason === 'length';
+      const speedDuration = calibratedResponseDuration(ctx.responseSpeed.snapshot(), ctx.turnOutput);
       const usage = {
         inputTokens: ctx.turnInput,
         outputTokens: ctx.turnOutput,
@@ -963,11 +982,10 @@ export function translatePiEvent(
         cacheCreationTokens: ctx.turnCacheWrite,
         segments: ctx.turnUsageSegments.map((segment) => ({ ...segment })),
         segmentsComplete: ctx.turnUsageSegmentsComplete,
-        // durationMs is deliberately generation-only. If Pi does not report a
-        // per-assistant generation duration, omit it instead of charging tool
-        // execution / user waits to TPS.
-        ...(ctx.generationTimingReliable && ctx.generationDurationMs > 0
-          ? { durationMs: ctx.generationDurationMs }
+        // Persist observed streaming time only after provider usage calibration.
+        // Tools, request waiting and completed-only output have no TPS denominator.
+        ...(speedDuration !== undefined
+          ? { durationMs: speedDuration }
           : {}),
         ...(ctx.turnWallClockStartedAt > 0
           ? { turnDurationMs: Math.max(0, Date.now() - ctx.turnWallClockStartedAt) }
@@ -1036,6 +1054,7 @@ export function translatePiEvent(
     }
 
     case 'auto_retry_start': {
+      ctx.responseSpeed.endResponse();
       // A provider retry may begin without a matching message_end for the
       // failed request. Drop any stale latch so the next request samples its
       // own tariff at message_start.

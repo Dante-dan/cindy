@@ -1421,7 +1421,8 @@ describe('pi translator', () => {
         cacheCreateTokens: 3,
       }),
     ]);
-    expect(usage.durationMs).toBeGreaterThanOrEqual(1_200);
+    // Completed-only frames cannot prove when streaming began.
+    expect(usage.durationMs).toBeUndefined();
     expect(usage.turnDurationMs).toBeGreaterThanOrEqual(0);
     // 快照累计 input+output。
     expect(usageSnapshotOf(ctx).tokenUsage).toBe(120);
@@ -1571,7 +1572,7 @@ describe('pi translator', () => {
     disposePiTranslateContext(ctx);
   });
 
-  it('reads Pi v0.83 generation duration from timestamp with a live heartbeat', () => {
+  it('keeps native timestamp timing but omits TPS without a first-content observation', () => {
     const ctx = createPiTranslateContext(noopLogger);
     const { queue, events } = makeQueue();
     const timestamp = Date.now() - 1_200;
@@ -1592,8 +1593,8 @@ describe('pi translator', () => {
     );
     translatePiEvent(ev({ type: 'agent_settled' }), queue, ctx);
     const usage = (events.find((e) => e.type === 'done')!.data as { usage: Record<string, unknown> }).usage;
-    expect(usage.durationMs).toEqual(expect.any(Number));
-    expect(usage.durationMs).toBeGreaterThanOrEqual(1_200);
+    expect(usage.durationMs).toBeUndefined();
+    expect(usageSnapshotOf(ctx).generationDurationMs).toBeGreaterThanOrEqual(1_200);
     expect(usage.turnDurationMs).toEqual(expect.any(Number));
   });
 

@@ -11,6 +11,14 @@
 
 > **增量适用原则**：wire protocol 兼容对所有跨端改动生效，不因是小改而豁免。
 
+## 回复速度快照
+
+既有 maker status 可选携带 `responseSpeed`（等待边界、估算计数、最近/平均速度与最多
+60 个采样点）；仅用于显示，不参与费用或上下文计数。新客户端校验该字段，旧主机省略时
+沿用原 usage 路径，旧客户端忽略新增字段。无需服务端更新、新通道、权限或数据库 migration。
+终态真实 output 与生成 duration 的匹配沿现有消息用量记录处理。详见
+[`response-speed.md`](response-speed.md)。
+
 ## 任务列表提前同步聊天正文
 
 同账号控制端声明 `session-list-messages-v1` 后，`sessions` 订阅同时接收普通用户／助手

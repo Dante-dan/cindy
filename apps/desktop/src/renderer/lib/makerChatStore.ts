@@ -1,3 +1,4 @@
+import { readResponseSpeedSnapshot, stopResponseSpeed, type ResponseSpeedSnapshot } from '@cindy/maker-shared/usage-format';
 import { readBotTaskResults } from '@cindy/maker-shared/botCollaboration';
 import { remotePluginSetupErrorCode, type PluginSetupCommandError } from './pluginSetupCommandError';
 export type { PluginSetupCommandError } from './pluginSetupCommandError';
@@ -730,6 +731,7 @@ export interface AgentStatus {
   /** Turn-cumulative output tokens for live TPS. */
   outputTokens?: number;
   /** Generation-only milliseconds including any open interval at emit time. */
+  responseSpeed?: ResponseSpeedSnapshot;
   generationDurationMs?: number;
   /** True while the model currently owns the turn. */
   generationActive?: boolean;
@@ -6285,6 +6287,8 @@ export function handleStreamEvent(
         turnStoppedByUser: state.turnStoppedByUser || terminalCancelled,
         agentStatus: {
           ...state.agentStatus,
+          responseSpeed: stopResponseSpeed(state.agentStatus.responseSpeed),
+          generationActive: false,
           isRunning: false,
           startedAt: null,
         },
@@ -6512,6 +6516,8 @@ export function handleStreamEvent(
         // 初始 "Let's go" 文案上 shimmer 闪个不停（done 路径有同样的复位）。
         agentStatus: {
           ...state.agentStatus,
+          responseSpeed: stopResponseSpeed(state.agentStatus.responseSpeed),
+          generationActive: false,
           isRunning: false,
           startedAt: null,
         },
@@ -7024,6 +7030,8 @@ function forceFinalizeOnSessionClosed(state: SessionChatState): SessionChatState
     turnStoppedByUser: false,
     agentStatus: {
       ...finalized.agentStatus,
+      responseSpeed: stopResponseSpeed(finalized.agentStatus.responseSpeed),
+      generationActive: false,
       isRunning: false,
       startedAt: null,
     },
@@ -7036,7 +7044,7 @@ function mergeLiveGenerationStatus(
   previous: AgentStatus,
 ): Pick<
   AgentStatus,
-  'outputTokens' | 'generationDurationMs' | 'generationActive' | 'generationReliable'
+  'outputTokens' | 'generationDurationMs' | 'generationActive' | 'generationReliable' | 'responseSpeed'
 > {
   // Turn start drops leftover metrics from the previous turn, then keeps any
   // live fields carried by this same status. A reconnect-shaped first event
@@ -7044,6 +7052,7 @@ function mergeLiveGenerationStatus(
   // zero the values that just arrived.
   const baseline = isTurnStart
     ? {
+        responseSpeed: undefined,
         outputTokens: 0,
         generationDurationMs: 0,
         generationActive: false,
@@ -7057,6 +7066,9 @@ function mergeLiveGenerationStatus(
     typeof update.generationReliable === 'boolean';
   if (!hasLiveFields) {
     return {
+      responseSpeed: update.isRunning
+        ? readResponseSpeedSnapshot(update.responseSpeed, Date.now()) ?? baseline.responseSpeed
+        : stopResponseSpeed(readResponseSpeedSnapshot(update.responseSpeed, Date.now()) ?? baseline.responseSpeed),
       outputTokens: baseline.outputTokens,
       generationDurationMs: baseline.generationDurationMs,
       generationActive: update.isRunning ? baseline.generationActive : false,
@@ -7064,6 +7076,9 @@ function mergeLiveGenerationStatus(
     };
   }
   const merged = {
+    responseSpeed: update.isRunning
+        ? readResponseSpeedSnapshot(update.responseSpeed, Date.now()) ?? baseline.responseSpeed
+        : stopResponseSpeed(readResponseSpeedSnapshot(update.responseSpeed, Date.now()) ?? baseline.responseSpeed),
     outputTokens:
       typeof update.outputTokens === 'number' ? update.outputTokens : baseline.outputTokens,
     generationDurationMs:
@@ -15598,6 +15613,8 @@ function stopSession(
         costUsd: s.agentStatus.costUsd,
         contextTokens: s.agentStatus.contextTokens,
         contextWindow: s.agentStatus.contextWindow,
+        responseSpeed: stopResponseSpeed(s.agentStatus.responseSpeed),
+        generationActive: false,
         isRunning: false,
         startedAt: null,
       },

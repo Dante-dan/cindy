@@ -39,7 +39,6 @@ import type { UsageTracker } from '../shared/usage-tracker.js';
 import { isModelAccessDenied } from './model-access-error.js';
 import { attachLiveGeneration, sampleGenerationDuration } from '../shared/live-generation-snapshot.js';
 import {
-  beginClaudeGeneration,
   beginClaudeGenerationAtRequestStart,
   finalizeClaudeGeneration,
   markClaudeGenerationUnreliable,
@@ -343,6 +342,7 @@ function ccLiveStatus(
   return {
     status,
     ...attachLiveGeneration(ctx.tracker.snapshot(), {
+      responseSpeed: ctx.rt.generation.responseSpeed.snapshot(),
       outputTokens: mainTurnOutputTokens(ctx.tracker),
       durationMs: ctx.rt.generation.outputDurationMs,
       openStartedAt: ctx.rt.generation.startedAt,
@@ -1689,6 +1689,18 @@ function handleStreamEvent(
     : undefined;
 
   // 冗余 add: 防 SDK 顺序契约变化 (stream_event 先于 assistant message yield), Set 幂等。
+  if (!parentToolUseId && event.type === 'content_block_start') ctx.rt.generation.responseSpeed.content();
+  if (!parentToolUseId && event.type === 'content_block_delta') {
+    const delta = event.delta;
+    const text = delta?.text ?? delta?.thinking ?? delta?.partial_json;
+    if (typeof text === 'string' && ctx.rt.generation.responseSpeed.delta(text)) {
+      queue.push({ type: 'status', data: ccLiveStatus(ctx, 'Generating...', true), source: 'claude-code' });
+    }
+  }
+  if (!parentToolUseId && event.type === 'message_delta') {
+    ctx.rt.generation.responseSpeed.reportOutput(event.usage?.output_tokens);
+    ctx.rt.generation.responseSpeed.pause();
+  }
   if (event.type === 'content_block_start') {
     const cb = event.content_block;
     if (cb && cb.type === 'text') {
@@ -2196,6 +2208,7 @@ function handleResult(
     resultUsage != null && segmentTotals.outputTokens === resultUsage.outputTokens,
   );
   const liveGeneration = ctx.rt.generation;
+  liveGeneration.responseSpeed.finish();
   const endSnapshot = ctx.tracker.endTurn(
     resultUsage
       ? {
@@ -2477,6 +2490,7 @@ function handleResult(
     data: {
       status: 'Done',
       ...attachLiveGeneration(endSnapshot, {
+        responseSpeed: liveGeneration.responseSpeed.snapshot(),
         outputTokens: liveTurnOutput,
         durationMs: liveGeneration.outputDurationMs,
         openStartedAt: null,
@@ -2500,6 +2514,7 @@ function handleResult(
       : msg;
   const resultWithUsageSegments = {
     ...safeResult,
+    responseSpeed: liveGeneration.responseSpeed.snapshot(),
     usageSegments: turnUsageSegments,
     usageSegmentsComplete,
     modelUsageCumulativeStartsAtZero: ctx.modelUsageCumulativeStartsAtZero?.() === true,
