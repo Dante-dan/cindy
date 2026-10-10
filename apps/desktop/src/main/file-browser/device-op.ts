@@ -282,6 +282,7 @@ function setExportJobTerminal(transferId: string, job: ExportJob): void {
 async function sshSearchCollect(
   hostId: string,
   q: { workdir: string; query: string; caseSensitive: boolean; maxMatches: number },
+  gate?: { beforeSend: () => void | Promise<void> },
 ): Promise<{
   matches: SearchMatch[];
   truncated: boolean;
@@ -343,8 +344,10 @@ async function sshSearchCollect(
       resolve({ matches, truncated: true, totalMatches: matches.length, totalFiles: 0 });
     }, SEARCH_COLLECT_TIMEOUT_MS);
     timer.unref?.();
-    void mgr
-      .request(hostId, 'searchStart', q)
+    // 同账号调用保持原三参数形状;共享访客在真正发起搜索前复核授权。
+    void (
+      gate ? mgr.request(hostId, 'searchStart', q, gate) : mgr.request(hostId, 'searchStart', q)
+    )
       .then((r) => {
         searchId = r.searchId;
         // 回放启动窗口内缓冲到的本次事件(可能已含终态)。
@@ -591,15 +594,19 @@ async function handleRemoteOp(args: RemoteOpArgs): Promise<unknown> {
           message: 'nested SSH workdir',
         };
       case 'searchCollect':
-        return sshSearchCollect(hostId, {
-          workdir,
-          query: args.query ?? '',
-          caseSensitive: args.caseSensitive === true,
-          maxMatches: Math.min(
-            args.maxMatches ?? SEARCH_COLLECT_MAX_MATCHES,
-            SEARCH_COLLECT_MAX_MATCHES,
-          ),
-        });
+        return sshSearchCollect(
+          hostId,
+          {
+            workdir,
+            query: args.query ?? '',
+            caseSensitive: args.caseSensitive === true,
+            maxMatches: Math.min(
+              args.maxMatches ?? SEARCH_COLLECT_MAX_MATCHES,
+              SEARCH_COLLECT_MAX_MATCHES,
+            ),
+          },
+          gate,
+        );
       default:
         return bad(`unknown op: ${args.op}`);
     }

@@ -2824,9 +2824,11 @@ async function handleInvoke(
   if (payload && (payload.channel === DL_SUBSCRIBE_CHANNEL || payload.channel === DL_UNSUBSCRIBE_CHANNEL)) {
     // Only a shared-task workdir watch awaits; every other frame stays synchronous.
     const admitting = admitSharedTaskSubscription(src, payload);
-    const admission = admitting ? await admitting : null;
+    const settle = admitting ? await admitting : null;
     // The workdir lookup is an await boundary; a frame from a replaced link must not subscribe.
-    if (admission && (remoteInvokeLinkEpoch.get(src) ?? 0) !== invokeLinkEpoch) return;
+    if (settle && (remoteInvokeLinkEpoch.get(src) ?? 0) !== invokeLinkEpoch) return;
+    // Settled synchronously with the install below: no workdir move can slip between them.
+    const admission = settle?.();
     const result = handleSubscriptionFrame(src, admission?.payload ?? payload, admission?.verifiedFsWatchTopics);
     if (!await sendAuthorizedInvokeResultSafe(
       client,
@@ -3884,12 +3886,14 @@ function isRemoteSubscriptionTopic(value: unknown): value is Topic {
 /**
  * Shared-task guests may watch only their task workdir. That binding needs the
  * host DB, so it runs before the synchronous frame handler. Returns null when
- * no admission is needed, so ordinary frames never cross an await.
+ * no admission is needed, so ordinary frames never cross an await. The result
+ * is settled synchronously at install time: if the task workdir moved during
+ * the lookup, the watch topics are dropped and the rest of the frame proceeds.
  */
 function admitSharedTaskSubscription(
   src: string,
   payload: InvokePayload,
-): Promise<{ payload: InvokePayload; verifiedFsWatchTopics: ReadonlySet<string> }> | null {
+): Promise<() => { payload: InvokePayload; verifiedFsWatchTopics: ReadonlySet<string> }> | null {
   const rawArg = (payload.args ?? [])[0];
   const arg = rawArg && typeof rawArg === 'object' && !Array.isArray(rawArg)
     ? rawArg as Record<string, unknown> : null;
@@ -3903,14 +3907,19 @@ function admitSharedTaskSubscription(
   const sharedTask = captureSharedTaskPeer(src);
   // The synchronous gate reports the access failure.
   if (!sharedTask) return null;
+  const withTopics = (next: unknown[]): InvokePayload =>
+    ({ ...payload, args: [{ ...arg, topics: next }, ...(payload.args ?? []).slice(1)] });
   return admitSharedTaskFsWatchTopics(sharedTask, topics).then(
-    (admitted) => ({
-      payload: { ...payload, args: [{ ...arg, topics: admitted.topics }, ...(payload.args ?? []).slice(1)] },
-      verifiedFsWatchTopics: admitted.verified,
-    }),
+    (admitted) => () => admitted.isFresh()
+      ? { payload: withTopics(admitted.topics), verifiedFsWatchTopics: admitted.verified }
+      : {
+        payload: withTopics(admitted.topics.filter((topic) =>
+          typeof topic !== 'string' || parseFsWatchTopic(topic) === null)),
+        verifiedFsWatchTopics: new Set<string>(),
+      },
     (error: unknown) => {
       log.warn(`shared task fs-watch admission failed for ${shortId(src)}: ${String(error)}`);
-      return { payload, verifiedFsWatchTopics: new Set<string>() };
+      return () => ({ payload, verifiedFsWatchTopics: new Set<string>() });
     },
   );
 }

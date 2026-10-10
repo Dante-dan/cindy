@@ -87,17 +87,26 @@ export function sharedTaskFileOperation(op: unknown): 'file.read' | 'file.write'
   return fileReadOps.has(op) ? 'file.read' : fileWriteOps.has(op) ? 'file.write' : null;
 }
 
+// Bumped synchronously on every workdir patch. Watch admission captures it
+// before its DB read and re-checks it at install time, so a move that lands
+// during the lookup cannot install a watch on the former directory.
+const workdirGenerations = new Map<string, number>();
+export function sharedTaskWorkdirGeneration(sessionId: string): number {
+  return workdirGenerations.get(sessionId) ?? 0;
+}
+
 /**
  * A watch was admitted for the task workdir at subscribe time. When the owner
  * moves the task, release guest watches on any other directory so they stop
  * streaming the old one; the guest client re-subscribes to the new workdir
- * through the normal admission.
+ * through the normal admission. (`remoteHostId` never changes after creation.)
  */
 export function releaseSharedTaskWatchesOnWorkdirChange(channel: string, payload: unknown): void {
   if (channel !== 'local-db:sessions:patched') return;
   const row = record(payload);
   const patch = record(row?.patch);
   if (typeof row?.sessionId !== 'string' || !patch || !Object.prototype.hasOwnProperty.call(patch, 'workingDir')) return;
+  workdirGenerations.set(row.sessionId, sharedTaskWorkdirGeneration(row.sessionId) + 1);
   const next = normalizeWorkingDirForStorage(typeof patch.workingDir === 'string' ? patch.workingDir : null);
   const peers = new Set([...subscriptions.getControllerIds(), ...subscriptions.getKnownControllerIds()]);
   for (const peer of peers) {

@@ -301,6 +301,34 @@ describe('file-browser device-op', () => {
       expect(guardMock).not.toHaveBeenCalled();
     });
 
+    it('gates an SSH search start like every other SSH request', async () => {
+      sharedWorkdirMock.mockImplementation(async () => {
+        if (!current) throw new Error('[PERMISSION_DENIED] Shared task access changed');
+        return { remoteHostId: 'host-1' };
+      });
+      const started = vi.fn();
+      sshRequestMock.mockImplementation(
+        async (
+          _h: string,
+          method: string,
+          _p: unknown,
+          options?: { beforeSend?: () => void | Promise<void> },
+        ) => {
+          current = false;
+          await options?.beforeSend?.();
+          started(method);
+          return { searchId: 's-1' };
+        },
+      );
+      await expect(
+        asGuest(() =>
+          handleRemoteOp({ op: 'searchCollect', workdir: '/remote/proj', query: 'needle' }),
+        ),
+      ).rejects.toThrow('PERMISSION_DENIED');
+      expect(started).not.toHaveBeenCalled();
+      sshRequestMock.mockReset();
+    });
+
     it('routes by the recorded task endpoint instead of reverse-resolving the path', async () => {
       // The path exists locally and is also recorded for an SSH session: same-account
       // controllers still see an ambiguous endpoint, a guest of the local task does not.

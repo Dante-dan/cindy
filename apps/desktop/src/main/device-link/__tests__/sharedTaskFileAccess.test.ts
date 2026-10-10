@@ -5,6 +5,7 @@ const snapshot = vi.hoisted(() => vi.fn());
 vi.mock('../../localDb/ipc/sessions.js', () => ({ getSessionFsSnapshot: snapshot }));
 
 import { admitSharedTaskFsWatchTopics, assertSharedTaskWorkdir } from '../sharedTaskFileAccess.js';
+import { releaseSharedTaskWatchesOnWorkdirChange } from '../sharedTaskDispatch.js';
 
 function capture(overrides: Partial<SharedTaskPeerCapture> = {}): SharedTaskPeerCapture {
   return {
@@ -50,7 +51,24 @@ describe('shared task workdir binding', () => {
     expect(admitted.topics).toEqual(['session:task', 'fs-watch:/host/task']);
     expect([...admitted.verified]).toEqual(['fs-watch:/host/task']);
     const denied = await admitSharedTaskFsWatchTopics(capture({ authorize: () => false }), ['session:task', 'fs-watch:/host/task']);
-    expect(denied).toEqual({ topics: ['session:task'], verified: new Set() });
+    expect(denied).toMatchObject({ topics: ['session:task'], verified: new Set() });
+  });
+
+  it('marks an admission stale when the task workdir moves during the lookup', async () => {
+    const steady = await admitSharedTaskFsWatchTopics(capture(), ['fs-watch:/host/task']);
+    expect(steady.isFresh()).toBe(true);
+    snapshot.mockImplementationOnce(async () => {
+      // The owner moves the task while the guest's admission reads the DB.
+      releaseSharedTaskWatchesOnWorkdirChange('local-db:sessions:patched', { sessionId: 'task', patch: { workingDir: '/host/moved' } });
+      return { workingDir: '/host/task', remoteHostId: null };
+    });
+    const raced = await admitSharedTaskFsWatchTopics(capture(), ['fs-watch:/host/task']);
+    expect([...raced.verified]).toEqual(['fs-watch:/host/task']);
+    expect(raced.isFresh()).toBe(false);
+    // An unrelated task's move does not invalidate this one.
+    const other = await admitSharedTaskFsWatchTopics(capture(), ['fs-watch:/host/task']);
+    releaseSharedTaskWatchesOnWorkdirChange('local-db:sessions:patched', { sessionId: 'other', patch: { workingDir: '/x' } });
+    expect(other.isFresh()).toBe(true);
   });
 
   it('never looks up an oversized topic frame', async () => {
