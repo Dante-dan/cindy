@@ -10049,9 +10049,11 @@
       "streamWaitDescription": "從 SDK 串流開始到首個內容區塊，之前的請求等待無法測量。",
       "lastGeneration": "上次生成",
       "finalAverage": "最終平均",
-      "noRecentSample": "暫未收到新輸出",
       "generationPaused": "生成暫停",
       "responsePending": "等待回應",
+      "responseFailed": "請求失敗",
+      "responseCancelled": "已停止",
+      "responseRetrying": "正在重試",
       "responseGenerating": "正在生成",
       "toolRunning": "執行工具中"
     },

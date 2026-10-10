@@ -10072,9 +10072,11 @@
       "streamWaitDescription": "From SDK stream start to the first content block. The earlier request wait is not observable.",
       "lastGeneration": "Last generation",
       "finalAverage": "Final average",
-      "noRecentSample": "No new output received",
       "generationPaused": "Generation paused",
       "responsePending": "Waiting for response",
+      "responseFailed": "Request failed",
+      "responseCancelled": "Stopped",
+      "responseRetrying": "Retrying",
       "responseGenerating": "Generating",
       "toolRunning": "Running tool"
     },

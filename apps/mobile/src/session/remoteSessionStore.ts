@@ -1,4 +1,4 @@
-import { readResponseSpeedSnapshot, stopResponseSpeed, type ResponseSpeedSnapshot } from '@cindy/maker-shared/usage-format';
+import { readResponseSpeedSnapshot, stopResponseSpeed, retryResponseSpeed, resumeResponseSpeed, mergeResponseSpeedStatus, type ResponseSpeedSnapshot } from '@cindy/maker-shared/usage-format';
 import { normalizeTaskTags, reconcileTaskTags } from '@cindy/maker-shared';
 import {
   createContext,
@@ -4728,6 +4728,15 @@ export const remoteSessionStore = {
       ? clearSessionReconnectAttempt(sessionId)
       : false;
     const fullMessageWriteAllowed = fromList || messageWriteAllowed(sessionId);
+    const outputData = isRecord(event.data) ? event.data : null;
+    if (((type === 'text' || type === 'thinking') && readString(outputData, 'text')) || type === 'tool_use') {
+      const current = readSessionRunStatus(sessionId);
+      const responseSpeed = resumeResponseSpeed(current.responseSpeed);
+      if (responseSpeed !== current.responseSpeed) {
+        writeSessionRunStatus(sessionId, { ...current, responseSpeed });
+        emit();
+      }
+    }
     if (type === 'text') {
       if (!fullMessageWriteAllowed) {
         if (reconnectCleared) emit();
@@ -4810,11 +4819,20 @@ export const remoteSessionStore = {
           }
         }
       }
-      const terminalErrorChanged = isTerminalMakerErrorEvent(event)
-        && writeSessionRunStatus(sessionId, {
-          ...readSessionRunStatus(sessionId),
-          hasTerminalError: true,
-        });
+      const terminalData = isRecord(event.data) ? event.data : null;
+      const rawTurn = isRecord(terminalData?.raw) ? terminalData.raw : null;
+      const current = readSessionRunStatus(sessionId);
+      const cancelled = (!current.isRunning && current.responseSpeed?.outcome === 'cancelled') ||
+        terminalData?.cancelled === true || terminalData?.status === 'cancelled' ||
+        terminalData?.reason === 'send_cancelled_before_acceptance' ||
+        terminalData?.reason === 'turn_continuation_cancelled' ||
+        terminalData?.reason === 'user_stop_unconfirmed_wake_tasks';
+      const failed = !cancelled && (isTerminalMakerErrorEvent(event) || rawTurn?.status === 'failed' || terminalData?.status === 'failed');
+      const terminalErrorChanged = writeSessionRunStatus(sessionId, {
+        ...current,
+        ...(cancelled ? { hasTerminalError: false } : failed ? { hasTerminalError: true } : {}),
+        responseSpeed: stopResponseSpeed(current.responseSpeed, cancelled ? 'cancelled' : failed ? 'failed' : undefined),
+      });
       this.setSessionRunning(
         sessionId,
         false,
@@ -4841,6 +4859,7 @@ export const remoteSessionStore = {
         ...current,
         isRunning: true,
         reconnectAttempt,
+        responseSpeed: data?.willRetry === true ? retryResponseSpeed(current.responseSpeed) : current.responseSpeed,
         startedAt: current.startedAt ?? Date.now(),
       });
       if (changed || textFlushed) emit();
@@ -5018,7 +5037,8 @@ export const remoteSessionStore = {
         status: rawStatus ?? current.status,
         tokenUsage,
         outputTokens,
-        responseSpeed: readResponseSpeedSnapshot(data?.responseSpeed, Date.now()) ?? (isTurnStart ? undefined : current.responseSpeed),
+        responseSpeed: mergeResponseSpeedStatus(current.responseSpeed,
+          readResponseSpeedSnapshot(data?.responseSpeed, Date.now()), isRunning, isTurnStart),
         generationDurationMs,
         generationActive,
         generationReliable,

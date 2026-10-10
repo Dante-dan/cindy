@@ -107,3 +107,43 @@ it('Codex counts the shared snapshot/delta cursor once and pauses while tools ow
   beginCodexGenerationTurn(rt, 'next', 16_000);
   pauseCodexGeneration(rt, 'next', 'cleanup', 16_000);
 });
+
+it('Pi publishes even an unclassified native retry without adding an error banner, then recovers on content', () => {
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(1000);
+  const { queue, events } = harness();
+  const ctx = createPiTranslateContext(log as unknown as Logger);
+  try {
+    translatePiEvent({ type: 'agent_start' } as PiRpcEvent, queue, ctx);
+    clock.mockReturnValue(2000);
+    translatePiEvent({ type: 'auto_retry_start', attempt: 1, maxAttempts: 3,
+      errorMessage: 'unclassified upstream error' } as PiRpcEvent, queue, ctx);
+    expect(events.filter(event => event.type === 'error')).toHaveLength(0);
+    expect(events.filter(event => event.type === 'status').at(-1)?.data).toMatchObject({
+      responseSpeed: { retrying: true, recentRate: null } });
+    clock.mockReturnValue(12000);
+    translatePiEvent({ type: 'message_start', message: { role: 'assistant' } } as PiRpcEvent, queue, ctx);
+    translatePiEvent({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'recovered' } } as PiRpcEvent, queue, ctx);
+    expect(usageSnapshotOf(ctx).responseSpeed).toMatchObject({ retrying: false, durationMs: 0 });
+  } finally { disposePiTranslateContext(ctx); }
+});
+
+it('Claude publishes its first native retry without an error banner and excludes backoff from generation', () => {
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(1000);
+  const { queue, events } = harness();
+  const turn: TurnState = { text: '', toolUses: 0, apiCalls: 0, sawCompactBoundary: false,
+    hasEmittedText: false, uiEmittedText: '', pendingApiError: null, interruptRequested: false,
+    generation: 0, interruptGeneration: 0, lastAssistantMsgHadSubstance: true };
+  const ctx = { rt: newRuntimeState(), turn, log, getModel: () => 'test-model',
+    getEffort: () => 'high', getPermissionMode: () => 'auto', onSessionId: vi.fn(),
+    getSdkSessionId: () => undefined, getLogTitle: () => undefined, tracker: new UsageTracker() };
+  translateSdkMessage({ type: 'system', subtype: 'api_retry', attempt: 1, max_retries: 3,
+    retry_delay_ms: 10000, error_status: 500, error: 'api_error' }, queue, ctx);
+  expect(events.filter(event => event.type === 'error')).toHaveLength(0);
+  expect(events.filter(event => event.type === 'status').at(-1)?.data).toMatchObject({
+    responseSpeed: { retrying: true, recentRate: null } });
+  clock.mockReturnValue(12000);
+  translateSdkMessage({ type: 'stream_event', event: { type: 'message_start', message: { id: 'recovered' } } }, queue, ctx);
+  translateSdkMessage({ type: 'stream_event', event: { type: 'content_block_start', content_block: { type: 'text' } } }, queue, ctx);
+  expect(ctx.rt.generation.responseSpeed.snapshot().retrying).not.toBe(true);
+  expect(ctx.rt.generation.responseSpeed.snapshot().durationMs).toBe(0);
+});

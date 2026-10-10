@@ -277,9 +277,11 @@
     "streamWaitDescription": "SDK ストリーム開始から最初のコンテンツまで。それ以前のリクエスト待機は測定できません。",
     "lastGeneration": "前回の生成",
     "finalAverage": "最終平均",
-    "noRecentSample": "新しい出力を受信していません",
     "generationPaused": "生成を一時停止",
     "responsePending": "応答待ち",
+    "responseFailed": "リクエスト失敗",
+    "responseCancelled": "停止済み",
+    "responseRetrying": "再試行中",
     "responseGenerating": "生成中",
     "toolRunning": "ツール実行中"
   },

@@ -128,6 +128,8 @@ vi.mock("react-i18next", () => ({
     t: (key: string, args?: any) =>
       key.endsWith("tokenRate")
         ? `${args.rate} tok/s`
+        : key.endsWith("estimatedValue")
+          ? `≈${args.value}`
         : key.endsWith("tokenCount")
           ? `${args.tokens} tok`
           : key,
@@ -226,7 +228,7 @@ it('shows waiting, execution, silent output and retained completion consistently
     await show(generating);
     expect(host.textContent).toContain('session.screen.responseGenerating');
     await act(async () => vi.advanceTimersByTime(1000));
-    expect(host.textContent).toContain('session.screen.noRecentSample');
+    expect(host.textContent).toContain('session.screen.responsePending');
     expect(card()!.textContent).not.toContain('40 tok/s—');
     await show({ ...generating, phase: 'paused', toolActive: true, recentRate: null });
     expect(host.textContent).toContain('session.screen.toolRunning');
@@ -628,4 +630,22 @@ it("moves screen reader focus into the pinned card and back to the trigger, exce
   await act(async () => harness.outsideTap!.onOutsideTap());
   expect(card()).toBeNull();
   expect(harness.focus).toEqual(["text:session.screen.currentRate"]);
+});
+
+it.each(['failed', 'cancelled', 'retrying'] as const)('shows %s consistently in the mobile retained entry and card', async (activity) => {
+  const terminal = activity !== 'retrying';
+  const key = activity === 'failed' ? 'responseFailed' : activity === 'cancelled' ? 'responseCancelled' : 'responseRetrying';
+  const speed: ResponseSpeedSnapshot = { phase: terminal ? 'complete' : 'paused', waitOrigin: 'turn',
+    firstResponseMs: 1000, waitingMs: 0, durationMs: 2000, outputTokens: 80, estimated: true,
+    recentRate: null, averageRate: 40, samples: [{ durationMs: 2000, outputTokens: 80, rate: 40 }], sampledAt: Date.now(),
+    ...(terminal ? { outcome: activity as 'failed' | 'cancelled' } : { retrying: true }),
+  };
+  await act(async () => root.render(createElement(ActivityStatus, { ...base, visible: !terminal,
+    tokenUsage: 500, sideTaskRunning: false, reconnectAttempt: null, responseSpeed: speed })));
+  expect(host.textContent).toContain(`session.screen.${key}`);
+  expect(host.textContent).not.toContain('session.screen.lastGeneration');
+  await gesture('onPressIn'); await gesture('onPress');
+  expect(card()!.textContent).toContain(`session.screen.${key}`);
+  expect(card()!.textContent).not.toContain('session.screen.finalAverage');
+  expect(card()!.textContent).toContain('40');
 });

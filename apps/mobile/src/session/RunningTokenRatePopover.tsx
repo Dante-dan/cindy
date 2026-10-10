@@ -307,11 +307,14 @@ export function RunningTokenRatePopover({
         <View style={styles.top}>
           <View style={styles.metric}>
             <Text ref={cardFocusTarget} style={styles.label}>
-              {t(activity === 'complete' ? 'session.screen.finalAverage'
+              {t(activity === 'failed' ? 'session.screen.responseFailed'
+              : activity === 'cancelled' ? 'session.screen.responseCancelled'
+                : activity === 'retrying' ? 'session.screen.responseRetrying'
+                  : activity === 'complete' ? 'session.screen.finalAverage'
                 : activity === 'waiting' ? 'session.screen.responsePending'
                   : activity === 'tool' ? 'session.screen.toolRunning'
                     : activity === 'paused' ? 'session.screen.generationPaused'
-                      : activity === 'quiet' ? 'session.screen.noRecentSample' : 'session.screen.currentRate')}
+                      : activity === 'quiet' ? 'session.screen.responsePending' : 'session.screen.currentRate')}
             </Text>
             <Text style={styles.value}>
               {recent === null ? '—' : approximate(formatTokenRate(recent), Boolean(responseSpeed) && (responseSpeed?.phase !== 'complete' || responseSpeed.estimated))}{" "}

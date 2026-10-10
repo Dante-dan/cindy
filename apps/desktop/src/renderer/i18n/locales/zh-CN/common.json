@@ -10050,9 +10050,11 @@
       "streamWaitDescription": "从 SDK 流开始到首个内容块，之前的请求等待不可测。",
       "lastGeneration": "上次生成",
       "finalAverage": "最终平均",
-      "noRecentSample": "暂未收到新输出",
       "generationPaused": "生成暂停",
       "responsePending": "等待响应",
+      "responseFailed": "请求失败",
+      "responseCancelled": "已停止",
+      "responseRetrying": "正在重试",
       "responseGenerating": "正在生成",
       "toolRunning": "执行工具中"
     },

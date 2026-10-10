@@ -12116,10 +12116,12 @@ function ComposerActivityStatus({
   if (!visible && !completedSpeed) return null;
 
   const elapsedText = completedSpeed
-    ? t('session.screen.lastGeneration')
+    ? t(responseSpeed?.outcome === 'failed' ? 'session.screen.responseFailed'
+      : responseSpeed?.outcome === 'cancelled' ? 'session.screen.responseCancelled' : 'session.screen.lastGeneration')
+    : speedActivity === 'retrying' ? t('session.screen.responseRetrying')
     : responseSpeed?.phase === 'waiting'
     ? t('session.screen.responseWaiting', { seconds: ((responseSpeed.waitingMs + Math.max(0, Date.now() - responseSpeed.sampledAt)) / 1000).toFixed(1) })
-    : speedActivity === 'quiet' ? t('session.screen.noRecentSample') : formatComposerActivityElapsed(elapsed);
+    : speedActivity === 'quiet' ? t('session.screen.responsePending') : formatComposerActivityElapsed(elapsed);
   const tokenCount = formatComposerActivityTokenCount(tokenUsage);
   const tokenText = t('session.screen.tokenCount', { tokens: tokenCount });
   const tokenA11yText = t('session.screen.tokenCountFull', { tokens: tokenCount });
@@ -12178,8 +12180,10 @@ function ComposerActivityStatus({
             ? 'session.screen.rateLimitRetrying'
             : 'session.screen.networkReconnecting',
       )
-    : t(speedActivity === 'waiting' ? 'session.screen.responsePending'
-      : speedActivity === 'quiet' ? 'session.screen.noRecentSample'
+    : t(speedActivity === 'failed' ? 'session.screen.responseFailed'
+      : speedActivity === 'cancelled' ? 'session.screen.responseCancelled'
+        : speedActivity === 'retrying' ? 'session.screen.responseRetrying'
+          : speedActivity === 'waiting' || speedActivity === 'quiet' ? 'session.screen.responsePending'
         : speedActivity === 'tool' ? 'session.screen.toolRunning'
           : speedActivity === 'paused' ? 'session.screen.generationPaused'
             : speedActivity === 'generating' ? 'session.screen.responseGenerating' : 'session.screen.thinking');

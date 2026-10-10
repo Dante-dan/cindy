@@ -284,7 +284,7 @@ it('expires a stalled live rate while preserving an inspectable curve, and disti
     fireEvent.click(view.container.querySelector('[data-running-status-meta] button')!);
     expect(screen.getByRole('dialog').textContent).toContain('chat.runningStatus.currentRate');
     act(() => vi.advanceTimersByTime(1000));
-    expect(screen.getByRole('dialog').textContent).toContain('chat.runningStatus.noRecentSample');
+    expect(screen.getByRole('dialog').textContent).toContain('chat.runningStatus.responsePending');
     expect(view.container.querySelector('[data-running-status-meta] button')?.textContent)
       .not.toContain('chat.runningStatus.estimatedTokenRate');
     view.rerender(<RunningStatusBar {...props} status="Tool running"
@@ -299,4 +299,24 @@ it('expires a stalled live rate while preserving an inspectable curve, and disti
     expect(view.container.textContent).toContain('chat.runningStatus.responsePending');
     expect(screen.getByRole('dialog').textContent).toContain('chat.runningStatus.responsePending');
   } finally { vi.useRealTimers(); }
+});
+
+it.each(['failed', 'cancelled', 'retrying'] as const)('shows %s consistently in the retained entry and card', (activity) => {
+  const terminal = activity !== 'retrying';
+  const key = activity === 'failed' ? 'responseFailed' : activity === 'cancelled' ? 'responseCancelled' : 'responseRetrying';
+  const speed: import('@cindy/maker-shared/usage-format').ResponseSpeedSnapshot = {
+    phase: terminal ? 'complete' : 'paused', waitOrigin: 'turn', firstResponseMs: 1000, waitingMs: 0,
+    durationMs: 2000, outputTokens: 80, estimated: true, recentRate: null, averageRate: 40,
+    samples: [{ durationMs: 2000, outputTokens: 80, rate: 40 }], sampledAt: Date.now(),
+    ...(terminal ? { outcome: activity as 'failed' | 'cancelled' } : { retrying: true }),
+  };
+  const view = render(<RunningStatusBar visible={!terminal} status="Done" startedAt={null}
+    tokenUsage={500} outputTokens={80} generationDurationMs={2000} responseSpeed={speed} />);
+  const trigger = view.container.querySelector('[data-running-status-meta] button')!;
+  expect(trigger.textContent).toContain(`chat.runningStatus.${key}`);
+  expect(trigger.textContent).not.toContain('chat.runningStatus.tokenRate');
+  fireEvent.click(trigger);
+  expect(screen.getByRole('dialog').textContent).toContain(`chat.runningStatus.${key}`);
+  expect(screen.getByRole('dialog').textContent).not.toContain('chat.runningStatus.finalAverage');
+  expect(screen.getByRole('dialog').textContent).toContain('40');
 });

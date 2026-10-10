@@ -6123,13 +6123,15 @@ function RunningStatusBar({
 
   // side-task / 后台子任务运行中永远当成进行态 (即便上一轮 LLM 留下的 status 文案
   // 是 "Done", 此时任务还在跑, 显示 ✓ 完成图标会让用户以为已经做完)。
-  const isDone = status === 'Done' && !reconnecting && !sideTaskRunning && !backgroundTasksRunning;
+  const isDone = status === 'Done' && !responseSpeed?.outcome && !responseSpeed?.retrying && !reconnecting && !sideTaskRunning && !backgroundTasksRunning;
   // 后台子任务模式的左段文案:上一轮残留的 status(多半是 "Done")在此语义下是
   // 误导信息,整体替换为后台运行提示。仅后台 Bash 时用带数量的专属文案 ——
   // 「模型用量仍在消耗」对不调模型的 bash 任务是错误陈述。
   const speedActivity = responseSpeed ? responseSpeedActivity(responseSpeed) : null;
-  const speedStatusKey = speedActivity === 'waiting' ? 'responsePending'
-    : speedActivity === 'quiet' ? 'noRecentSample'
+  const speedStatusKey = speedActivity === 'failed' ? 'responseFailed'
+    : speedActivity === 'cancelled' ? 'responseCancelled'
+      : speedActivity === 'retrying' ? 'responseRetrying'
+        : speedActivity === 'waiting' || speedActivity === 'quiet' ? 'responsePending'
       : speedActivity === 'tool' ? 'toolRunning'
         : speedActivity === 'paused' ? 'generationPaused'
           : speedActivity === 'generating' ? 'responseGenerating' : null;
@@ -6332,7 +6334,11 @@ function RunningStatusBar({
             {showRatePanel && (
               <RunningTokenRatePopover
                 responseSpeed={responseSpeed}
-                elapsedText={completedSpeed ? t('chat.runningStatus.lastGeneration') : waitingText ?? (speedActivity === 'quiet' ? t('chat.runningStatus.noRecentSample') : elapsedText)}
+                elapsedText={completedSpeed
+                  ? t(responseSpeed?.outcome === 'failed' ? 'chat.runningStatus.responseFailed'
+                    : responseSpeed?.outcome === 'cancelled' ? 'chat.runningStatus.responseCancelled' : 'chat.runningStatus.lastGeneration')
+                  : speedActivity === 'retrying' ? t('chat.runningStatus.responseRetrying')
+                    : waitingText ?? (speedActivity === 'quiet' ? t('chat.runningStatus.responsePending') : elapsedText)}
                 rate={latestRateText}
                 rateText={
                   workflowWaiting || sideTaskRunning || backgroundTasksRunning

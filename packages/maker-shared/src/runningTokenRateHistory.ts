@@ -21,11 +21,17 @@ export interface ResponseSpeedSnapshot {
   hasRecentOutput?: boolean;
   /** Explicit native tool execution, distinct from streamed tool arguments. */
   toolActive?: boolean;
+  /** Display annotation from an explicit terminal event, never inferred from silence. */
+  outcome?: 'failed' | 'cancelled';
+  /** True requires an explicit retry event; false can acknowledge native recovery. */
+  retrying?: boolean;
 }
 
 export function responseSpeedActivity(speed: ResponseSpeedSnapshot, now = Date.now()):
-  'waiting' | 'generating' | 'quiet' | 'tool' | 'paused' | 'complete' {
-  if (speed.phase === 'complete' || speed.phase === 'waiting') return speed.phase;
+  'waiting' | 'generating' | 'quiet' | 'tool' | 'paused' | 'complete' | 'failed' | 'cancelled' | 'retrying' {
+  if (speed.phase === 'complete') return speed.outcome ?? 'complete';
+  if (speed.retrying) return 'retrying';
+  if (speed.phase === 'waiting') return 'waiting';
   if (speed.phase === 'paused') return speed.toolActive ? 'tool' : 'paused';
   return now - speed.sampledAt < RATE_SAMPLE_FRESH_MS &&
     (speed.hasRecentOutput ?? speed.recentRate !== null) ? 'generating' : 'quiet';
@@ -36,7 +42,7 @@ export function responseSpeedHistory(speed: ResponseSpeedSnapshot, now = Date.no
     ...emptyRateHistory(null),
     samples: speed.samples,
     peak: Math.max(0, ...speed.samples.map((sample) => sample.rate)),
-    latestRate: speed.phase === 'generating' && now - speed.sampledAt >= RATE_SAMPLE_FRESH_MS ? null : speed.recentRate,
+    latestRate: speed.outcome || speed.retrying || (speed.phase === 'generating' && now - speed.sampledAt >= RATE_SAMPLE_FRESH_MS) ? null : speed.recentRate,
     latestSampleAt: speed.sampledAt,
   };
 }
@@ -51,6 +57,8 @@ export function readResponseSpeedSnapshot(value: unknown, observedAt?: number): 
     !finite(speed.waitingMs) || !finite(speed.outputTokens) || !finite(speed.durationMs) ||
     !finite(speed.sampledAt) || (speed.hasRecentOutput !== undefined && typeof speed.hasRecentOutput !== 'boolean') ||
     (speed.toolActive !== undefined && typeof speed.toolActive !== 'boolean') ||
+    (speed.outcome !== undefined && !['failed', 'cancelled'].includes(speed.outcome)) ||
+    (speed.retrying !== undefined && typeof speed.retrying !== 'boolean') ||
     (speed.firstResponseMs !== null && !finite(speed.firstResponseMs)) ||
     (speed.recentRate !== null && !finite(speed.recentRate)) ||
     (speed.averageRate !== null && !finite(speed.averageRate)) || !Array.isArray(speed.samples)) return undefined;
@@ -59,16 +67,48 @@ export function readResponseSpeedSnapshot(value: unknown, observedAt?: number): 
 }
 
 /** Terminal errors/abort can lack a final provider snapshot. Freeze the last observation. */
-export function stopResponseSpeed(speed: ResponseSpeedSnapshot | undefined): ResponseSpeedSnapshot | undefined {
+export function stopResponseSpeed(speed: ResponseSpeedSnapshot | undefined, outcome?: ResponseSpeedSnapshot['outcome']): ResponseSpeedSnapshot | undefined {
+  if (!speed || (speed.phase === 'complete' && (!outcome || speed.outcome === outcome))) return speed;
+  const terminalOutcome = outcome ?? speed.outcome;
+  return { ...speed, phase: 'complete', ...(terminalOutcome ? { outcome: terminalOutcome } : {}), retrying: false,
+    recentRate: terminalOutcome ? null : speed.averageRate,
+    estimated: Boolean(terminalOutcome) || speed.estimated || speed.phase === 'generating' || speed.phase === 'waiting' };
+}
+
+/** Pause displayed generation only after an explicit automatic retry event. */
+export function retryResponseSpeed(speed: ResponseSpeedSnapshot | undefined): ResponseSpeedSnapshot | undefined {
   if (!speed || speed.phase === 'complete') return speed;
-  return { ...speed, phase: 'complete', recentRate: speed.averageRate,
-    estimated: speed.estimated || speed.phase === 'generating' || speed.phase === 'waiting' };
+  return { ...speed, phase: 'paused', retrying: true, recentRate: null,
+    hasRecentOutput: false };
+}
+
+/** Actual output ends the retry annotation without inventing a throughput sample. */
+export function resumeResponseSpeed(speed: ResponseSpeedSnapshot | undefined): ResponseSpeedSnapshot | undefined {
+  return speed?.retrying && speed.phase !== 'complete'
+    ? { ...speed, phase: speed.toolActive ? 'paused' : 'generating', retrying: false, hasRecentOutput: false, recentRate: null }
+    : speed;
+}
+
+/** Preserve terminal/retry annotations across ordinary status tails; a new turn clears them. */
+export function mergeResponseSpeedStatus(previous: ResponseSpeedSnapshot | undefined,
+  incoming: ResponseSpeedSnapshot | undefined, isRunning: boolean, isTurnStart: boolean): ResponseSpeedSnapshot | undefined {
+  const baseline = isTurnStart ? undefined : previous;
+  const next = incoming ?? baseline;
+  if (!isRunning) return stopResponseSpeed(next, baseline?.outcome);
+  if (baseline?.retrying && next && incoming?.retrying !== false) {
+    // Usage calibration can raise tokens without any new output. Only a new
+    // stream sample or explicit tool execution can recover a status-only view.
+    const newSample = next.hasRecentOutput === true &&
+      (next.samples.at(-1)?.durationMs ?? 0) > (baseline.samples.at(-1)?.durationMs ?? 0);
+    if (!(next.toolActive && !baseline.toolActive) && !newSample) return retryResponseSpeed({ ...next, phase: 'paused' });
+  }
+  return next;
 }
 
 /** A finalized speed denominator may only pair with the same real output count. */
 export function calibratedResponseDuration(value: unknown, outputTokens: number): number | undefined {
   const speed = readResponseSpeedSnapshot(value);
-  return speed?.phase === 'complete' && !speed.estimated && speed.averageRate !== null &&
+  return speed?.phase === 'complete' && !speed.outcome && !speed.estimated && speed.averageRate !== null &&
     speed.outputTokens === outputTokens && speed.durationMs > 0 ? speed.durationMs : undefined;
 }
 

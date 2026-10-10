@@ -273,9 +273,11 @@
     "streamWaitDescription": "SDK 스트림 시작부터 첫 콘텐츠까지의 시간입니다. 그 이전의 요청 대기는 측정할 수 없습니다.",
     "lastGeneration": "지난 생성",
     "finalAverage": "최종 평균",
-    "noRecentSample": "새 출력을 받지 못함",
     "generationPaused": "생성 일시 중지",
     "responsePending": "응답 대기 중",
+    "responseFailed": "요청 실패",
+    "responseCancelled": "중지됨",
+    "responseRetrying": "다시 시도 중",
     "responseGenerating": "생성 중",
     "toolRunning": "도구 실행 중"
   },

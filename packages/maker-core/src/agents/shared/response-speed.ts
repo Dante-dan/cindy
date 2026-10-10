@@ -19,6 +19,8 @@ export class ResponseSpeedTracker {
   private openAt: number | null = null;
   private closedMs = 0;
   private phase: ResponseSpeedSnapshot['phase'] = 'waiting';
+  private retrying = false;
+  private retryObserved = false;
   private settledTokens = 0;
   private units = 0;
   private reported: number | null = null;
@@ -42,6 +44,7 @@ export class ResponseSpeedTracker {
     this.reported = null;
     this.allCalibrated = this.measurable = true;
     this.phase = 'waiting';
+    this.retrying = this.retryObserved = false;
     this.segment = 0;
     this.lastSampleAt = 0;
     this.lastDeltaAt = null;
@@ -66,6 +69,7 @@ export class ResponseSpeedTracker {
       this.window = [];
     }
     this.phase = 'generating';
+    this.retrying = false;
     this.waitingAt = null;
   }
 
@@ -103,6 +107,14 @@ export class ResponseSpeedTracker {
     if (this.phase !== 'complete') this.phase = 'paused';
     this.window = [];
     this.waitingAt = null;
+  }
+
+  /** A native retry event proves automatic recovery, even when no error banner is emitted. */
+  beginRetry(now = Date.now()): void {
+    if (this.startedAt === null) this.reset(this.origin, now);
+    if (this.phase === 'complete') return;
+    this.pause(now);
+    this.retrying = this.retryObserved = true;
   }
 
   toolStarted(id: string): void { if (id) this.tools.add(id); }
@@ -145,6 +157,7 @@ export class ResponseSpeedTracker {
       this.allCalibrated = true;
     }
     this.phase = 'complete';
+    this.retrying = false;
   }
 
   invalidate(): void { this.measurable = false; }
@@ -170,6 +183,7 @@ export class ResponseSpeedTracker {
       sampledAt: now,
       hasRecentOutput: this.phase === 'generating' && this.window.length > 0,
       toolActive: this.tools.size > 0,
+      ...(this.retryObserved ? { retrying: this.retrying } : {}),
     };
   }
 

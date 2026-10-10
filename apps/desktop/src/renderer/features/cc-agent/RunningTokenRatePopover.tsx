@@ -114,11 +114,14 @@ export function RunningTokenRatePopover({
         <div className="col-start-1 row-start-1 min-w-0 self-center">
           <div className="mb-1 flex items-center gap-1.5 text-12 text-[var(--text-secondary)]">
             <Activity size={14} aria-hidden="true" />
-            {t(activity === 'complete' ? 'chat.runningStatus.finalAverage'
+            {t(activity === 'failed' ? 'chat.runningStatus.responseFailed'
+              : activity === 'cancelled' ? 'chat.runningStatus.responseCancelled'
+                : activity === 'retrying' ? 'chat.runningStatus.responseRetrying'
+                  : activity === 'complete' ? 'chat.runningStatus.finalAverage'
               : activity === 'waiting' ? 'chat.runningStatus.responsePending'
                 : activity === 'tool' ? 'chat.runningStatus.toolRunning'
                   : activity === 'paused' ? 'chat.runningStatus.generationPaused'
-                    : activity === 'quiet' ? 'chat.runningStatus.noRecentSample' : 'chat.runningStatus.currentRate')}
+                    : activity === 'quiet' ? 'chat.runningStatus.responsePending' : 'chat.runningStatus.currentRate')}
           </div>
           <div className="flex items-baseline gap-1.5 tabular-nums">
             <span className="text-28 font-medium leading-none">{approximate(rate, Boolean(responseSpeed) && (responseSpeed?.phase !== 'complete' || responseSpeed.estimated)) ?? '—'}</span>

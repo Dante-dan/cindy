@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { calibratedResponseDuration, readResponseSpeedSnapshot, stopResponseSpeed, responseSpeedHistory, responseSpeedActivity } from '@cindy/maker-shared/usage-format';
+import { retryResponseSpeed, resumeResponseSpeed, mergeResponseSpeedStatus, calibratedResponseDuration, readResponseSpeedSnapshot, stopResponseSpeed, responseSpeedHistory, responseSpeedActivity } from '@cindy/maker-shared/usage-format';
 import { ResponseSpeedTracker } from './response-speed.js';
 
 describe('response speed', () => {
@@ -200,4 +200,38 @@ describe('response speed', () => {
     speed.reset('turn', 1_000);
     expect(readResponseSpeedSnapshot(speed.snapshot(2_000))).toEqual(speed.snapshot(2_000));
   });
+});
+
+it('retains incomplete history without showing success or a live rate on failure, cancellation or retry', () => {
+  const tracker = new ResponseSpeedTracker();
+  tracker.reset('turn', 0);
+  tracker.delta('observed output', 1000);
+  tracker.delta('more observed output', 2000);
+  const original = tracker.snapshot(2000);
+  for (const outcome of ['failed', 'cancelled'] as const) {
+    const stopped = stopResponseSpeed(original, outcome)!;
+    expect(responseSpeedActivity(stopped, 3000)).toBe(outcome);
+    expect(responseSpeedHistory(stopped).latestRate).toBeNull();
+    expect(stopped.samples).toEqual(original.samples);
+    expect(stopped.averageRate).toBe(original.averageRate);
+    expect(calibratedResponseDuration(stopped, stopped.outputTokens)).toBeUndefined();
+    expect(mergeResponseSpeedStatus(stopped, { ...original, phase: 'complete' }, false, false)?.outcome).toBe(outcome);
+    expect(mergeResponseSpeedStatus(stopped, undefined, true, true)).toBeUndefined();
+  }
+  const retry = retryResponseSpeed(original)!;
+  expect(responseSpeedActivity(retry)).toBe('retrying');
+  expect(responseSpeedHistory(retry).latestRate).toBeNull();
+  expect(mergeResponseSpeedStatus(retry, original, true, false)?.retrying).toBe(true);
+  expect(mergeResponseSpeedStatus(retry, { ...original, outputTokens: 1000 }, true, false)?.retrying).toBe(true);
+  expect(responseSpeedActivity(mergeResponseSpeedStatus(retry, { ...original, phase: 'complete' }, true, false)!)).toBe('retrying');
+  expect(mergeResponseSpeedStatus(retry, { ...original, hasRecentOutput: true,
+    samples: [...original.samples, { durationMs: original.durationMs + 1000, outputTokens: 100, rate: 40 }] }, true, false)?.retrying).not.toBe(true);
+  expect(mergeResponseSpeedStatus(retry, { ...original, retrying: false }, true, false)?.retrying).toBe(false);
+  expect(resumeResponseSpeed(retry)?.retrying).toBe(false);
+  const parallelToolRetry = retryResponseSpeed({ ...original, phase: 'paused', toolActive: true })!;
+  expect(parallelToolRetry.toolActive).toBe(true);
+  expect(mergeResponseSpeedStatus(parallelToolRetry, { ...original, phase: 'paused', toolActive: true }, true, false)?.retrying).toBe(true);
+  expect(responseSpeedActivity(resumeResponseSpeed(parallelToolRetry)!)).toBe('tool');
+  expect(readResponseSpeedSnapshot({ ...original, outcome: 'unknown' })).toBeUndefined();
+  expect(readResponseSpeedSnapshot({ ...original, retrying: 'yes' })).toBeUndefined();
 });
