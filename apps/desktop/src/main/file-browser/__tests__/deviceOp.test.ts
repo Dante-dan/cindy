@@ -299,11 +299,27 @@ describe('file-browser device-op', () => {
         'PERMISSION_DENIED',
       );
       expect(guardMock).not.toHaveBeenCalled();
-      // The task lives on an SSH host, but this path resolves locally: never guess.
-      sharedWorkdirMock.mockResolvedValueOnce({ remoteHostId: 'ssh-1' });
-      await expect(asGuest(() => handleRemoteOp({ op: 'listDir', workdir }))).rejects.toThrow(
-        'PERMISSION_DENIED',
-      );
+    });
+
+    it('routes by the recorded task endpoint instead of reverse-resolving the path', async () => {
+      // The path exists locally and is also recorded for an SSH session: same-account
+      // controllers still see an ambiguous endpoint, a guest of the local task does not.
+      dbRowsMock.mockReturnValue([{ remoteHostId: 'other-host' }]);
+      await expect(handleRemoteOp({ op: 'listDir', workdir })).rejects.toThrow(/ambiguous/);
+      const entries = (await asGuest(() => handleRemoteOp({ op: 'listDir', workdir }))) as Array<{
+        name: string;
+      }>;
+      expect(entries.map((e) => e.name)).toContain('src');
+      expect(sshRequestMock).not.toHaveBeenCalled();
+      // A task recorded on an SSH host goes to that host even though the path is local.
+      sharedWorkdirMock.mockImplementation(async () => ({ remoteHostId: 'ssh-1' }));
+      sshRequestMock.mockResolvedValue({ entries: [{ name: 'remote.ts' }] });
+      const remote = (await asGuest(() => handleRemoteOp({ op: 'listDir', workdir }))) as Array<{
+        name: string;
+      }>;
+      expect(remote.map((e) => e.name)).toEqual(['remote.ts']);
+      expect(sshRequestMock.mock.calls[0]?.[0]).toBe('ssh-1');
+      sshRequestMock.mockReset();
     });
 
     it('does not write when membership ends during the endpoint checks', async () => {
@@ -325,13 +341,43 @@ describe('file-browser device-op', () => {
     it('does not send an SSH write when membership ends while the connection is being built', async () => {
       guardMock.mockResolvedValue({ allowed: false, reason: 'not-found' });
       dbRowsMock.mockReturnValue([{ remoteHostId: 'host-1' }]);
-      sharedWorkdirMock.mockImplementation(async () => ({ remoteHostId: 'host-1' }));
+      let taskHost = 'host-1';
+      sharedWorkdirMock.mockImplementation(async () => {
+        if (!current) throw new Error('[PERMISSION_DENIED] Shared task access changed');
+        return { remoteHostId: taskHost };
+      });
       const sent = vi.fn();
-      // The manager awaits getClient, then calls beforeSend right before sending.
+      // The manager awaits getClient, then awaits beforeSend right before sending.
       sshRequestMock.mockImplementation(
-        async (_h: string, method: string, _p: unknown, options?: { beforeSend?: () => void }) => {
+        async (
+          _h: string,
+          method: string,
+          _p: unknown,
+          options?: { beforeSend?: () => void | Promise<void> },
+        ) => {
           current = false;
-          options?.beforeSend?.();
+          await options?.beforeSend?.();
+          sent(method);
+          return { size: 1, mtimeMs: 1 };
+        },
+      );
+      await expect(
+        asGuest(() =>
+          handleRemoteOp({ op: 'writeFile', workdir: '/remote/proj', relPath: 'a.ts', content: 'x' }),
+        ),
+      ).rejects.toThrow('PERMISSION_DENIED');
+      expect(sent).not.toHaveBeenCalled();
+      // The owner moves the task to another SSH host while the connection is built.
+      current = true;
+      sshRequestMock.mockImplementation(
+        async (
+          _h: string,
+          method: string,
+          _p: unknown,
+          options?: { beforeSend?: () => void | Promise<void> },
+        ) => {
+          taskHost = 'host-2';
+          await options?.beforeSend?.();
           sent(method);
           return { size: 1, mtimeMs: 1 };
         },
@@ -343,7 +389,7 @@ describe('file-browser device-op', () => {
       ).rejects.toThrow('PERMISSION_DENIED');
       expect(sent).not.toHaveBeenCalled();
       // Same-account controllers keep the unchanged three-argument call.
-      current = true;
+      sshRequestMock.mockReset();
       sshRequestMock.mockResolvedValue({ size: 1, mtimeMs: 1 });
       await handleRemoteOp({ op: 'writeFile', workdir: '/remote/proj', relPath: 'a.ts', content: 'x' });
       expect(sshRequestMock).toHaveBeenLastCalledWith('host-1', 'writeFile', {

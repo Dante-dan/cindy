@@ -432,7 +432,13 @@ async function handleRemoteOp(args: RemoteOpArgs): Promise<unknown> {
     throwIpcError(rejection.code, rejection.message);
   }
 
-  const exec = await resolveWorkdirExecution(args.workdir, guardResult);
+  // 共享访客已从任务记录拿到权威端点,直接按它选择本地或 SSH 执行;只有同账号
+  // 请求才按路径反查全部会话(同一路径在本地与其它 SSH 会话并存时不误判歧义)。
+  const exec: WorkdirExecution = sharedTaskEndpoint
+    ? sharedTaskEndpoint.remoteHostId
+      ? { kind: 'ssh', hostId: sharedTaskEndpoint.remoteHostId }
+      : { kind: 'local' }
+    : await resolveWorkdirExecution(args.workdir, guardResult);
   const workdir = args.workdir;
 
   if (exec.kind === 'unavailable') {
@@ -479,12 +485,8 @@ async function handleRemoteOp(args: RemoteOpArgs): Promise<unknown> {
     // 上面的 guard / 端点判定 / 解压都是 await 边界:房主可能已撤权或移动任务目录。
     // 落盘或读出前按最新任务记录重新绑定目录与端点(内含成员资格复核)。
     const current = await assertSharedTaskWorkdir(sharedTask, args.workdir, sharedTaskOperation!);
-    // 访客只能落到任务自己的执行端点(本地或任务所属 SSH 主机),不按路径反查到别的会话主机。
-    const expected = current.remoteHostId;
-    const sameEndpoint =
-      expected === sharedTaskEndpoint.remoteHostId &&
-      (expected ? exec.kind === 'ssh' && exec.hostId === expected : exec.kind === 'local');
-    if (!sameEndpoint)
+    // exec 取自请求开始时的任务端点;任务中途换了端点则拒绝,不落到旧端点。
+    if (current.remoteHostId !== sharedTaskEndpoint.remoteHostId)
       throw new Error('[PERMISSION_DENIED] Shared task working directory endpoint mismatch');
   }
 
@@ -492,16 +494,24 @@ async function handleRemoteOp(args: RemoteOpArgs): Promise<unknown> {
   if (exec.kind === 'ssh') {
     const mgr = getRemoteFileBrowser();
     const hostId = exec.hostId;
-    // 共享访客:SSH 建链等待期间可能被撤权,尚未发出的请求在发送前复核成员资格。
-    const gate = sharedTask
-      ? {
-          beforeSend: () => {
-            if (!sharedTask.isCurrent() || !sharedTask.authorize(sharedTaskOperation!)) {
-              throw new Error('[PERMISSION_DENIED] Shared task access changed');
-            }
-          },
-        }
-      : undefined;
+    // 共享访客:SSH 建链可能等待数秒,期间房主可能撤权或移动任务目录。每次真正
+    // 发送前按最新任务记录重新绑定目录与端点(内含成员资格复核)。
+    const gate =
+      sharedTask && sharedTaskEndpoint
+        ? {
+            beforeSend: async () => {
+              const latest = await assertSharedTaskWorkdir(
+                sharedTask,
+                args.workdir,
+                sharedTaskOperation!,
+              );
+              if (latest.remoteHostId !== hostId)
+                throw new Error(
+                  '[PERMISSION_DENIED] Shared task working directory endpoint mismatch',
+                );
+            },
+          }
+        : undefined;
     const request = <M extends keyof FsRpcMethods>(method: M, params: FsRpcMethods[M]['params']) =>
       gate ? mgr.request(hostId, method, params, gate) : mgr.request(hostId, method, params);
     switch (args.op) {
