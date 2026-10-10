@@ -8,7 +8,14 @@
 import os from 'node:os';
 import path from 'node:path';
 
-import type { RemoteAgentKind, RemoteAgentReply, RemoteAgentReverseRequest, RemoteAgentStreamItem } from '@cindy/device-link';
+import {
+  REMOTE_AGENT_GROUP_SWITCH_STATE_KEY,
+  REMOTE_AGENT_RELAY_KEY_PATTERN,
+  type RemoteAgentKind,
+  type RemoteAgentReply,
+  type RemoteAgentReverseRequest,
+  type RemoteAgentStreamItem,
+} from '@cindy/device-link';
 import type { AgentEvent, AgentSessionHandle, StartSessionOptions } from '@cindy/maker-core';
 
 import { RemoteExecutor, type ExecutorCaptureHooks } from '../executor/executor';
@@ -67,6 +74,14 @@ export interface StartRemoteAgentDeps {
   mapEvent?: (kind: RemoteAgentKind) => ((event: AgentEvent) => AgentEvent) | undefined;
   /** 本机 Codex 程序(给对方的 Codex 提供 exec-server 执行环境)；缺省时不提供。 */
   codexPath?: () => string | undefined;
+  /** 这个任务由供应商组分配到那台：告诉那台直接运行，不再进入它自己的组(防转圈)。 */
+  groupAssigned?: boolean;
+  /**
+   * 供应商组「需要换一台」(分享的人，docs/product-rules/provider-groups.md §6.1)：提供即在打开时声明支持。
+   * `token` 是交接后重新打开时带回的凭证；对方发来新凭证时交给 `offer`；`takeNewRound` 为 true 的那次发送告诉
+   * 对方开始新的一轮(用户亲自接手过)。
+   */
+  groupSwitch?: { token?: string; offer(token: string): void; takeNewRound?(): boolean };
   newId(): string;
   log?: {
     info(message: string, meta?: Record<string, unknown>): void;
@@ -81,6 +96,20 @@ function parentOf(value: string): string | null {
   if (index <= 0) return null;
   const parent = normalized.slice(0, index);
   return /^[A-Za-z]:$/.test(parent) ? null : parent;
+}
+
+/**
+ * 取走对方状态里的「需要换一台」凭证(供应商组，组所在电脑发来)：格式正确才交给 `offer`；凭证不并入任务状态。
+ * 返回剩下的状态，取走后什么都不剩时返回 null。
+ */
+export function takeGroupSwitchState(
+  state: Record<string, unknown>,
+  offer: ((token: string) => void) | undefined,
+): Record<string, unknown> | null {
+  if (!(REMOTE_AGENT_GROUP_SWITCH_STATE_KEY in state)) return state;
+  const { [REMOTE_AGENT_GROUP_SWITCH_STATE_KEY]: token, ...rest } = state;
+  if (typeof token === 'string' && REMOTE_AGENT_RELAY_KEY_PATTERN.test(token)) offer?.(token);
+  return Object.keys(rest).length ? rest : null;
 }
 
 /**
@@ -199,7 +228,11 @@ export async function startRemoteAgentSession(
       if (controller) controller.onEvent(event);
       else early.push({ type: 'event', value: event });
     },
-    onState: (state) => {
+    onState: (incoming) => {
+      // 组所在电脑发来的「需要换一台」凭证(排在那次错误前面)：交给供应商组服务，不进任务状态。
+      const remaining = takeGroupSwitchState(incoming, deps.groupSwitch?.offer);
+      if (!remaining) return;
+      let state = remaining;
       const projection = state.workspaceProjection as Parameters<typeof shadowAliases>[0] | undefined;
       if (projection?.virtualWorkspace === true && typeof projection.shadowDir === 'string') {
         workspace.setAliases(shadowAliases(projection, workspace.workingDir, personalRoots, { extraDirs, writableDirs }));
@@ -263,6 +296,9 @@ export async function startRemoteAgentSession(
     ancestorFiles,
     personal: collectedPersonal?.personal ?? { files: [] },
     mcpServers: [...mcp.servers.keys()],
+    ...(deps.groupAssigned ? { groupAssigned: true } : {}),
+    ...(deps.groupSwitch ? { acceptsGroupSwitch: true } : {}),
+    ...(deps.groupSwitch?.token ? { groupSwitchToken: deps.groupSwitch.token } : {}),
   };
 
   let startedRaw: Record<string, unknown>;
@@ -292,6 +328,7 @@ export async function startRemoteAgentSession(
     onInvalidResumeSession: opts.onInvalidResumeSession,
     mapEvent: deps.mapEvent?.(kind),
     newId: deps.newId,
+    ...(deps.groupSwitch?.takeNewRound ? { takeGroupNewRound: deps.groupSwitch.takeNewRound } : {}),
     onPermissionMode: (mode) => {
       permissionMode = mode as typeof permissionMode;
       executor.setGateMode(executorGateModeFor(permissionMode, planMode));
