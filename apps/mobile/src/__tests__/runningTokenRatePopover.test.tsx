@@ -208,6 +208,42 @@ const ActivityStatus = new Function(
   `${compiledStatus}; return ComposerActivityStatus;`,
 )(...Object.values(bindings));
 
+it.each([
+  { outputTokens: 80, estimated: false, count: '80 tok' },
+  { outputTokens: 80, estimated: true, count: '≈80 tok' },
+  { outputTokens: 0, estimated: false, count: '0 tok' },
+])('keeps the speed card on measured output instead of whole-turn usage ($count)', async ({ outputTokens, estimated, count }) => {
+  const responseSpeed: ResponseSpeedSnapshot = {
+    phase: 'complete', waitOrigin: 'turn', firstResponseMs: 100,
+    waitingMs: 0, durationMs: 2000, outputTokens, estimated,
+    recentRate: null, averageRate: outputTokens / 2,
+    samples: [{ durationMs: 2000, outputTokens, rate: outputTokens / 2 }],
+    sampledAt: Date.now(),
+  };
+  await act(async () => root.render(createElement(ActivityStatus, {
+    ...base, visible: false, tokenUsage: 800, outputTokens: 800,
+    generationDurationMs: 2000, sideTaskRunning: false,
+    reconnectAttempt: null, responseSpeed,
+  })));
+  await gesture('onPressIn');
+  await gesture('onPress');
+  expect(card()!.textContent).toContain(`session.screen.outputTotal${count}`);
+  expect(card()!.textContent).toContain(`session.screen.averageRate${estimated ? '≈' : ''}${outputTokens / 2} tok/s`);
+  expect(card()!.textContent).not.toContain('800 tok');
+  expect(card()!.textContent).not.toContain('400 tok/s');
+});
+
+it('uses whole-turn output in the legacy card when the host omits the speed snapshot', async () => {
+  await act(async () => root.render(createElement(ActivityStatus, {
+    ...base, visible: true, tokenUsage: 800, outputTokens: 800,
+    generationDurationMs: 2000, sideTaskRunning: false, reconnectAttempt: null,
+  })));
+  await gesture('onPressIn');
+  await gesture('onPress');
+  expect(card()!.textContent).toContain('session.screen.outputTotal800 tok');
+  expect(card()!.textContent).toContain('session.screen.averageRate400 tok/s');
+});
+
 it('shows waiting, execution, silent output and retained completion consistently in the status and card', async () => {
   vi.useFakeTimers();
   try {
