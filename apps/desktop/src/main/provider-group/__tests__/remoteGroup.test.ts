@@ -207,6 +207,15 @@ describe('assigning through a group on another computer', () => {
     expect(next?.route).toEqual({ agentDeviceId: 'share:s1', providerId: 'anthropic' });
     expect(h.bindings.get('s1')).toMatchObject({ memberKey: SHARED.key, groupDeviceId: OWNER });
   });
+
+  it('drops the binding when the group is deleted before the agent starts', async () => {
+    const h = harness({ picks: [STUDIO] });
+    const context = await h.service.assignBeforeStart(START);
+    expect(h.bindings.size).toBe(1);
+    h.remote.readGroup.mockResolvedValue(null);
+    expect(await h.service.nextAfterStartFailure(context!, new Error('[REMOTE_AGENT_DEVICE_UNREACHABLE] gone'))).toBeNull();
+    expect(h.bindings.size).toBe(0);
+  });
 });
 
 describe('switching computers within a group on another computer', () => {

@@ -776,6 +776,11 @@ export function createProviderGroupService(deps: ProviderGroupServiceDeps): Prov
       const source = sourceFor(context.groupDeviceId);
       if (!cause || !source) return null;
       const config = await source.readGroup(context.groupProviderId).catch(() => undefined);
+      // 启动阶段同样：组所在电脑确认组已删除时立即解除绑定，读不到不动。
+      if (config === null) {
+        await releaseDeletedGroup(context.sessionId);
+        return null;
+      }
       if (!config?.autoSwitch) return null;
       source.cool(context.groupProviderId, context.member.key, cause, null);
       source.invalidate(context.member);
