@@ -110,11 +110,12 @@ export class ResponseSpeedTracker {
   }
 
   /** A native retry event proves automatic recovery, even when no error banner is emitted. */
-  beginRetry(now = Date.now()): void {
+  beginRetry(now = Date.now()): boolean {
     if (this.startedAt === null) this.reset(this.origin, now);
-    if (this.phase === 'complete') return;
+    if (this.phase === 'complete') return false;
     this.pause(now);
     this.retrying = this.retryObserved = true;
+    return true;
   }
 
   toolStarted(id: string): void { if (id) this.tools.add(id); }

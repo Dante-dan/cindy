@@ -124,6 +124,10 @@ it('Pi publishes even an unclassified native retry without adding an error banne
     translatePiEvent({ type: 'message_start', message: { role: 'assistant' } } as PiRpcEvent, queue, ctx);
     translatePiEvent({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'recovered' } } as PiRpcEvent, queue, ctx);
     expect(usageSnapshotOf(ctx).responseSpeed).toMatchObject({ retrying: false, durationMs: 0 });
+    ctx.responseSpeed.finish();
+    const settledEvents = events.length;
+    translatePiEvent({ type: 'auto_retry_start', attempt: 2, maxAttempts: 3 } as PiRpcEvent, queue, ctx);
+    expect(events).toHaveLength(settledEvents);
   } finally { disposePiTranslateContext(ctx); }
 });
 
@@ -146,4 +150,9 @@ it('Claude publishes its first native retry without an error banner and excludes
   translateSdkMessage({ type: 'stream_event', event: { type: 'content_block_start', content_block: { type: 'text' } } }, queue, ctx);
   expect(ctx.rt.generation.responseSpeed.snapshot().retrying).not.toBe(true);
   expect(ctx.rt.generation.responseSpeed.snapshot().durationMs).toBe(0);
+  ctx.turn.interruptRequested = true;
+  const stoppedEvents = events.length;
+  translateSdkMessage({ type: 'system', subtype: 'api_retry', attempt: 2, max_retries: 3,
+    retry_delay_ms: 1000, error_status: 529, error: 'overloaded_error' }, queue, ctx);
+  expect(events).toHaveLength(stoppedEvents);
 });

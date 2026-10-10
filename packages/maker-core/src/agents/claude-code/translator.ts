@@ -1068,7 +1068,7 @@ function handleSystem(
     return;
   }
   if (msg.subtype === 'api_retry') {
-    ctx.rt.generation.responseSpeed.beginRetry();
+    if (ctx.turn.interruptRequested || !ctx.rt.generation.responseSpeed.beginRetry()) return;
     queue.push({ type: 'status', data: ccLiveStatus(ctx, 'Working...', true), source: 'claude-code' });
     // SDKAPIRetryMessage 明确表示本次 API 失败仍在自动重试，不是 turn 终态。
     // 除日志外也暂存最后一次 retry 的错误详情，覆盖 SDK 没有额外发送

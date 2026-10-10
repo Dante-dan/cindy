@@ -1067,7 +1067,7 @@ export function translatePiEvent(
       // own tariff at message_start.
       ctx.pendingPriceVariants = [];
       if (isCurrentTurnHostAbortRequested(ctx)) return;
-      ctx.responseSpeed.beginRetry();
+      if (!ctx.responseSpeed.beginRetry()) return;
       pushStatus(queue, ctx, 'Working…', true);
       // `(auto-retry N/M)` 只给过载用：mobile / Telegram 把这个后缀当成「模型服务繁忙」。
       // 网络类改走 `Reconnecting... N/M`，未分类 5xx / LiteLLM in-stream 仍静默。
