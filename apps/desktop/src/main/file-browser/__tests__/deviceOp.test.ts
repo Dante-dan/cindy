@@ -322,6 +322,38 @@ describe('file-browser device-op', () => {
       expect(read.data.content).toBe('export const a = 1;\n');
     });
 
+    it('does not send an SSH write when membership ends while the connection is being built', async () => {
+      guardMock.mockResolvedValue({ allowed: false, reason: 'not-found' });
+      dbRowsMock.mockReturnValue([{ remoteHostId: 'host-1' }]);
+      sharedWorkdirMock.mockImplementation(async () => ({ remoteHostId: 'host-1' }));
+      const sent = vi.fn();
+      // The manager awaits getClient, then calls beforeSend right before sending.
+      sshRequestMock.mockImplementation(
+        async (_h: string, method: string, _p: unknown, options?: { beforeSend?: () => void }) => {
+          current = false;
+          options?.beforeSend?.();
+          sent(method);
+          return { size: 1, mtimeMs: 1 };
+        },
+      );
+      await expect(
+        asGuest(() =>
+          handleRemoteOp({ op: 'writeFile', workdir: '/remote/proj', relPath: 'a.ts', content: 'x' }),
+        ),
+      ).rejects.toThrow('PERMISSION_DENIED');
+      expect(sent).not.toHaveBeenCalled();
+      // Same-account controllers keep the unchanged three-argument call.
+      current = true;
+      sshRequestMock.mockResolvedValue({ size: 1, mtimeMs: 1 });
+      await handleRemoteOp({ op: 'writeFile', workdir: '/remote/proj', relPath: 'a.ts', content: 'x' });
+      expect(sshRequestMock).toHaveBeenLastCalledWith('host-1', 'writeFile', {
+        workdir: '/remote/proj',
+        relPath: 'a.ts',
+        content: 'x',
+      });
+      sshRequestMock.mockReset();
+    });
+
     it('rebinds the task workdir and endpoint after the endpoint checks, before touching files', async () => {
       // The owner moves the task while this write is in flight.
       guardMock.mockImplementationOnce(async () => {

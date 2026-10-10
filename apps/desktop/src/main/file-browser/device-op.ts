@@ -59,6 +59,7 @@ import {
   type PushOwnerStamp,
 } from '@cindy/device-link';
 import { WorkdirWatchManager } from '@cindy/remote-file-service';
+import type { FsRpcMethods } from '@cindy/remote-file-service/protocol';
 
 import { createLogger } from '../logger.js';
 import { getDbClient } from '../localDb/client/current.js';
@@ -483,16 +484,29 @@ async function handleRemoteOp(args: RemoteOpArgs): Promise<unknown> {
     const sameEndpoint =
       expected === sharedTaskEndpoint.remoteHostId &&
       (expected ? exec.kind === 'ssh' && exec.hostId === expected : exec.kind === 'local');
-    if (!sameEndpoint) throw new Error('[PERMISSION_DENIED] Shared task working directory endpoint mismatch');
+    if (!sameEndpoint)
+      throw new Error('[PERMISSION_DENIED] Shared task working directory endpoint mismatch');
   }
 
   // —— SSH 二跳:直接透传给本机的 SSH file-service 路由 ——
   if (exec.kind === 'ssh') {
     const mgr = getRemoteFileBrowser();
     const hostId = exec.hostId;
+    // 共享访客:SSH 建链等待期间可能被撤权,尚未发出的请求在发送前复核成员资格。
+    const gate = sharedTask
+      ? {
+          beforeSend: () => {
+            if (!sharedTask.isCurrent() || !sharedTask.authorize(sharedTaskOperation!)) {
+              throw new Error('[PERMISSION_DENIED] Shared task access changed');
+            }
+          },
+        }
+      : undefined;
+    const request = <M extends keyof FsRpcMethods>(method: M, params: FsRpcMethods[M]['params']) =>
+      gate ? mgr.request(hostId, method, params, gate) : mgr.request(hostId, method, params);
     switch (args.op) {
       case 'listDir': {
-        const { entries } = await mgr.request(hostId, 'listDir', {
+        const { entries } = await request('listDir', {
           workdir,
           relPath: args.relPath ?? '',
           hideMetaFiles: args.hideMetaFiles ?? true,
@@ -504,7 +518,7 @@ async function handleRemoteOp(args: RemoteOpArgs): Promise<unknown> {
       }
       case 'readFile': {
         try {
-          const data = await mgr.request(hostId, 'readFile', {
+          const data = await request('readFile', {
             workdir,
             relPath: args.relPath ?? '',
           });
@@ -516,9 +530,9 @@ async function handleRemoteOp(args: RemoteOpArgs): Promise<unknown> {
         }
       }
       case 'stat':
-        return mgr.request(hostId, 'stat', { workdir, relPath: args.relPath ?? '' });
+        return request('stat', { workdir, relPath: args.relPath ?? '' });
       case 'writeFile': {
-        const r = await mgr.request(hostId, 'writeFile', {
+        const r = await request('writeFile', {
           workdir,
           relPath: args.relPath ?? '',
           content: writeContent ?? '',
@@ -528,27 +542,27 @@ async function handleRemoteOp(args: RemoteOpArgs): Promise<unknown> {
       case 'createFile':
         return {
           ok: true as const,
-          stat: await mgr.request(hostId, 'createFile', { workdir, relPath: args.relPath ?? '' }),
+          stat: await request('createFile', { workdir, relPath: args.relPath ?? '' }),
         };
       case 'createFolder':
         return {
           ok: true as const,
-          stat: await mgr.request(hostId, 'createFolder', { workdir, relPath: args.relPath ?? '' }),
+          stat: await request('createFolder', { workdir, relPath: args.relPath ?? '' }),
         };
       case 'renameEntry':
         return {
           ok: true as const,
-          stat: await mgr.request(hostId, 'renameEntry', {
+          stat: await request('renameEntry', {
             workdir,
             fromRel: args.fromRel ?? '',
             toRel: args.toRel ?? '',
           }),
         };
       case 'deleteEntry':
-        await mgr.request(hostId, 'deleteEntry', { workdir, relPath: args.relPath ?? '' });
+        await request('deleteEntry', { workdir, relPath: args.relPath ?? '' });
         return { ok: true as const };
       case 'listAllFiles':
-        return mgr.request(hostId, 'listAllFiles', { workdir, cap: args.cap });
+        return request('listAllFiles', { workdir, cap: args.cap });
       case 'exportFileStart':
       case 'exportFileStatus':
       case 'fileUrl':
