@@ -2515,6 +2515,14 @@ function handleResult(
   const resultWithUsageSegments = {
     ...safeResult,
     responseSpeed: liveGeneration.responseSpeed.snapshot(),
+    // Keep SDK usage intact; the normalized provider delta can pair
+    // with the current turn's response-speed denominator.
+    turnUsage: resultUsage ? {
+      input_tokens: resultUsage.inputTokens,
+      output_tokens: resultUsage.outputTokens,
+      cache_read_input_tokens: resultUsage.cacheReadTokens,
+      cache_creation_input_tokens: resultUsage.cacheCreateTokens,
+    } : undefined,
     usageSegments: turnUsageSegments,
     usageSegmentsComplete,
     modelUsageCumulativeStartsAtZero: ctx.modelUsageCumulativeStartsAtZero?.() === true,

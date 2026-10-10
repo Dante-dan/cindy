@@ -18,6 +18,9 @@
 沿用原 usage 路径，旧客户端忽略新增字段。无需服务端更新、新通道、权限或数据库 migration。
 终态真实 output 与生成 duration 的匹配沿现有消息用量记录处理。详见
 [`response-speed.md`](response-speed.md)。
+Claude 的既有 done payload 可选携带 `turnUsage`，来自 SDK result 用量的本轮增量，
+供历史速度与消息用量配对。原 `usage` 保持会话累计口径；旧端忽略新字段，新端缺字段且无模型增量时
+省略该速度，不将累计用量当本轮输出。费用与上下文仍走原计量路径。
 
 ## 任务列表提前同步聊天正文
 
