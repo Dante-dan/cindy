@@ -183,9 +183,15 @@ it('opens measured zero history and restores fallback across reliability and tur
   expect(trigger()).not.toBeNull();
 });
 
-it.each([true, false])(
-  'plan review preserves the collapsed indicator and suppresses a pinned panel (running=%s)',
-  (visible) => {
+it.each(['running', 'stopped', 'completed'] as const)(
+  'plan review preserves the collapsed indicator and suppresses a pinned panel (%s)',
+  (state) => {
+    const visible = state === 'running';
+    const responseSpeed = state === 'completed' ? {
+      phase: 'complete' as const, waitOrigin: 'turn' as const, firstResponseMs: 1000, waitingMs: 0,
+      durationMs: 1000, outputTokens: 100, estimated: false, averageRate: 100, recentRate: 100,
+      samples: [{ durationMs: 1000, outputTokens: 100, rate: 100 }], sampledAt: Date.now(),
+    } : undefined;
     const props = {
       visible: true,
       status: 'Thinking',
@@ -205,6 +211,7 @@ it.each([true, false])(
       <RunningStatusBar
         {...props}
         visible={visible}
+        responseSpeed={responseSpeed}
         suppressContent
         rightLeadingSlot={indicator}
       />,
@@ -214,10 +221,30 @@ it.each([true, false])(
     expect(screen.queryByRole('button', { name: 'titleBar.close' })).toBeNull();
 
     // Explicit suppression without an independent indicator leaves no row behind.
-    rerender(<RunningStatusBar {...props} visible={visible} suppressContent />);
+    rerender(<RunningStatusBar {...props} visible={visible} responseSpeed={responseSpeed} suppressContent />);
     expect(container.childElementCount).toBe(0);
   },
 );
+
+it('keeps the control indicator before completed speed metadata but leaves an idle row empty', () => {
+  const props = { visible: false, status: 'Done', startedAt: null,
+    tokenUsage: 0, outputTokens: 0, generationDurationMs: 0 };
+  const view = render(<RunningStatusBar {...props} />);
+  expect(view.container.childElementCount).toBe(0);
+  const indicator = <button aria-label="Controlled session">Device</button>;
+  view.rerender(<RunningStatusBar {...props} rightLeadingSlot={indicator} />);
+  const control = screen.getByRole('button', { name: 'Controlled session' });
+  expect(view.container.querySelector('[data-running-status-meta]')).toBeNull();
+  view.rerender(<RunningStatusBar {...props} rightLeadingSlot={indicator}
+    responseSpeed={{ phase: 'complete', waitOrigin: 'turn', firstResponseMs: 1000, waitingMs: 0,
+      durationMs: 1000, outputTokens: 100, estimated: false, averageRate: 100, recentRate: 100,
+      samples: [{ durationMs: 1000, outputTokens: 100, rate: 100 }], sampledAt: Date.now() }} />);
+  const meta = view.container.querySelector('[data-running-status-meta]')!;
+  expect(meta.textContent).toContain('chat.runningStatus.lastGeneration');
+  expect(control.compareDocumentPosition(meta) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  fireEvent.click(meta.querySelector('button')!);
+  expect(screen.getByRole('dialog').textContent).toContain('chat.runningStatus.finalAverage');
+});
 
 it('retains a completed response after fade, navigation/remount, then replaces it at the next turn', () => {
   vi.useFakeTimers();
