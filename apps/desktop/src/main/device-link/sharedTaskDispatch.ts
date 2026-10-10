@@ -1,6 +1,7 @@
 import { FILE_BROWSER_EVENT_CHANNEL, FILE_BROWSER_REMOTE_OP_CHANNEL, fsWatchTopic, isSharedTaskPeer, parseFsWatchTopic, parseSharedTaskPeer, isSharedTaskAttachment, type InvokePayload, type InvokeResultPayload, type SharedTaskQueueItem } from '@cindy/device-link';
 import type { SharedTaskHost } from './sharedTaskHost.js';
 import * as subscriptions from './subscriptions.js';
+import { normalizeWorkingDirForStorage } from '../../shared/workingDir.js';
 
 export type SharedTaskPeerCapture = NonNullable<ReturnType<SharedTaskHost['capturePeer']>>;
 export interface SharedTaskInteractionCapture {
@@ -79,11 +80,34 @@ const interactionDecisionKinds = new Set(['permission', 'ask_user_question', 'pl
 const fileReadOps = new Set(['caps', 'listDir', 'listAllFiles', 'readFile', 'stat', 'searchCollect', 'thumbnail', 'fileUrl']);
 const fileWriteOps = new Set(['writeFile', 'createFile', 'createFolder', 'renameEntry', 'deleteEntry']);
 /** A frame carries at most the task stream plus its workdir watch (reconnect replay merges them). */
-const MAX_SHARED_TASK_TOPICS = 4;
+export const MAX_SHARED_TASK_TOPICS = 4;
 
 export function sharedTaskFileOperation(op: unknown): 'file.read' | 'file.write' | null {
   if (typeof op !== 'string') return null;
   return fileReadOps.has(op) ? 'file.read' : fileWriteOps.has(op) ? 'file.write' : null;
+}
+
+/**
+ * A watch was admitted for the task workdir at subscribe time. When the owner
+ * moves the task, release guest watches on any other directory so they stop
+ * streaming the old one; the guest client re-subscribes to the new workdir
+ * through the normal admission.
+ */
+export function releaseSharedTaskWatchesOnWorkdirChange(channel: string, payload: unknown): void {
+  if (channel !== 'local-db:sessions:patched') return;
+  const row = record(payload);
+  const patch = record(row?.patch);
+  if (typeof row?.sessionId !== 'string' || !patch || !Object.prototype.hasOwnProperty.call(patch, 'workingDir')) return;
+  const next = normalizeWorkingDirForStorage(typeof patch.workingDir === 'string' ? patch.workingDir : null);
+  const peers = new Set([...subscriptions.getControllerIds(), ...subscriptions.getKnownControllerIds()]);
+  for (const peer of peers) {
+    if (!isSharedTaskPeer(peer) || captureSharedTaskPeer(peer)?.author.sessionId !== row.sessionId) continue;
+    const stale = subscriptions.getControllerTopics(peer).filter((topic) => {
+      const watched = parseFsWatchTopic(topic);
+      return watched !== null && normalizeWorkingDirForStorage(watched) !== next;
+    });
+    if (stale.length > 0) subscriptions.unsubscribe(peer, stale);
+  }
 }
 
 function record(value: unknown): Record<string, unknown> | null {

@@ -52,4 +52,12 @@ describe('shared task workdir binding', () => {
     const denied = await admitSharedTaskFsWatchTopics(capture({ authorize: () => false }), ['session:task', 'fs-watch:/host/task']);
     expect(denied).toEqual({ topics: ['session:task'], verified: new Set() });
   });
+
+  it('never looks up an oversized topic frame', async () => {
+    snapshot.mockClear();
+    const topics = Array.from({ length: 5000 }, (_, i) => `fs-watch:/host/task-${i}`);
+    const admitted = await admitSharedTaskFsWatchTopics(capture(), topics);
+    expect(admitted.verified.size).toBe(0);
+    expect(snapshot).not.toHaveBeenCalled();
+  });
 });

@@ -1,7 +1,7 @@
 import { parseFsWatchTopic } from '@cindy/device-link';
 import { getSessionFsSnapshot } from '../localDb/ipc/sessions.js';
 import { normalizeWorkingDirForStorage } from '../../shared/workingDir.js';
-import type { SharedTaskPeerCapture } from './sharedTaskDispatch.js';
+import { MAX_SHARED_TASK_TOPICS, type SharedTaskPeerCapture } from './sharedTaskDispatch.js';
 
 function deny(): never { throw new Error('[PERMISSION_DENIED] Working directory does not belong to this shared task'); }
 
@@ -35,14 +35,16 @@ export async function assertSharedTaskWorkdir(
 export async function admitSharedTaskFsWatchTopics(
   capture: SharedTaskPeerCapture, topics: readonly unknown[],
 ): Promise<{ topics: unknown[]; verified: Set<string> }> {
-  const watched = topics.filter((topic) => typeof topic === 'string' && parseFsWatchTopic(topic) !== null);
-  if (watched.length === 0) return { topics: [...topics], verified: new Set() };
+  // Oversized frames are rejected by the synchronous gate; never look them up.
+  if (topics.length > MAX_SHARED_TASK_TOPICS) return { topics: [...topics], verified: new Set() };
+  const watched = new Set(topics.filter((topic): topic is string => typeof topic === 'string' && parseFsWatchTopic(topic) !== null));
+  if (watched.size === 0) return { topics: [...topics], verified: new Set() };
   const own = capture.isCurrent() && capture.authorize('file.read') ? await sharedTaskWorkdir(capture) : null;
   const verified = new Set<string>();
   if (own && capture.isCurrent()) {
-    for (const topic of watched as string[]) {
+    for (const topic of watched) {
       if (normalizeWorkingDirForStorage(parseFsWatchTopic(topic)) === own.workingDir) verified.add(topic);
     }
   }
-  return { topics: topics.filter((topic) => !watched.includes(topic) || verified.has(topic as string)), verified };
+  return { topics: topics.filter((topic) => typeof topic !== 'string' || !watched.has(topic) || verified.has(topic)), verified };
 }

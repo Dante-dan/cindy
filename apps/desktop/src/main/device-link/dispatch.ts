@@ -121,7 +121,7 @@ import { isProviderSharePeer, isSharedTaskPeer, parseProviderSharePeer, PROVIDER
 import { captureSharedTaskPeer, captureSharedTaskPush, assertSharedTaskInvoke, sharedTaskMetadataTopic, sharedTaskAccessFailure } from './sharedTaskDispatch.js';
 import { runAsBackgroundDbRpc } from '../localDb/client/rpcAdmission.js';
 import { fetchLocalMediaToOss } from './mediaFetch';
-import { refreshSharedTaskPeer } from './sharedTaskDispatch.js';
+import { MAX_SHARED_TASK_TOPICS, refreshSharedTaskPeer, releaseSharedTaskWatchesOnWorkdirChange } from './sharedTaskDispatch.js';
 import { admitSharedTaskFsWatchTopics } from './sharedTaskFileAccess.js';
 import { transcribeRemoteVoiceInput } from './voiceTranscribe';
 import { readTelegramRemoteStatus, setTelegramRemoteOnline } from './telegramRemoteControl';
@@ -1937,6 +1937,7 @@ function listMessagePayload(dst: string, sessionId: string, payload: unknown): u
 }
 
 function forwardPush(channel: string, payload: unknown, ownerStamp?: PushOwnerStamp): void {
+  releaseSharedTaskWatchesOnWorkdirChange(channel, payload);
   if (!activeClient) return;
   const topic = topicForPush(channel, payload);
   if (!topic) return;
@@ -3893,7 +3894,9 @@ function admitSharedTaskSubscription(
   const arg = rawArg && typeof rawArg === 'object' && !Array.isArray(rawArg)
     ? rawArg as Record<string, unknown> : null;
   const topics = arg?.topics;
+  // Oversized frames skip the DB lookup; the synchronous gate rejects them.
   if (!isSharedTaskPeer(src) || payload.channel !== DL_SUBSCRIBE_CHANNEL || !Array.isArray(topics)
+    || topics.length > MAX_SHARED_TASK_TOPICS
     || !topics.some((topic) => typeof topic === 'string' && parseFsWatchTopic(topic) !== null)) {
     return null;
   }

@@ -474,17 +474,16 @@ async function handleRemoteOp(args: RemoteOpArgs): Promise<unknown> {
     }
   }
 
-  if (sharedTaskEndpoint) {
+  if (sharedTask && sharedTaskEndpoint) {
+    // 上面的 guard / 端点判定 / 解压都是 await 边界:房主可能已撤权或移动任务目录。
+    // 落盘或读出前按最新任务记录重新绑定目录与端点(内含成员资格复核)。
+    const current = await assertSharedTaskWorkdir(sharedTask, args.workdir, sharedTaskOperation!);
     // 访客只能落到任务自己的执行端点(本地或任务所属 SSH 主机),不按路径反查到别的会话主机。
-    const expected = sharedTaskEndpoint.remoteHostId;
-    const sameEndpoint = expected
-      ? exec.kind === 'ssh' && exec.hostId === expected
-      : exec.kind === 'local';
+    const expected = current.remoteHostId;
+    const sameEndpoint =
+      expected === sharedTaskEndpoint.remoteHostId &&
+      (expected ? exec.kind === 'ssh' && exec.hostId === expected : exec.kind === 'local');
     if (!sameEndpoint) throw new Error('[PERMISSION_DENIED] Shared task working directory endpoint mismatch');
-    // 上面的 guard / 端点判定 / 解压都是 await 边界:撤权后不得再落盘或读出。
-    if (!sharedTask?.isCurrent() || !sharedTask.authorize(sharedTaskOperation!)) {
-      throw new Error('[PERMISSION_DENIED] Shared task access changed');
-    }
   }
 
   // —— SSH 二跳:直接透传给本机的 SSH file-service 路由 ——

@@ -264,7 +264,11 @@ describe('file-browser device-op', () => {
 
     beforeEach(() => {
       current = true;
-      sharedWorkdirMock.mockResolvedValue({ remoteHostId: null });
+      // Mirrors the real binding: membership is rechecked on every call.
+      sharedWorkdirMock.mockImplementation(async () => {
+        if (!current) throw new Error('[PERMISSION_DENIED] Shared task access changed');
+        return { remoteHostId: null };
+      });
     });
 
     it('reads and writes the task workdir like the owner after binding it', async () => {
@@ -310,6 +314,34 @@ describe('file-browser device-op', () => {
       await expect(
         asGuest(() =>
           handleRemoteOp({ op: 'writeFile', workdir, relPath: 'src/a.ts', content: 'late\n' }),
+        ),
+      ).rejects.toThrow('PERMISSION_DENIED');
+      const read = (await handleRemoteOp({ op: 'readFile', workdir, relPath: 'src/a.ts' })) as {
+        data: { content: string };
+      };
+      expect(read.data.content).toBe('export const a = 1;\n');
+    });
+
+    it('rebinds the task workdir and endpoint after the endpoint checks, before touching files', async () => {
+      // The owner moves the task while this write is in flight.
+      guardMock.mockImplementationOnce(async () => {
+        sharedWorkdirMock.mockRejectedValueOnce(new Error('[PERMISSION_DENIED] moved'));
+        return { allowed: true, source: 'filesystem' };
+      });
+      await expect(
+        asGuest(() =>
+          handleRemoteOp({ op: 'writeFile', workdir, relPath: 'src/a.ts', content: 'moved\n' }),
+        ),
+      ).rejects.toThrow('PERMISSION_DENIED');
+      expect(sharedWorkdirMock).toHaveBeenCalledTimes(2);
+      // The task switches to an SSH endpoint for the same path mid-request.
+      guardMock.mockImplementationOnce(async () => {
+        sharedWorkdirMock.mockResolvedValueOnce({ remoteHostId: 'ssh-1' });
+        return { allowed: true, source: 'filesystem' };
+      });
+      await expect(
+        asGuest(() =>
+          handleRemoteOp({ op: 'writeFile', workdir, relPath: 'src/a.ts', content: 'moved\n' }),
         ),
       ).rejects.toThrow('PERMISSION_DENIED');
       const read = (await handleRemoteOp({ op: 'readFile', workdir, relPath: 'src/a.ts' })) as {
