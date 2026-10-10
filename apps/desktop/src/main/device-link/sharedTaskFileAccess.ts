@@ -6,10 +6,11 @@ import { MAX_SHARED_TASK_TOPICS, sharedTaskWorkdirGeneration, type SharedTaskPee
 function deny(): never { throw new Error('[PERMISSION_DENIED] Working directory does not belong to this shared task'); }
 
 /** The task workdir as recorded on this host; guest-supplied paths are only compared to it. */
-async function sharedTaskWorkdir(capture: SharedTaskPeerCapture): Promise<{ workingDir: string; remoteHostId: string | null } | null> {
+async function sharedTaskWorkdir(capture: SharedTaskPeerCapture): Promise<{ workingDir: string; recorded: string; remoteHostId: string | null } | null> {
   const snapshot = await getSessionFsSnapshot(capture.author.sessionId);
   const workingDir = normalizeWorkingDirForStorage(snapshot?.workingDir);
-  return snapshot && workingDir ? { workingDir, remoteHostId: snapshot.remoteHostId } : null;
+  return snapshot?.workingDir && workingDir
+    ? { workingDir, recorded: snapshot.workingDir, remoteHostId: snapshot.remoteHostId } : null;
 }
 
 /**
@@ -46,8 +47,13 @@ export async function admitSharedTaskFsWatchTopics(
   const own = capture.isCurrent() && capture.authorize('file.read') ? await sharedTaskWorkdir(capture) : null;
   const verified = new Set<string>();
   if (own && capture.isCurrent()) {
+    // Each topic spelling starts its own host watcher, so admit only the exact
+    // recorded path (and its canonical form) that the guest client receives
+    // from the host. Aliases such as `/task/` or `/task//` would let a guest
+    // accumulate unbounded watchers across frames.
+    const allowed = new Set([own.recorded, own.workingDir]);
     for (const topic of watched) {
-      if (normalizeWorkingDirForStorage(parseFsWatchTopic(topic)) === own.workingDir) verified.add(topic);
+      if (allowed.has(parseFsWatchTopic(topic)!)) verified.add(topic);
     }
   }
   return { topics: topics.filter((topic) => typeof topic !== 'string' || !watched.has(topic) || verified.has(topic)), verified, isFresh };

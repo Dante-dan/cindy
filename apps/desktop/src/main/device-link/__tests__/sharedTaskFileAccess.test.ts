@@ -54,6 +54,17 @@ describe('shared task workdir binding', () => {
     expect(denied).toMatchObject({ topics: ['session:task'], verified: new Set() });
   });
 
+  it('rejects alias spellings of the workdir so a guest cannot multiply host watchers', async () => {
+    const aliases = ['fs-watch:/host/task/', 'fs-watch:/host/task//'];
+    const admitted = await admitSharedTaskFsWatchTopics(capture(), ['fs-watch:/host/task', ...aliases]);
+    expect([...admitted.verified]).toEqual(['fs-watch:/host/task']);
+    expect(admitted.topics).toEqual(['fs-watch:/host/task']);
+    // A legacy unnormalized record still admits the exact path the guest received.
+    snapshot.mockResolvedValueOnce({ workingDir: 'C:\\work\\task', remoteHostId: null, permissionMode: 'default', planModeEnabled: false });
+    const legacy = await admitSharedTaskFsWatchTopics(capture(), ['fs-watch:C:\\work\\task', 'fs-watch:C:\\work\\task\\']);
+    expect([...legacy.verified]).toEqual(['fs-watch:C:\\work\\task']);
+  });
+
   it('marks an admission stale when the task workdir moves during the lookup', async () => {
     const steady = await admitSharedTaskFsWatchTopics(capture(), ['fs-watch:/host/task']);
     expect(steady.isFresh()).toBe(true);
