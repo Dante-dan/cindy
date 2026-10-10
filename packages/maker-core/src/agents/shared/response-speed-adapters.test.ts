@@ -38,9 +38,11 @@ it('Pi publishes streaming estimates with untouched billing/cache counters, then
     send(6_000, { type: 'tool_execution_start', toolCallId: 't', toolName: 'bash', args: {} });
     expect(usageSnapshotOf(ctx).responseSpeed).toMatchObject({ phase: 'paused', toolActive: true, recentRate: null });
     send(16_000, { type: 'tool_execution_end', toolCallId: 't', toolName: 'bash', result: { content: [] } });
-    expect(usageSnapshotOf(ctx).responseSpeed?.toolActive).toBe(false);
+    expect(events.filter(event => event.type === 'status').at(-1)?.data).toMatchObject({
+      responseSpeed: { phase: 'waiting', toolActive: false, waitingMs: 0, durationMs: 2_000 },
+    });
     send(17_000, { type: 'message_start', message: { role: 'toolResult' } });
-    expect(usageSnapshotOf(ctx).responseSpeed?.phase).toBe('paused');
+    expect(usageSnapshotOf(ctx).responseSpeed).toMatchObject({ phase: 'waiting', waitingMs: 1_000 });
     send(17_000, { type: 'message_start', message: { role: 'assistant' } });
     send(18_000, { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'answer' } });
     send(19_000, { type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'answer' }],

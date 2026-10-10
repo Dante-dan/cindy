@@ -897,7 +897,7 @@ export function translatePiEvent(
 
     case 'tool_execution_end': {
       const toolUseId = String(event.toolCallId ?? '');
-      ctx.responseSpeed.toolEnded(toolUseId);
+      const endedTrackedTool = ctx.responseSpeed.toolEnded(toolUseId);
       const isError = event.isError === true;
       const rawText = toolResultFullText(event.result);
       const toolName = String(
@@ -946,6 +946,13 @@ export function translatePiEvent(
           },
           source: 'pi',
         });
+      }
+      if (endedTrackedTool && ctx.isStreaming) {
+        const speed = ctx.responseSpeed.snapshot();
+        // The last tool result is an observable wait boundary, even before
+        // Pi emits the next message_start. Keep parallel output/request clocks.
+        if (!speed.toolActive && speed.phase === 'paused') ctx.responseSpeed.beginRequest();
+        pushStatus(queue, ctx, 'Working…', true);
       }
       return;
     }

@@ -99,7 +99,7 @@ export class ResponseSpeedTracker {
   }
 
   toolStarted(id: string): void { if (id) this.tools.add(id); }
-  toolEnded(id: string): void { this.tools.delete(id); }
+  toolEnded(id: string): boolean { return this.tools.delete(id); }
 
   reportOutput(output: number | undefined): void {
     if (output !== undefined && Number.isFinite(output) && output >= 0) this.reported = output;
