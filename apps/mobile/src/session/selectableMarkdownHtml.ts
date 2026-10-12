@@ -28,6 +28,10 @@ export interface SelectableMarkdownHtmlOptions {
   chipColor?: string;
   /** Mermaid follows the containing WebView theme. */
   dark?: boolean;
+  /** Offscreen file pages keep Mermaid source without embedding its runtime. */
+  mermaidEnabled?: boolean;
+  /** Restore a revisited reader after its heavy runtime was released. */
+  restoreScrollY?: number;
   fontSize?: number;
   /** 文件预览正文左右边距；调用方传入共享 spacing.lg。 */
   horizontalPadding?: number;
@@ -96,11 +100,23 @@ export function buildSelectableMarkdownHtml(
     renderBlocks(blocks, { sessionLinkTitles: options.sessionLinkTitles, imageSources: options.imageSources }),
     '</main>',
     hasMath ? buildMathRuntimeScript() : '',
-    hasMermaid ? buildMermaidRuntimeScript(options.dark === true) : '',
+    hasMermaid && options.mermaidEnabled !== false ? buildMermaidRuntimeScript(options.dark === true) : '',
     buildTargetLineScript(options.targetLine),
+    buildScrollRestoreScript(options.restoreScrollY),
     '</body>',
     '</html>',
   ].join('');
+}
+
+/** Restore again when images and async diagrams finish changing document height. */
+function buildScrollRestoreScript(y: number | undefined): string {
+  if (y === undefined || !Number.isFinite(y) || y <= 0) return '';
+  return `<script>(function(){
+var scroll=function(){window.scrollTo(0,${y});};
+scroll();
+window.addEventListener('load',scroll);
+document.addEventListener('cindy-mermaid-settled',scroll);
+})();</script>`;
 }
 
 /**

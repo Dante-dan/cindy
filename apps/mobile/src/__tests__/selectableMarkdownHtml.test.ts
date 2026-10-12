@@ -134,6 +134,33 @@ describe('buildSelectableMarkdownHtml Mermaid 渲染', () => {
     expect(html).toContain('__esbuild_esm_mermaid_nm');
   });
 
+  it.each([false, true])('offscreen Mermaid retains source without runtime (dark=%s)', (dark) => {
+    const offscreen = buildSelectableMarkdownHtml(diagram, { dark, mermaidEnabled: false });
+    expect(offscreen).toContain('data-mermaid-source="graph TD\nA --&gt; B"');
+    expect(offscreen).not.toContain('__esbuild_esm_mermaid_nm');
+    expect(offscreen).not.toContain('renderMermaidNodes');
+    const visible = buildSelectableMarkdownHtml(diagram, { dark, mermaidEnabled: true });
+    expect(visible).toContain('__esbuild_esm_mermaid_nm');
+    expect(visible).toContain('renderMermaidNodes');
+  });
+
+  it('restores a revisited Mermaid page after document and diagram layout settle', () => {
+    const html = buildSelectableMarkdownHtml(diagram, { restoreScrollY: 420 });
+    const script = html.match(/<script>\(function\(\)\{\nvar scroll=function\(\)\{window\.scrollTo\(0,420\);\};[\s\S]*?<\/script>/)?.[0];
+    expect(script).toBeDefined();
+    const callbacks = new Map<string, () => void>();
+    const scrollTo = vi.fn();
+    Function('window', 'document', script!.slice(8, -9))(
+      { scrollTo, addEventListener: (name: string, callback: () => void) => callbacks.set(name, callback) },
+      { addEventListener: (name: string, callback: () => void) => callbacks.set(name, callback) },
+    );
+    expect(scrollTo).toHaveBeenLastCalledWith(0, 420);
+    callbacks.get('load')!();
+    callbacks.get('cindy-mermaid-settled')!();
+    expect(scrollTo).toHaveBeenCalledTimes(3);
+    expect(buildSelectableMarkdownHtml(diagram, { restoreScrollY: Infinity })).not.toContain('window.scrollTo(0,Infinity)');
+  });
+
   it('无 Mermaid 的文档不承担 runtime 体积', () => {
     const html = buildSelectableMarkdownHtml('普通文档');
     expect(html).not.toContain('__esbuild_esm_mermaid_nm');

@@ -1341,6 +1341,7 @@ function TextPreviewPage({
           )
         ) : (
           <MarkdownFileReader
+            visible={visible}
             markdown={ready?.content ?? ''}
             onPageSwipe={onMarkdownPageSwipe ? (direction) => onMarkdownPageSwipe(item.key, direction) : undefined}
             onQuoteSelection={onQuoteSelection}

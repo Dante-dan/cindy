@@ -19,6 +19,7 @@ import { Linking, StyleSheet, View } from 'react-native';
 import { WebView } from 'react-native-webview';
 import type { ShouldStartLoadRequest } from 'react-native-webview/lib/WebViewTypes';
 
+import { parseMobileMarkdown } from '@/session/messageMarkdown';
 import { buildSelectableMarkdownHtml } from '@/session/selectableMarkdownHtml';
 import { MARKDOWN_FILE_PAGER_SCRIPT, parseMarkdownPageSwipe } from '@/session/markdownFilePager';
 import { selectionQuoteMenuLabel } from '@/session/selectionQuote';
@@ -27,12 +28,15 @@ import { spacing, typeScale } from '@/theme/tokens';
 
 export function MarkdownFileReader({
   markdown,
+  visible,
   onPageSwipe,
   onQuoteSelection,
   targetLine,
   testID,
 }: {
   markdown: string;
+  /** True only for the focused pager page; neighbours still prefetch text. */
+  visible: boolean;
   /** 由文件预览 pager 消费的明确横向翻页；纵向移动会让该手势失败给 WebView。 */
   onPageSwipe?: (direction: 'previous' | 'next') => void;
   /** chat-text-quote:系统菜单「添加到对话」的采集回调;未传时不加菜单项。 */
@@ -44,6 +48,11 @@ export function MarkdownFileReader({
   const { t } = useTranslation();
   const { colors, mode } = useTheme();
   const quoteEnabled = !!onQuoteSelection;
+  const hasMermaid = useMemo(() => parseMobileMarkdown(markdown).some((block) => block.type === 'mermaid'), [markdown]);
+  const scrollPosition = useRef({ markdown, targetLine, y: 0 });
+  if (scrollPosition.current.markdown !== markdown || scrollPosition.current.targetLine !== targetLine) {
+    scrollPosition.current = { markdown, targetLine, y: 0 };
+  }
   // 菜单项在渲染时构造(而非模块常量):label 走 i18n;依赖 t 使语言切换后随重渲更新。
   const quoteMenuItems = useMemo(
     () => [{ key: 'xdtQuote', label: selectionQuoteMenuLabel() }],
@@ -53,6 +62,8 @@ export function MarkdownFileReader({
     borderColor: colors.border,
     chipColor: colors.surfaceChip,
     dark: mode === 'dark',
+    mermaidEnabled: visible,
+    restoreScrollY: hasMermaid && visible ? scrollPosition.current.y : undefined,
     inlineCodeColor: colors.chatInlineCodeText,
     fontSize: typeScale.body,
     // 与文件预览源码 FlatList 的 codeContent 对齐。
@@ -73,7 +84,7 @@ export function MarkdownFileReader({
     },
     textColor: colors.textPrimary,
     ...(targetLine ? { targetLine } : {}),
-  }), [colors, markdown, mode, targetLine]);
+  }), [colors, hasMermaid, markdown, mode, targetLine, visible]);
 
   // 回调走 ref:onQuoteSelection 引用变化(页面重渲)不应重建 handler,
   // 更不应让 WebView 重载。
@@ -97,6 +108,12 @@ export function MarkdownFileReader({
   return (
     <View style={styles.fill} testID={testID}>
       <WebView
+        // A new native view releases the previous Mermaid JS heap on blur.
+        // The replacement retains the lightweight source document.
+        key={hasMermaid && visible ? 'mermaid' : 'source'}
+        onScroll={({ nativeEvent: { contentOffset } }) => {
+          if (visible) scrollPosition.current.y = contentOffset.y;
+        }}
         injectedJavaScript={onPageSwipe ? MARKDOWN_FILE_PAGER_SCRIPT : undefined}
         onMessage={onPageSwipe ? handleMessage : undefined}
         menuItems={quoteEnabled ? quoteMenuItems : undefined}
