@@ -108,11 +108,20 @@ export function buildSelectableMarkdownHtml(
   ].join('');
 }
 
-/** Restore again when images and async diagrams finish changing document height. */
+/** Restore during async layout only until the reader starts interacting. */
 function buildScrollRestoreScript(y: number | undefined): string {
   if (y === undefined || !Number.isFinite(y) || y <= 0) return '';
   return `<script>(function(){
-var scroll=function(){window.scrollTo(0,${y});};
+var cancelled=false;
+var scroll=function(){if(!cancelled)window.scrollTo(0,${y});};
+var inputs=['touchstart','pointerdown','wheel','keydown'];
+var cancel=function(){
+  cancelled=true;
+  window.removeEventListener('load',scroll);
+  document.removeEventListener('cindy-mermaid-settled',scroll);
+  inputs.forEach(function(name){document.removeEventListener(name,cancel,true);});
+};
+inputs.forEach(function(name){document.addEventListener(name,cancel,{capture:true,passive:true});});
 scroll();
 window.addEventListener('load',scroll);
 document.addEventListener('cindy-mermaid-settled',scroll);

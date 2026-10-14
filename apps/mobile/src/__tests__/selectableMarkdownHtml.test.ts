@@ -144,22 +144,29 @@ describe('buildSelectableMarkdownHtml Mermaid 渲染', () => {
     expect(visible).toContain('renderMermaidNodes');
   });
 
-  it('restores a revisited Mermaid page after document and diagram layout settle', () => {
-    const html = buildSelectableMarkdownHtml(diagram, { restoreScrollY: 420 });
-    const script = html.match(/<script>\(function\(\)\{\nvar scroll=function\(\)\{window\.scrollTo\(0,420\);\};[\s\S]*?<\/script>/)?.[0];
-    expect(script).toBeDefined();
-    const callbacks = new Map<string, () => void>();
-    const scrollTo = vi.fn();
-    Function('window', 'document', script!.slice(8, -9))(
-      { scrollTo, addEventListener: (name: string, callback: () => void) => callbacks.set(name, callback) },
-      { addEventListener: (name: string, callback: () => void) => callbacks.set(name, callback) },
-    );
-    expect(scrollTo).toHaveBeenLastCalledWith(0, 420);
-    callbacks.get('load')!();
-    callbacks.get('cindy-mermaid-settled')!();
-    expect(scrollTo).toHaveBeenCalledTimes(3);
-    expect(buildSelectableMarkdownHtml(diagram, { restoreScrollY: Infinity })).not.toContain('window.scrollTo(0,Infinity)');
-  });
+  it.each([undefined, 'touchstart', 'pointerdown', 'wheel', 'keydown'])(
+    'restores during layout until reader input (%s)',
+    (input) => {
+      const html = buildSelectableMarkdownHtml(diagram, { restoreScrollY: 420 });
+      const script = html.match(/<script>\(function\(\)\{\nvar cancelled=false;[\s\S]*?<\/script>/)?.[0];
+      expect(script).toBeDefined();
+      const readerWindow = new EventTarget();
+      const readerDocument = new EventTarget();
+      const scrollTo = vi.fn();
+      Function('window', 'document', script!.slice(8, -9))(
+        Object.assign(readerWindow, { scrollTo }), readerDocument,
+      );
+      expect(scrollTo).toHaveBeenLastCalledWith(0, 420);
+      // Layout restoration itself must not cancel later diagram restoration.
+      readerWindow.dispatchEvent(new Event('scroll'));
+      if (input) readerDocument.dispatchEvent(new Event(input));
+      readerWindow.dispatchEvent(new Event('load'));
+      readerDocument.dispatchEvent(new Event('cindy-mermaid-settled'));
+      readerDocument.dispatchEvent(new Event('cindy-mermaid-settled'));
+      expect(scrollTo).toHaveBeenCalledTimes(input ? 1 : 4);
+      expect(buildSelectableMarkdownHtml(diagram, { restoreScrollY: Infinity })).not.toContain('window.scrollTo(0,Infinity)');
+    },
+  );
 
   it('无 Mermaid 的文档不承担 runtime 体积', () => {
     const html = buildSelectableMarkdownHtml('普通文档');
