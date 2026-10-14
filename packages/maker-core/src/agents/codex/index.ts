@@ -315,6 +315,9 @@ type CodexEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ul
 const CODEX_MINIMAL_EFFORT_MODELS = new Set([
   'bytedance-seed/seed-2.1-pro',
   'z-ai/glm-5.2',
+  // Muse Wonder：XD Gateway ID 与 Meta Model API 官方 ID（自定义连接经 alias 继承同一档位）。
+  'meta/muse-wonder-1.0',
+  'muse-wonder-1.0',
 ]);
 
 /**
@@ -351,7 +354,7 @@ function statusTextForItem(item: { type?: string; command?: string; tool?: strin
 /**
  * maker Effort → Codex app-server 可透传档。
  *
- * Seed 2.1 Pro 与 GLM-5.2 的官方档位包含 minimal，原样下发；其他模型继续
+ * Seed 2.1 Pro、GLM-5.2 与 Muse Wonder 的官方档位包含 minimal，原样下发；其他模型继续
  * 把 minimal 收敛到 low。max / ultra 直接透传，不再静默降级为 xhigh(issue #352)。
  * 某模型是否真支持某档位由目录 efforts 与 UI/reconcile 门控保证。
  */
@@ -3621,6 +3624,13 @@ assertRouteCurrent();
     // 受邀者只能用分享给它的那一个供应商(启动来源就是它)：app-server 不升格、不开智能子代理调配，
     // 自定义供应商路由与按模型分流也只留它(见 prepareCodexExtraSpawnConfig 的 deviceHostedGuestProviderId)。
     const guestProviderId = hostedGuest ? hosted?.guestProvider?.providerId : undefined;
+    // Input handoff askpass for this owner's own local tasks. The app-server is
+    // shared, so the variables reach this thread's commands through its config.
+    const taskShellEnvConfig = Object.fromEntries(Object.entries(
+      !opts.remoteHostId && !hosted && !reviewMode && sid
+        ? this.deps.runtimeConfig.taskShellEnv?.({ sessionId: sid }) ?? {}
+        : {},
+    ).map(([name, value]) => [`shell_environment_policy.set.${name}`, value]));
     if (hostedGuest && (!guestProviderId || guestProviderId !== opts.providerId)) {
       throw new Error('[REMOTE_AGENT_PROVIDER_NOT_ALLOWED] this provider is not allowed for remote use on this computer');
     }
@@ -6461,6 +6471,7 @@ assertRouteCurrent();
         // starts a second continuation loop whose turns bypass Session.send
         // and lose the Host origin after the first terminal event.
         'features.goals': false,
+        ...taskShellEnvConfig,
         // Keep companion memory in its own Home. Native delegation uses the
         // same feature settings and permissions as an ordinary task.
         ...(opts.botRuntimeProfile ? {
@@ -6482,6 +6493,10 @@ assertRouteCurrent();
           : {}),
         ...(reviewMode
           ? {
+              // Keep project instructions inside the approved Review root.
+              // An empty marker list stops Codex from walking above cwd while
+              // still loading an AGENTS.md located in cwd itself.
+              ...(process.platform === 'win32' ? {} : { project_root_markers: [] }),
               // Windows native sandboxes cannot enforce this split read scope.
               // Keep the deny policy, and route evidence reads through the host.
               // Native AGENTS discovery also invokes that incompatible sandbox.

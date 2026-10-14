@@ -1,4 +1,12 @@
 {
+  "logSupport": {
+    "title": "日志与反馈",
+    "localFiles": "选择问题当天的日志。文件未脱敏，请先检查。",
+    "uploaded": "日志已上传，上传编号：{{code}}。反馈时请附上编号。",
+    "close": "关闭",
+    "uploadDescription": "上传后，请在反馈中附上上传编号。",
+    "uploadDetails": "查看上传内容"
+  },
   "taskMove": {
     "upgradeComputer": "这台电脑的 Cindy 版本暂不支持移动任务。请更新「{{name}}」上的 Cindy 后再试。",
     "sourceProjects": "任务所在电脑的项目",
@@ -374,6 +382,30 @@
       "modelsRefused": "对方电脑暂时不让读取这个分享：可能没有允许远程控制、关了这个供应商的「允许被远程调用」，也可能对方的 Cindy 刚启动、还没准备好。请稍后重试，或让对方检查这两项设置。",
       "modelsFailedWithCode": "暂时读不到对方开放的模型，请稍后重试。（错误代码：{{code}}）",
       "retryModels": "重新读取模型",
+      "groupStatus": {
+        "title": "组内电脑状态",
+        "shareActive": "分享已开启",
+        "refresh": "刷新状态",
+        "computer": "电脑 {{number}}",
+        "summary": "{{total}} 台中有 {{ready}} 台可接任务",
+        "loading": "正在读取电脑状态…",
+        "unsupported": "分享者的 Cindy 暂未提供状态，请联系分享者检查或更新",
+        "failed": "电脑状态读取失败，请刷新重试",
+        "unconfirmed": "部分电脑状态尚未确认，请稍后刷新",
+        "noneReady": "目前没有可接任务的电脑，请联系分享者检查",
+        "note": "仅显示匿名状态，不显示电脑名称和用量。能否运行还取决于所选模型。",
+        "updateNote": "需要分享者更新对应电脑上的 Cindy，才能接收分享来的任务",
+        "state": {
+          "available": "可用",
+          "busy": "忙碌，仍可接任务",
+          "cooling": "冷却中，暂不接新任务",
+          "offline": "离线或无法连接",
+          "paused": "已暂停分配",
+          "unavailable": "暂不可用",
+          "needs-update": "需要更新",
+          "unknown": "状态未知"
+        }
+      },
       "modelsEmpty": "对方还没有开放可用的模型。",
       "pausedNote": "对方暂停了这个分享，恢复后才能使用。",
       "offlineNote": "对方电脑不在线，上线后就能继续使用。",
@@ -438,11 +470,13 @@
       "round": "轮询",
       "order": "按顺序",
       "weight": "按权重",
+      "usage": "用量均衡",
       "description": {
         "least": "给最闲的那台",
         "round": "依次轮流",
         "order": "排前面的优先",
-        "weight": "按权重比例"
+        "weight": "按权重比例",
+        "usage": "按5小时和每周用量分配"
       }
     },
     "autoSwitch": {
@@ -451,6 +485,13 @@
     },
     "member": {
       "local": "本机",
+      "version": {
+        "current": "Cindy {{version}}",
+        "updateRequired": "需要更新",
+        "unknown": "版本未知",
+        "needsUpdate": "需要更新才能接收分享任务",
+        "supportUnknown": "分享任务兼容性未知"
+      },
       "sourceDevice": "我的其他电脑",
       "sourceShare": "来自 {{name}} 的分享",
       "shareComputer": "{{name}} 的电脑",
@@ -710,7 +751,10 @@
     "copy": "复制到本机",
     "paste": "粘贴到远程电脑",
     "clipboardSyncHint": "此窗口在前台时，双向同步文字、图片和富文本。",
-    "credentialRequired": "请完成 Mac 密码验证。如果无法验证，请更新两台电脑上的 Cindy。"
+    "credentialRequired": "请完成 Mac 密码验证。如果无法验证，请更新两台电脑上的 Cindy。",
+    "handoffEnded": "这次代输入已经结束，没有可显示的窗口。",
+    "handoffUnavailable": "这台电脑暂时不能只显示这个窗口。请在那台电脑上更新 Cindy，或开启远程桌面。",
+    "handoffWindow": "代输入 · {{app}}"
   },
   "ipcError": {
     "DEVICE_LINK_BUSY": "远端繁忙，请稍后重试。",
@@ -1079,12 +1123,9 @@
       "today": "今天",
       "manageTitle": "管理",
       "done": "完成",
-      "manageHero": "菜单里显示什么，\n按什么顺序。",
-      "manageHeroSub": "拖动调整顺序；关掉的来源不在菜单里出现，也不参与上面的余量判断。",
       "sources": "余量来源",
       "sourcesShown": "{{a}} / {{b}} 显示",
       "statusIcon": "菜单栏图标",
-      "statusIconSub": "单色，随菜单栏深浅变化",
       "statusIconMode": {
         "icon": "只图标",
         "lowest": "最低余量",
@@ -1093,11 +1134,9 @@
       },
       "other": "其他",
       "lowAlert": "快用完时通知",
-      "lowAlertSub": "所有还有余量的来源都快见底时，发一条系统通知",
       "privacy": "隐藏个人信息",
-      "privacySub": "账号只显示首尾字母，任务标题也会隐藏，适合录屏和截图",
       "usageScope": "用量统计范围",
-      "manageFoot": "账号登录和连接在 Cindy 设置 › 模型供应商 里管理。",
+      "manageFoot": "管理模型供应商",
       "showSource": "在菜单里显示 {{name}}",
       "reorderHint": "拖动，或用操作菜单调整顺序",
       "moveUp": "上移",
@@ -1601,6 +1640,7 @@
         "done": "已完成 ✓",
         "error": "执行失败",
         "needsReply": "需要你回复",
+        "inputHandoff": "需要你代为输入",
         "externalDone": "Cindy · 任务「{{title}}」已完成 ✓",
         "externalError": "Cindy · 任务「{{title}}」执行失败",
         "externalNeedsReply": "Cindy · 任务「{{title}}」需要你回复",
@@ -6058,7 +6098,12 @@
           "invalidPackage": "插件安装包异常，无法安装，请联系发布者。",
           "downloadTimeout": "插件下载超时，请稍后重试。",
           "downloadFailed": "插件下载失败，请检查网络后重试。",
-          "brokerRedirectPortRequired": "该插件声明了授权 broker，但同一项 OAuth 配置缺少 redirectPort，无法从插件市场安装。请联系发布者补充该字段并重新发布。"
+          "brokerRedirectPortRequired": "该插件声明了授权 broker，但同一项 OAuth 配置缺少 redirectPort，无法从插件市场安装。请联系发布者补充该字段并重新发布。",
+          "namespaceClientRequired": "当前版本无法查看企业插件，请更新 Cindy。已安装的企业插件仍可使用。",
+          "organizationContextUnavailable": "暂时无法确认企业身份，请稍后重试。已安装的企业插件仍可使用。",
+          "namespaceConfigRequired": "企业插件服务暂不可用。已安装的企业插件仍可使用。",
+          "listChanged": "企业插件目录已变化，请重试。",
+          "organizationUnavailable": "企业插件暂不可用。已安装的企业插件仍可使用。"
         },
         "securityTitle": "安装与权限",
         "securityDescription": "安装包会在主进程中校验大小与 SHA-256，再经 Cindy 插件清单校验后原子安装。安装前会请你确认插件的权限，装好后即自动开启，可随时在插件页停用；更新会保留当前生效状态，新版本权限变多时会先请你确认。",
@@ -6537,7 +6582,23 @@
         "installLocationPickedPrefix": "已选择：",
         "installLocationChange": "更改…",
         "bindAfterInstallFailed": "自定义存储位置设置失败，已回退默认位置",
-        "cancel": "取消"
+        "cancel": "取消",
+        "reattachTitle": "接回这个插件以前的作品数据？",
+        "reattachDescription": "本机还保留着这个插件以前安装时的作品数据，可能来自之前从本地导入、后来卸载的版本。接回后，以前的画布和图片会继续出现在这次安装的插件里；不接回则从空白开始，以前的数据仍保留在本机。",
+        "reattachConfirm": "接回",
+        "reattachSkip": "不接回",
+        "legacyFoundBanner": "这台电脑上还有这个插件以前留下的作品数据（{{size}} · {{count}} 个文件），当前安装没有使用它。",
+        "legacyReattach": "接回以前的作品数据",
+        "legacyReattachBusy": "正在接回…",
+        "legacyReattachConfirmTitle": "接回以前的作品数据？",
+        "legacyReattachConfirmDescription": "插件会改用以前留下的作品数据。当前的作品数据会移入回收站，保留 30 天，期满后彻底清除。",
+        "legacyReattachConfirmText": "接回",
+        "legacyReattachDone": "已接回以前的作品数据",
+        "legacyReattachFailed": "接回失败",
+        "legacyReattachNeedsRestart": "没能清掉这个插件的缓存。请重启 Cindy 后再使用这个插件。",
+        "legacyInUseBanner": "这台电脑上另一个安装（例如本地版）还在使用这个插件以前的作品数据。卸载那个安装后，可以在这里接回。",
+        "legacyFoundUnknownBanner": "这台电脑上有一份可能是这个插件以前留下的作品数据（{{size}} · {{count}} 个文件），没有来源记录，当前安装没有使用它。",
+        "legacyReattachUnknownSource": "这份作品数据没有来源记录，可能是手动复制或用脚本搬过来的。请确认它属于这个插件。"
       },
       "updateConfirm": {
         "title": "更新插件「{{name}}」？",
@@ -8920,6 +8981,14 @@
         "attachmentsFailed": "附件没能发出去，请检查文件是否还在，或移除后重试",
         "folderNotSupported": "文件夹不能作为附件，请选择其中的文件"
       },
+      "quote": {
+        "replyingTo": "引用 {{name}}",
+        "remove": "取消引用",
+        "jumpLabel": "查看 {{name}} 的原消息：{{summary}}",
+        "deleted": "原消息已删除",
+        "unavailable": "原消息不在可查看的记录里",
+        "attachments": "{{name}} 等 {{total}} 个附件"
+      },
       "timeline": {
         "loadEarlier": "查看更早的消息",
         "loadEarlierFailed": "更早的消息没能加载，请再试一次",
@@ -9018,7 +9087,8 @@
         "requestTimeout": "还未确认操作结果，请刷新查看后再重试。",
         "permissionDenied": "你没有执行此操作的群管理权限。",
         "serviceError": "群聊服务处理失败，请稍后重试。",
-        "groupArchived": "本群已归档，不能执行此操作。"
+        "groupArchived": "本群已归档，不能执行此操作。",
+        "quoteUnavailable": "引用的消息已删除或不可见，已取消引用，请再发送一次"
       },
       "organizer": "负责人",
       "plan": {
@@ -9050,9 +9120,11 @@
         "openFailed": "文件没能打开，可能已被移动或删除"
       },
       "server": {
-        "reply": "回复",
+        "quoteReply": "引用回复",
+        "startTopic": "创建话题",
+        "openTopic": "查看话题 · {{count}} 条回复",
+        "topic": "话题",
         "replies": "回复",
-        "replyCount": "{{count}} 条回复",
         "replyPlaceholder": "回复这条消息，可用 @ 点名伙伴…",
         "sendReply": "发送回复",
         "addReaction": "添加表情回应",
@@ -9196,7 +9268,11 @@
       "configure": "前往配置",
       "empty_toolset": "当前执行环境没有可用的内置工具。",
       "empty_mcp": "尚未添加自定义 MCP 服务。",
-      "empty_skill": "暂无可选的技能。"
+      "empty_skill": "暂无可选的技能。",
+      "inputHandoff": {
+        "title": "代输入",
+        "description": "遇到需要你本人输入的登录信息、密码或验证码时，允许这位伙伴请你在任意设备上填写。你填写的内容不会交给它。"
+      }
     },
     "guided": {
       "title": "创建伙伴",
@@ -9655,6 +9731,21 @@
       "addRemoteProject": "添加远程项目"
     },
     "modelSelector": {
+      "displayPricing": {
+        "free": "免费",
+        "estimated": "约 {{price}}",
+        "startingAt": "{{price}} 起",
+        "units": {
+          "token": "token",
+          "character": "字符",
+          "image": "张",
+          "second": "秒",
+          "minute": "分钟",
+          "request": "次",
+          "megapixel": "百万像素",
+          "megapixelSecond": "百万像素·秒"
+        }
+      },
       "budgetNeedsApiKey": "此模型需先在设置里配置 API key 才能使用",
       "paymentRequired": {
         "badge": "付费",
@@ -9762,6 +9853,7 @@
         "railAll": "全部",
         "railRemoteProvider": "{{provider}} · {{device}}",
         "remoteLoading": "正在读取那台电脑的模型…",
+        "remoteFavoriteUnavailable": "{{source}} · 暂时读不到那台电脑的模型",
         "favoritesGroup": "收藏",
         "favoritesSaveFailed": "未能保存收藏更改",
         "favoritesCleanupFailed": "未能清理已失效的分享模型收藏",
@@ -10484,6 +10576,8 @@
       "syncAuthFailed": "同步失败：{{msg}}",
       "syncAuthDaemonRestartFailed": "凭证已推送到远端，但旧 daemon 没重启 — 请重连远端后再点重试",
       "invalidEncryptedContent": "由于更换供应商导致加密不可用，本任务只能在原供应商下使用，或点此 Fork 丢弃协议加密内容并在新任务继续。",
+      "readableHistoryRecovery": "用可读历史新建任务",
+      "readableHistoryRecoveryDescription": "如果重试仍然失败，可用可读历史新建任务，省略内部加密信息。原任务保留，失败消息不会自动重发。",
       "forkStripEncrypted": "Fork 并剥离",
       "forkStripEncryptedRunning": "Fork 中…",
       "forkStripEncryptedTitle": "Fork 并剥离出新任务(去掉加密推理内容)",
@@ -11495,7 +11589,8 @@
         "awaitingPermission": "等待授权",
         "awaitingQuestion": "等待你的回复",
         "awaitingPlan": "等待计划审阅",
-        "awaitingPluginSetup": "等待插件设置"
+        "awaitingPluginSetup": "等待插件设置",
+        "awaitingInputHandoff": "等待代输入"
       },
       "showAllSessions": "显示全部 {{count}} 项",
       "allSessions": "全部任务",
@@ -13063,6 +13158,125 @@
       "deny": "拒绝"
     }
   },
+  "inputHandoff": {
+    "originWarning": {
+      "insecure": "这个页面没有使用安全连接，输入的内容可能被他人读取。",
+      "ip-address": "这个页面使用 IP 地址而不是域名，请确认它是你预期的网站。",
+      "local-host": "这个页面来自本机服务，请确认它是你预期的程序。",
+      "local-file": "这个页面是本地文件，请确认它是你预期的内容。",
+      "punycode": "这个网址包含特殊字符，可能在冒充其他网站，请仔细核对。",
+      "embedded-frame": "输入框位于嵌入的其他网站中，请确认来源可信。"
+    },
+    "agentControlled": "这个界面由 Agent 打开。填写前请确认它确实是你要登录的地方。",
+    "error": {
+      "decision": "操作没有送达，请重试。",
+      "stale": "界面已经变化，请按最新内容操作。",
+      "submit": "输入没有送达，请重试。"
+    },
+    "terminal": {
+      "succeeded": "已交还给 Agent。",
+      "cancelled": "已取消代输入。",
+      "failed": "代输入已结束。",
+      "expired": "等待时间过长，代输入已结束。"
+    },
+    "failure": {
+      "permission": "Cindy 没有读取这台电脑界面的权限。请在系统设置的辅助功能中允许 Cindy。",
+      "target_gone": "目标窗口已关闭。",
+      "unreadable": "无法读取这个界面。可以在宿主电脑上直接完成，然后交还给 Agent。",
+      "action_failed": "刚才的操作没有生效，请检查界面后重试。",
+      "timeout": "等待时间过长，代输入已结束。",
+      "unsupported": "这台电脑暂不支持代输入。",
+      "origin_changed": "填写前页面已变化，什么都没有填入。请确认现在的页面后再填写。",
+      "picture_unavailable": "没能显示这一步的画面。请在系统设置中允许 Cindy 录制屏幕，并确认窗口没有被最小化。",
+      "screen_locked": "这台电脑的屏幕已锁定（显示器休眠也会锁屏）。请先唤醒并解锁，再让 Agent 重试。",
+      "nothing_to_fill": "这个界面没有需要你输入的内容，已交还给 Agent 继续。"
+    },
+    "phase": {
+      "reading": "正在读取界面…",
+      "working": "正在填写…",
+      "finishing": "看起来已经完成，{{count}} 秒后交还给 Agent。",
+      "finishingNow": "看起来已经完成，正在交还给 Agent…"
+    },
+    "action": {
+      "stay": "还没完成",
+      "done": "交还给 Agent",
+      "claim": "改在这里处理",
+      "picture": "看画面",
+      "backToForm": "回到表单",
+      "liveView": "实时画面",
+      "fill": "填写",
+      "skip": "跳过",
+      "continue": "继续",
+      "close": "取消",
+      "showPassword": "显示密码",
+      "hidePassword": "隐藏密码",
+      "scan": "扫码"
+    },
+    "remoteUnavailable": "这台电脑不能从远程接收输入。请在宿主电脑上完成这一步，再交还给 Agent。",
+    "unnamedField": "输入框",
+    "passwordField": "密码",
+    "codeField": "验证码",
+    "filledHint": "已有内容；留空则保持不变。",
+    "record": {
+      "doneOn_one": "主人在 {{device}} 完成了 {{count}} 步输入",
+      "doneOn_other": "主人在 {{device}} 完成了 {{count}} 步输入",
+      "doneHost_one": "主人在宿主电脑上完成了 {{count}} 步输入",
+      "doneHost_other": "主人在宿主电脑上完成了 {{count}} 步输入",
+      "donePhone_one": "主人在手机上完成了 {{count}} 步输入",
+      "donePhone_other": "主人在手机上完成了 {{count}} 步输入",
+      "doneElsewhere_one": "主人在另一台设备上完成了 {{count}} 步输入",
+      "doneElsewhere_other": "主人在另一台设备上完成了 {{count}} 步输入",
+      "done": "代输入已完成",
+      "nothingToFill": "无需输入，已交还给 Agent",
+      "cancelled": "代输入已取消",
+      "expired": "代输入已超时",
+      "failed": "代输入未完成"
+    },
+    "holder": {
+      "elsewhere": "正在 {{device}} 上处理，也可以改在这里处理。",
+      "host": "宿主电脑",
+      "phone": "手机",
+      "otherDevice": "另一台设备"
+    },
+    "agentNote": "Agent 补充：{{note}}",
+    "picture": {
+      "hint": "点按画面里的位置，Cindy 会在宿主电脑上点按同一个位置。",
+      "open": "显示这一步的画面",
+      "alt": "目标窗口的画面",
+      "loading": "正在获取画面…",
+      "error": "没能取得画面，请重试。",
+      "field": "当前输入框",
+      "type": "输入",
+      "typeEnter": "输入并回车"
+    },
+    "deviceCode": {
+      "prompt": "用这个代码登录",
+      "copy": "复制代码",
+      "copied": "已复制代码",
+      "copyFailed": "复制失败",
+      "open": "在本设备打开",
+      "openFailed": "无法打开链接",
+      "then": "在打开的页面输入代码并完成登录，然后点「交还给 Agent」。"
+    },
+    "nothingLeft": "这里没有需要你填写的了。",
+    "dialogNote": "只会填进电脑上的这一处，不会交给 Agent，也不会保存。",
+    "qr": {
+      "open": "在本机打开 {{site}}",
+      "copyLink": "复制链接",
+      "copyText": "复制内容",
+      "copied": "已复制。",
+      "copyFailed": "没能复制，请重试。",
+      "loading": "正在获取二维码…",
+      "scanned": "已扫码，等你在手机上确认。确认后会自动继续。",
+      "hint": "用手机扫描这个码完成登录。登录后会自动继续。",
+      "hintLink": "用手机扫描这个码，或在本机打开链接完成登录。登录后会自动继续。",
+      "copyImage": "复制图片",
+      "imageCopied": "已复制图片。",
+      "openFailed": "没能打开这个链接。可以用手机扫描这个码。",
+      "alt": "电脑上的二维码。点击会点在电脑上的这个码上。",
+      "failed": "没能取得二维码，点击重试。"
+    }
+  },
   "commandPalette": {
     "viewSkillDetails": "查看技能详情",
     "projectSkillNotLoaded": "当前 Pi 任务尚未加载此项目 Skill，新任务会自动尝试加载"
@@ -14347,7 +14561,9 @@
         "description": "请将以下信息发送至客服邮箱 {{email}}，以申请开具发票。",
         "requiredInfo": "邮件中请提供以下信息：",
         "emailSubject": "申请开具订单 {{orderId}} 的发票",
-        "emailBody": "您好，\n\n我想申请开具以下订单的发票：\n\n────────────────────\n订单号：{{orderId}}\n应用：{{application}}\n支付方式：{{paymentMethod}}\n开票金额：{{amount}}\n发票抬头：\n联系人：\n联系电话：\n邮箱：\n────────────────────\n\n谢谢。",
+        "personalInvoicePolicy": "Cindy 个人版充值默认开具<strong>个人抬头发票</strong>，抬头可填写姓名或“个人”。如需开具企业抬头发票用于公司报销，请提供<strong>加盖公司公章的报销说明</strong>，并在说明中注明开票抬头。",
+        "invoiceTitleHint": "填写说明：个人抬头请填写姓名或“个人”；如需企业抬头用于公司报销，请随邮件附上加盖公司公章、注明开票抬头的报销说明。",
+        "emailBody": "您好，\n\n我想申请开具以下订单的发票：\n\n────────────────────\n订单号：{{orderId}}\n应用：{{application}}\n支付方式：{{paymentMethod}}\n开票金额：{{amount}}\n发票抬头：\n{{invoiceTitleHint}}\n\n联系人：\n联系电话：\n邮箱：\n────────────────────\n\n谢谢。",
         "sendAction": "发送开票申请",
         "emailCopied": "客服邮箱已复制",
         "emailCopyFailed": "复制客服邮箱失败，请重试",
