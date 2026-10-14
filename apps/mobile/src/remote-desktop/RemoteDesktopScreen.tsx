@@ -456,6 +456,8 @@ export function RemoteDesktopSession({
   );
   const [busy, setBusy] = useState(false);
   const [inputMode, setInputMode] = useInputModePreference();
+  const inputModeRef = useRef(inputMode);
+  inputModeRef.current = inputMode;
   const canInput = Boolean(lease?.controlling) && !viewOnlySelected;
   const mode: Mode = canInput ? inputMode : "pan";
   const [operations, setOperations] = useState(false);
@@ -1228,7 +1230,15 @@ export function RemoteDesktopSession({
             videoSettingsRef.current.audio &&
             !audioUnavailable.current,
         });
-        send({ type: "mode", mode });
+        // Playback and remembered-display setup can yield after the lease has
+        // granted control. Read current intent and control here so this init
+        // cannot overwrite the mode effect with the pre-connect pan closure.
+        send({
+          type: "mode",
+          mode: inputAllowed(Boolean(active.current?.controlling))
+            ? inputModeRef.current
+            : "pan",
+        });
         // Entering remote desktop is the user's intent to control. The existing
         // host permission and ownership gates still decide whether it is allowed.
         if (next.controlling) send({ type: "control", enabled: inputAllowed(true) });
@@ -1257,7 +1267,6 @@ export function RemoteDesktopSession({
       fail,
       handoff,
       landscape,
-      mode,
       request,
       resolveControlFailure,
       send,

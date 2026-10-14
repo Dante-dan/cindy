@@ -4797,6 +4797,41 @@ describe("remote desktop controls", () => {
         return result;
       });
     };
+    it.each(["touch", "pointer"])(
+      "keeps the %s mode when native playback finishes after control is granted",
+      async (inputMode) => {
+        autoControl();
+        fixture.nativeMedia = true;
+        fixture.hostPlatform = "win32";
+        storage.items.set("cindy.mobile.remote-desktop.input-mode.v1", inputMode);
+        // Reload the phone-local preference before connecting, without opening
+        // the operations menu or changing the selected mode.
+        await act(async () => root.unmount());
+        root = createRoot(host);
+        await act(async () => root.render(<RemoteDesktopScreen />));
+        let finishPlayback: (() => void) | undefined;
+        fixture.playback.mockImplementation((enabled) =>
+          enabled
+            ? new Promise<void>((resolve) => { finishPlayback = resolve; })
+            : Promise.resolve(),
+        );
+        await act(async () => {
+          fixture.message!({ nativeEvent: { data: '{"type":"ready"}' } });
+        });
+        expect(finishPlayback).toBeDefined();
+        // React has committed the controlling lease while playback is pending.
+        expect(sent().filter((m) => m.type === "mode").at(-1)).toEqual({
+          type: "mode", mode: inputMode,
+        });
+        await act(async () => finishPlayback!());
+        expect(sent().filter((m) => m.type === "mode").at(-1)).toEqual({
+          type: "mode", mode: inputMode,
+        });
+        expect(sent().filter((m) => m.type === "control").at(-1)).toEqual({
+          type: "control", enabled: true,
+        });
+      },
+    );
     it("enters without a separate control request", async () => {
       autoControl();
       await connect();
