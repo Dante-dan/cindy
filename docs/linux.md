@@ -289,6 +289,11 @@ command on the matching x64 or arm64 Linux host:
 pnpm --filter desktop release:package --platform linux --region global
 ```
 
+Cindy Make personal builds explicitly pass `--linux-deb-only`: Forge runs only
+MakerDeb and artifact collection requires only the DEB, so these builds do not
+require `rpmbuild`. The same flag is available for manual DEB-only builds.
+Without it, the packaging command continues producing both formats.
+
 For a versioned release, add `--version x.y.z` with the release version.
 The artifact directory contains the DEB and RPM, with checksums and sizes in
 `build-info.json`. RPM filenames use `x86_64` or `aarch64`. The RPM entry uses
