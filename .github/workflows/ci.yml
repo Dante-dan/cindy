@@ -36,7 +36,7 @@ jobs:
       - name: Install Linux build prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y fakeroot dpkg desktop-file-utils rpm xvfb dbus-x11 libsecret-1-dev libx11-dev libxkbfile-dev libgtk-3-dev libnss3 libasound2t64 libgbm1 libxtst6 libarchive-tools libjson-c-dev
+          sudo apt-get install -y fakeroot dpkg desktop-file-utils rpm xvfb dbus-x11 libsecret-1-dev libx11-dev libxkbfile-dev libgtk-3-dev libnss3 libasound2t64 libgbm1 libxtst6 libarchive-tools libjson-c-dev libturbojpeg0-dev libpng-dev libwayland-dev libwayland-bin libxkbcommon-dev build-essential pkg-config
       - run: pnpm install --frozen-lockfile
       - name: Build both formats and run repository packaged smoke
         run: xvfb-run -a pnpm --filter desktop release:package --platform linux --arch ${{ matrix.arch }} --region global
