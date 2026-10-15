@@ -36,12 +36,13 @@
 //
 // 产物: release/artifacts/<region>/<version|unversioned>/<platform-arch>/
 //   cindy-<version|unversioned>-Setup.exe / -<arch>.dmg /
-//              -<amd64|arm64>.deb                        安装包
+//              -<amd64|arm64>.deb / -<x86_64|aarch64>.rpm  安装包
 //   cindy-<version>-hotfix.zip                           热更包(仅有版本时)
 //   build-info.json                                      发布侧唯一输入
 // =============================================================================
 
 import { execFileSync, execSync } from 'node:child_process';
+import { rpmArch } from '@electron-forge/maker-rpm';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -474,9 +475,18 @@ async function finishLinux({ artifactDir, baseName, arch }) {
   // 包一致:归集时写死 amd64 会让 arm64 产物顶着 amd64 的名字发出去。
   const installerPath = path.join(artifactDir, `${baseName}-${debianArch(arch)}.deb`);
   fs.copyFileSync(debPath, installerPath);
-  // One verified payload: Debian uses pkexec; managed user installs on Arch /
-  // Omarchy extract it without elevation and atomically switch releases.
-  return { files: [fileEntry('installer', installerPath)], signing: { mode: 'none' } };
+  const rpmPath = findInstallerArtifact(makeBaseDir, 'rpm');
+  if (!rpmPath) {
+    throw new Error(`No .rpm found under ${makeBaseDir}`);
+  }
+  const rpmInstallerPath = path.join(artifactDir, `${baseName}-${rpmArch(arch)}.rpm`);
+  fs.copyFileSync(rpmPath, rpmInstallerPath);
+  // Keep the existing installer role on the DEB: Linux update manifests consume
+  // it as app.installer. RPM is a separate manual installation artifact.
+  return {
+    files: [fileEntry('installer', installerPath), fileEntry('installer-rpm', rpmInstallerPath)],
+    signing: { mode: 'none' },
+  };
 }
 
 // ── Main ────────────────────────────────────────────────────────────────────

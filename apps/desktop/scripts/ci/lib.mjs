@@ -370,8 +370,8 @@ export async function ensureLinuxRuntimeAssets({
 
 export function logLinuxPackagingRequirements() {
   console.log('==> Linux first release packaging note:');
-  console.log('    - Current packaging target is .deb (MakerDeb), not AppImage.');
-  console.log('    - Linux builders need Debian packaging tools: fakeroot, dpkg, desktop-file-utils.');
+  console.log('    - Packaging produces .deb (MakerDeb) and .rpm (MakerRpm), not AppImage.');
+  console.log('    - Linux builders need fakeroot, dpkg, desktop-file-utils and rpm/rpmbuild (rpm-build on Fedora).');
   console.log('    - Native rebuild still needs the usual Electron toolchain: python3, make, gcc/g++.');
 }
 
