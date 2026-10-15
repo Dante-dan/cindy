@@ -1,10 +1,10 @@
-name: RPM packaging QA
+name: Personal DEB-only packaging QA
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  rpm:
+  personal-deb:
     strategy:
       fail-fast: false
       matrix:
@@ -12,9 +12,6 @@ jobs:
           - runner: ubuntu-24.04
             arch: x64
             rpm_arch: x86_64
-          - runner: ubuntu-24.04-arm
-            arch: arm64
-            rpm_arch: aarch64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     env:
@@ -36,30 +33,22 @@ jobs:
       - name: Install Linux build prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y fakeroot dpkg desktop-file-utils rpm xvfb dbus-x11 libsecret-1-dev libx11-dev libxkbfile-dev libgtk-3-dev libnss3 libasound2t64 libgbm1 libxtst6 libarchive-tools libjson-c-dev libturbojpeg0-dev libpng-dev libwayland-dev libwayland-bin libxkbcommon-dev build-essential pkg-config
+          sudo apt-get install -y fakeroot dpkg desktop-file-utils xvfb dbus-x11 libsecret-1-dev libx11-dev libxkbfile-dev libgtk-3-dev libnss3 libasound2t64 libgbm1 libxtst6 libarchive-tools libjson-c-dev libturbojpeg0-dev libpng-dev libwayland-dev libwayland-bin libxkbcommon-dev build-essential pkg-config
       - run: pnpm install --frozen-lockfile
-      - name: Build both formats and run repository packaged smoke
-        run: xvfb-run -a pnpm --filter desktop release:package --platform linux --arch ${{ matrix.arch }} --region global
-      - name: Validate native RPM identity
+      - name: Assert no RPM build tool and test personal-build command selection
         run: |
-          rpm_file=apps/desktop/release/artifacts/global/unversioned/linux-${{ matrix.arch }}/cindy-unversioned-${{ matrix.rpm_arch }}.rpm
-          test "$(rpm -qp --queryformat '%{ARCH}' "$rpm_file")" = '${{ matrix.rpm_arch }}'
-          test "$(rpm -qp --queryformat '%{NAME}' "$rpm_file")" = cindy
-          rpm -qpl "$rpm_file"
-          rpm -qpR "$rpm_file"
-          rpm -qp --scripts "$rpm_file"
-      - name: Install, smoke, reinstall and uninstall on Fedora
+          ! command -v rpmbuild
+          pnpm --filter desktop exec vitest run src/main/cindy-make/__tests__/personalBuild.test.ts --maxWorkers=1
+      - name: Build personal DEB-only artifact with repository packaged smoke
+        run: xvfb-run -a pnpm --filter desktop release:package --platform linux --arch ${{ matrix.arch }} --region global --no-sign --linux-deb-only
+      - name: Validate only DEB installer metadata
         run: |
-          docker run --rm -v "$PWD:/source:ro" fedora:43 bash -euc '
-            dnf install -y /source/apps/desktop/release/artifacts/global/unversioned/linux-${{ matrix.arch }}/*.rpm nodejs xorg-x11-server-Xvfb xorg-x11-xauth dbus-x11 desktop-file-utils
-            rpm -V cindy
-            desktop-file-validate /usr/share/applications/cindy.desktop
-            grep -F "x-scheme-handler/cindy" /usr/share/applications/cindy.desktop
-            grep -F "x-scheme-handler/xdt-maker" /usr/share/applications/cindy.desktop
-            useradd -m rpmqa
-            runuser -u rpmqa -- dbus-run-session -- xvfb-run -a node /source/apps/desktop/scripts/smoke-packaged.mjs --platform=linux --arch=${{ matrix.arch }} --out-dir=/usr/lib/cindy
-            dnf reinstall -y /source/apps/desktop/release/artifacts/global/unversioned/linux-${{ matrix.arch }}/*.rpm
-            dnf remove -y cindy
-            test ! -e /usr/lib/cindy/Cindy
-            test ! -e /usr/share/applications/cindy.desktop
+          node --input-type=module -e '
+            import fs from "node:fs";
+            import assert from "node:assert/strict";
+            const dir = "apps/desktop/release/artifacts/global/unversioned/linux-${{ matrix.arch }}";
+            const info = JSON.parse(fs.readFileSync(`${dir}/build-info.json`));
+            assert.deepEqual(info.files.map(f => f.role), ["installer"]);
+            assert.ok(info.files[0].name.endsWith(".deb"));
+            assert.ok(fs.readdirSync(dir).every(f => !f.endsWith(".rpm")));
           '
