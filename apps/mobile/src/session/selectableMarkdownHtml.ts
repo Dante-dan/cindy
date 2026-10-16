@@ -174,6 +174,20 @@ function renderMermaidNodes() {
       var replacement = document.createElement('div');
       replacement.className = 'xdt-mermaid';
       replacement.innerHTML = rendered.svg;
+      // Mermaid strict mode still emits SVG links. Apply the reader's http(s)
+      // policy before attachment, and keep links in this WebView so Android's
+      // onCreateWindow cannot bypass the reader's navigation interception.
+      Array.prototype.forEach.call(replacement.querySelectorAll('a'), function (anchor) {
+        var href = anchor.getAttribute('href') || anchor.getAttribute('xlink:href') || '';
+        if (!/^https?:\\/\\//i.test(href)) {
+          while (anchor.firstChild) anchor.parentNode.insertBefore(anchor.firstChild, anchor);
+          anchor.remove();
+          return;
+        }
+        anchor.removeAttribute('xlink:href');
+        anchor.setAttribute('href', href);
+        anchor.removeAttribute('target');
+      });
       // Several Mermaid diagram families ignore the per-family useMaxWidth
       // options above and emit width="100%" plus an inline max-width. Restore
       // the viewBox's intrinsic width so every wide diagram can overflow this

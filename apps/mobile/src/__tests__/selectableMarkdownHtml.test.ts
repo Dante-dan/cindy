@@ -161,11 +161,13 @@ describe('buildSelectableMarkdownHtml Mermaid 渲染', () => {
         innerHTML: string;
         svg: typeof svg;
         querySelector: (selector: string) => typeof svg | null;
+        querySelectorAll: () => readonly Element[];
       } => ({
         className: '',
         innerHTML: '',
         svg,
         querySelector: (selector) => (selector === 'svg' ? svg : null),
+        querySelectorAll: () => [],
       }),
       dispatchEvent,
     };
@@ -228,7 +230,7 @@ describe('buildSelectableMarkdownHtml Mermaid 渲染', () => {
     expect(html).not.toContain('renderMermaidNodes');
   });
 
-  it('在 DOM 中执行随包 Mermaid runtime 并产出真实 SVG', async () => {
+  it('在真实 Mermaid SVG 中仅保留同窗口的 http(s) 链接', async () => {
     const frame = document.createElement('iframe');
     document.body.append(frame);
     const frameWindow = frame.contentWindow;
@@ -243,13 +245,30 @@ describe('buildSelectableMarkdownHtml Mermaid 渲染', () => {
 
     try {
       frameDocument!.open();
-      frameDocument!.write(buildSelectableMarkdownHtml(diagram));
+      // Review 4298018076 / DESIGN §14.5: strict Mermaid still emits tel/mailto
+      // anchors. Exercise the production HTML/runtime boundary, not a SVG fixture.
+      frameDocument!.write(buildSelectableMarkdownHtml([
+        '```mermaid',
+        'graph TD',
+        'A[Phone] --> B[Mail] --> C[Website]',
+        'click A href "tel:123456" _blank',
+        'click B href "mailto:reader@example.com" _blank',
+        'click C href "https://example.com" _blank',
+        '```',
+      ].join('\n')));
       frameDocument!.close();
       await vi.waitFor(
         () => {
           const rendered = frameDocument!.querySelector('.xdt-mermaid > svg');
           expect(rendered).not.toBeNull();
           expect(rendered?.getAttribute('role')).toBe('graphics-document document');
+          expect(rendered?.textContent).toContain('Phone');
+          expect(rendered?.textContent).toContain('Mail');
+          const anchors = Array.from(rendered!.querySelectorAll('a'));
+          expect(anchors).toHaveLength(1);
+          expect(anchors[0]?.getAttribute('href')).toBe('https://example.com/');
+          expect(anchors[0]?.hasAttribute('xlink:href')).toBe(false);
+          expect(anchors[0]?.hasAttribute('target')).toBe(false);
         },
         { timeout: 10_000 },
       );
