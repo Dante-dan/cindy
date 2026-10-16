@@ -232,6 +232,11 @@ export interface SchedulerMcpDeps {
   authorizeCall?: import('./tool-call-authority.js').ToolCallAuthorizer;
   getScheduler(): import('@cindy/maker-scheduler').Scheduler;
   /**
+   * 同账号其它电脑上的定时任务(host 注入,desktop 经既有 `maker:schedule:*` 远程控制通道)。
+   * 缺省 = host 未接 → 工具的 `device` 只接受 local,其它值返 REMOTE_UNSUPPORTED。
+   */
+  remote?: import('./scheduler/_devices.js').SchedulerRemoteDeps;
+  /**
    * 前置检查脚本(preRunHook)统一安装服务(host 注入,desktop 实现为
    * scheduler-host/hook-script-generator.installHookScript):落盘路径规范、
    * 命令拼装、落盘后自测全部由 host 代码保证,agent 不允许绕开它手写脚本文件。
@@ -469,6 +474,8 @@ export interface SessionSearchOptions {
 
 export interface SessionSearchHit {
   sessionId: string;
+  /** 宿主生成的任务深链，包含所属设备，供按需引用原对话。 */
+  sessionUrl: string;
   messageId: string;
   role: string;
   /** FTS5 snippet() 高亮片段 */
