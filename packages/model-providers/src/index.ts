@@ -1,3 +1,4 @@
+export { parseModelDisplayPricing, type ModelDisplayPricing } from './modelDisplayPricing.js';
 /**
  * @cindy/model-providers — 模型供应商目录 + 路由抽象（纯逻辑，零 Electron / maker-core 运行时依赖）。
  *
@@ -44,6 +45,7 @@ export type {
   ProviderRuntimeModelConfig,
   PiReasoningEffort,
   PiModelApi,
+  NativeSubscriptionAuth,
   ProviderPreset,
   ProviderPresetRuntime,
   PresetSortRegion,
@@ -52,7 +54,7 @@ export type {
   OAuthProviderDescriptor,
 } from "./types.js";
 
-export { PI_MODEL_APIS, PI_REASONING_EFFORTS } from "./types.js";
+export { NATIVE_SUBSCRIPTION_AUTHS, NATIVE_SUBSCRIPTION_DEFAULT_PROVIDER_IDS, PI_MODEL_APIS, PI_REASONING_EFFORTS } from "./types.js";
 export { isLocalOnlyProviderForAgent, isOpenAiSubscriptionProvider, providerCatalogId, isCustomRoutedProvider, isOrganizationManagedProvider } from './provider-identity.js';
 export { sourceProviderForPreset } from './providerPresetIdentity.js';
 export { isMimoTokenPlanPreset } from './mimoPresentation.js';
@@ -217,6 +219,9 @@ export {
   CHATGPT_MODEL_PREFIX,
   XAI_MODEL_PREFIX,
   SUBSCRIPTION_DIRECT_MODEL_PREFIXES,
+  CODEX_GATEWAY_WIRE_PREFIXES,
+  isCodexGatewayWireModel,
+  stripCodexGatewayWirePrefix,
   isSubscriptionDirectModel,
   isExclusiveXaiModelId,
   exclusiveXaiCatalogModelId,
@@ -290,6 +295,7 @@ export type {
   LocalModelCatalog,
   LocalCatalogModel,
   LocalModelVariant,
+  LocalGgufVariant,
 } from "./localModelCatalog.js";
 
 export {

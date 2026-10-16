@@ -1,3 +1,5 @@
+import { listCindyManagedSkills } from './managed-skills.js';
+import { scanLocalCustomizations } from '../skillhub/customizationScanHost';
 import { resolveCompanionRuntimeEnvironment } from '../bot-import/runtime.js';
 import { readCachedGenericOAuthAccessToken } from './generic-oauth.js';
 import { providerPresetModelRecord, providerModelAdapterId } from '@cindy/model-providers';
@@ -31,6 +33,7 @@ import { app } from 'electron';
 
 import { readModelContextLimit } from './model-context-limit-store.js';
 import { toolchainThreadCapEnv } from './toolchain-thread-cap.js';
+import { inputHandoffTaskShellEnv } from '../input-handoff/askpass/index.js';
 
 import {
   PiAgent,
@@ -75,6 +78,7 @@ import {
   matchesManagedOllamaFingerprint,
 } from '../../shared/localModelRuntime.js';
 import { ensureManagedOllamaReadyForSession } from '../local-model-runtime/preflight.js';
+import { MANAGED_LLAMACPP_PROVIDER_ID } from '../../shared/llamaCpp.js';
 import {
   applyQwen38NativeOverlay,
   shouldApplyQwen38Overlay,
@@ -101,7 +105,6 @@ import { registerPiProxySession } from './pi-proxy-session-auth.js';
 import { derivePiProxySessionToken } from './pi-proxy-session-token.js';
 import {
   getDesktopMcpToolApprovalPolicy,
-  getDesktopMcpToolApprovalPresentation,
 } from './mcp-tool-approval-policy.js';
 import { getRipgrepBinaryPath, claudeUpstreamEndpoint } from './runtime-configs.js';
 import {
@@ -152,6 +155,7 @@ export type PiBundledModelCatalog = ReadonlyMap<string, ReadonlyMap<string, PiBu
 export type PiListedModelIds = ReadonlyMap<string, ReadonlySet<string>>;
 
 const piBundledModelsByBinary = new Map<string, Promise<PiBundledModelCatalog | null>>();
+const resolvedPiBundledModelsByBinary = new Map<string, PiBundledModelCatalog>();
 const listedIdsByCatalog = new WeakMap<PiBundledModelCatalog, PiListedModelIds>();
 let latestPiBundledModelCatalog: PiBundledModelCatalog | null = null;
 
@@ -398,14 +402,22 @@ async function readPiCatalogProbeEnv(binaryPath: string): Promise<Record<string,
 
 export async function readPiBundledModels(
   binaryPath: string,
+  options: { cachedOnly?: boolean } = {},
 ): Promise<PiBundledModelCatalog | null> {
   const cached = piBundledModelsByBinary.get(binaryPath);
   if (cached) {
     const catalog = await cached;
+    if (catalog) resolvedPiBundledModelsByBinary.set(binaryPath, catalog);
     latestPiBundledModelCatalog = catalog;
-    if (catalog === null) piBundledModelsByBinary.delete(binaryPath);
+    if (catalog === null) {
+      piBundledModelsByBinary.delete(binaryPath);
+      resolvedPiBundledModelsByBinary.delete(binaryPath);
+    }
     return catalog;
   }
+  // A model-switch preview may inspect a live task without launching another Pi
+  // process. Its startup already attempted this exact binary's offline probe.
+  if (options.cachedOnly) return null;
   const pending = (async () => {
     let configDir: string | undefined;
     try {
@@ -484,10 +496,14 @@ export async function readPiBundledModels(
   })();
   piBundledModelsByBinary.set(binaryPath, pending);
   const catalog = await pending;
+  if (catalog) resolvedPiBundledModelsByBinary.set(binaryPath, catalog);
   latestPiBundledModelCatalog = catalog;
   // A temp-dir/timeout/parse failure is transient evidence, not a permanent property of this
   // binary. Keep successful probes cached, but let the next session retry a null result.
-  if (catalog === null) piBundledModelsByBinary.delete(binaryPath);
+  if (catalog === null) {
+    piBundledModelsByBinary.delete(binaryPath);
+    resolvedPiBundledModelsByBinary.delete(binaryPath);
+  }
   return catalog;
 }
 
@@ -844,6 +860,8 @@ function buildDesktopPiRuntimeConfig(): AgentRuntimeConfig {
   const ripgrepPath = getRipgrepBinaryPath();
   const config: AgentRuntimeConfig = {
     behaviorFlags: (ctx) => ctx.spawnMode === 'remote' ? {} : toolchainThreadCapEnv(),
+    // 代输入: sudo / ssh / git password prompts of this task go to the owner.
+    taskShellEnv: inputHandoffTaskShellEnv,
     // 保留 host 共用身份段,再追加 Pi 专属行为段；maker-core 会整体追加到 Pi 原生 prompt。
     systemPrompt: composePiSystemPrompt(hostSystemPrompt, piSystemPrompt),
     // Pi 的 grep 以及 Cindy 覆盖的 find 都固定复用随 Desktop 校验、打包的 rg。
@@ -899,6 +917,7 @@ export interface BuildPiAgentOpts {
   onPiManagedPackageMutationCommitted?: () => Promise<void>;
   onPiManagedPackageMutationSettled?: AgentDeps['onPiManagedPackageMutationSettled'];
   resolvePiRuntimeModelDescriptor?: AgentDeps['resolvePiRuntimeModelDescriptor'];
+  resolvePiRuntimeModels?: AgentDeps['resolvePiRuntimeModels'];
   resolvePiGatewayModelDescriptor?: AgentDeps['resolvePiGatewayModelDescriptor'];
   getGhostRosterPrompt?: AgentDeps['getGhostRosterPrompt'];
   /** Trusted project-approval authority; omitted until the host has one, which fails closed. */
@@ -1609,18 +1628,24 @@ function isPiGatewayModelApi(api: PiBundledModelInfo['api']): api is PiModelApi 
   );
 }
 
-function resolveProbedPiGatewayModel(modelId: string): PiBundledModelInfo | undefined {
+function resolveProbedPiGatewayModel(
+  modelId: string,
+  runtimeBinaryPath?: string,
+): PiBundledModelInfo | undefined {
+  const catalog = runtimeBinaryPath
+    ? resolvedPiBundledModelsByBinary.get(runtimeBinaryPath)
+    : latestPiBundledModelCatalog;
   const normalized = modelId.replace(/\[1m\]$/, '');
   const identity = resolveBundledPiGatewayCatalogIdentity(normalized);
   if (identity) {
-    const matched = latestPiBundledModelCatalog?.get(identity.provider)?.get(identity.modelId);
+    const matched = catalog?.get(identity.provider)?.get(identity.modelId);
     if (matched) return matched;
   }
   // Future namespaced models may use Pi's exact provider/model identity without a client alias.
   // This is an exact pair lookup, never a bare-id or family guess.
   const slash = normalized.indexOf('/');
   if (slash <= 0) return undefined;
-  return latestPiBundledModelCatalog
+  return catalog
     ?.get(normalized.slice(0, slash))
     ?.get(normalized.slice(slash + 1));
 }
@@ -1628,7 +1653,7 @@ function resolveProbedPiGatewayModel(modelId: string): PiBundledModelInfo | unde
 export function resolvePiCindyGatewayModelApi(
   _selectedProviderId: string | null | undefined,
   modelId: string,
-  context?: { remote: boolean },
+  context?: { remote: boolean; runtimeBinaryPath?: string },
 ): PiModelApi | null | undefined {
   // Gateway membership remains the account-availability gate, but its protocol is the last hint.
   const gatewayApi = resolveXdPiGatewayHintApi(modelId);
@@ -1639,7 +1664,7 @@ export function resolvePiCindyGatewayModelApi(
   // sessions skip that probe but still use this client version's explicit static configuration
   // before the last-priority Gateway hint.
   if (context?.remote) return resolveBundledPiGatewayModelProfile(modelId)?.api ?? gatewayApi;
-  const probed = resolveProbedPiGatewayModel(modelId);
+  const probed = resolveProbedPiGatewayModel(modelId, context?.runtimeBinaryPath);
   if (probed) return isPiGatewayModelApi(probed.api) ? probed.api : null;
   return resolveBundledPiGatewayModelProfile(modelId)?.api ?? gatewayApi;
 }
@@ -1647,7 +1672,7 @@ export function resolvePiCindyGatewayModelApi(
 export function resolvePiCindyGatewayModelSpec(
   _selectedProviderId: string | null | undefined,
   modelId: string,
-  context?: { remote: boolean },
+  context?: { remote: boolean; runtimeBinaryPath?: string },
 ): Pick<
   PiNativeModelSpec,
   'api' | 'compat' | 'samplingParams' | 'thinkingLevelMap'
@@ -1655,7 +1680,9 @@ export function resolvePiCindyGatewayModelSpec(
   const api = resolvePiCindyGatewayModelApi(_selectedProviderId, modelId, context);
   if (api === undefined || api === null) return api;
   const bundled = resolveBundledPiGatewayModelProfile(modelId);
-  const probed = context?.remote ? undefined : resolveProbedPiGatewayModel(modelId);
+  const probed = context?.remote
+    ? undefined
+    : resolveProbedPiGatewayModel(modelId, context?.runtimeBinaryPath);
   const compatibleBundled = bundled?.api === api ? bundled : undefined;
   const compatibleProbed = probed?.api === api ? probed : undefined;
   let compat = compatibleProbed?.compat ?? compatibleBundled?.compat;
@@ -1708,9 +1735,12 @@ export async function resolvePiNativeProviders(ctx: {
   remoteHostId?: string | null;
   providerId?: string | null;
   model: string;
+  /** Local Pi binary frozen by maker-core for this session. */
+  runtimeBinaryPath?: string;
   resumeSessionId?: string;
+  purpose?: 'startup' | 'preview' | 'live-refresh';
 }): Promise<PiNativeProvidersResult> {
-  if (!ctx.remoteHostId) {
+  if (!ctx.remoteHostId && (ctx.purpose === undefined || ctx.purpose === 'startup')) {
     // Pi scans the local ~/.agents/skills root when it starts. This hook is awaited by every
     // Desktop Pi startSession caller, so refresh Codex-only projections added after app startup
     // before the process snapshots its global skills. Remote Pi has a different HOME/root.
@@ -1727,10 +1757,10 @@ export async function resolvePiNativeProviders(ctx: {
     });
     throw new PiNativeProviderProxyNotReadyError();
   }
-  const piBinaryPath = resolvePiBinaryPath();
+  const piBinaryPath = ctx.runtimeBinaryPath ?? resolvePiBinaryPath();
   // Never treat the Desktop executable as the catalog of a different remote Pi binary.
   const bundledModels = !ctx.remoteHostId && piBinaryPath
-    ? await readPiBundledModels(piBinaryPath)
+    ? await readPiBundledModels(piBinaryPath, { cachedOnly: ctx.purpose === 'preview' })
     : null;
   let subscriptions: PiNativeProvidersResult = { providers: [], env: {} };
   if (!ctx?.remoteHostId && compatProxyReady) {
@@ -1761,7 +1791,11 @@ export async function resolvePiNativeProviders(ctx: {
     );
   }
   const isRemote = Boolean(ctx.remoteHostId);
-  if (!isRemote && ctx.providerId === MANAGED_OLLAMA_PROVIDER_ID) {
+  if (
+    !isRemote &&
+    ctx.purpose !== 'preview' &&
+    (ctx.providerId === MANAGED_OLLAMA_PROVIDER_ID || ctx.providerId === MANAGED_LLAMACPP_PROVIDER_ID)
+  ) {
     await ensureManagedOllamaReadyForSession({
       providerId: ctx.providerId,
       remoteHostId: ctx.remoteHostId ?? null,
@@ -1865,6 +1899,8 @@ export function buildPiAgent(opts: BuildPiAgentOpts): PiAgent | null {
   return new PiAgent({
     resolveSessionEnvironment: resolveCompanionRuntimeEnvironment,
     getDisabledSkillPaths: readDisabledSkillPaths,
+    getManagedSkills: listCindyManagedSkills,
+    scanLocalCustomizations,
     resolveModelContextLimit: (providerId, modelId) => {
       const catalog = getActiveCatalog();
       const source = resolveModelContextProviderId(catalog, 'pi', providerId, modelId);
@@ -1886,7 +1922,6 @@ export function buildPiAgent(opts: BuildPiAgentOpts): PiAgent | null {
     // 与 Claude Code / Codex 同一份第一方 MCP 审批真源。Pi 之前没接,导致 orca 这类
     // 可信 server 的工具落进 Auto-review 灰区被模型静默 block(详见 pi/index.ts 权限门)。
     getMcpToolApprovalPolicy: getDesktopMcpToolApprovalPolicy,
-    getMcpToolApprovalPresentation: getDesktopMcpToolApprovalPresentation,
     resolvePiAgentHome: (remoteHostId) => {
       // 轮 40-w4-t3 CRITICAL:远端 agentHome 承载 session 历史(sessions/*.jsonl,
       // 与 DB sdk_session_id 持久关联)—— 必须落远端持久目录, 不能用本机
@@ -2005,6 +2040,7 @@ export function buildPiAgent(opts: BuildPiAgentOpts): PiAgent | null {
     registerPiProxySession,
     resolvePiNativeProviders: (ctx) => resolvePiNativeProviders(ctx),
     resolvePiRuntimeModelDescriptor: opts.resolvePiRuntimeModelDescriptor,
+    resolvePiRuntimeModels: opts.resolvePiRuntimeModels,
     resolvePiGatewayModelDescriptor: opts.resolvePiGatewayModelDescriptor,
     // `cindy` is the gateway fallback block even when the session starts on a subscription or
     // BYOM provider. Its explicit protocol comes from the exact XD model; the local Pi table only

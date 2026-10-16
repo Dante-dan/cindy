@@ -13,6 +13,8 @@
  *   - 读位只前进不后退(`markBotRead` 单调),避免乱序事件把已读退回未读。
  */
 
+import type { BotGroupSummary } from '../../../shared/botGroupChat';
+
 const STORAGE_KEY_PREFIX = 'cindy.bots.readState.v1';
 
 type ReadStateMap = Record<string, number>;
@@ -144,18 +146,50 @@ export function resetBotReadStateForTests(): void {
 
 /** Group replies use the same owner-scoped, monotonic local read positions. */
 export const botGroupReadKey = (groupId: string) => `group:${groupId}`;
-export function isBotGroupUnread(group: { id: string; lastReplyAt?: number }): boolean {
-  const readAt = getBotLastReadAt(botGroupReadKey(group.id));
-  return readAt !== null && (group.lastReplyAt ?? 0) > readAt;
+type GroupReadSummary = Pick<BotGroupSummary, 'id' | 'lastReplyAt'> & Partial<Pick<BotGroupSummary, 'lastMessage'>> & {
+  /**
+   * ISO times of the group's latest (up to 99) messages from others — Bots and other humans,
+   * never the reader's own or notices — oldest first. Older hosts omit it.
+   */
+  incomingMessageTimes?: readonly string[];
+};
+
+function latestGroupReplyAt(group: GroupReadSummary): number {
+  // Older hosts may omit lastReplyAt; other humans count just like companions.
+  const last = group.lastMessage;
+  return Math.max(group.lastReplyAt ?? 0,
+    last && last.authorKind !== 'system' && (last.authorKind === 'bot' || last.isSelf === false) ? last.createdAt : 0);
 }
-export function seedBotGroupReadState(groups: readonly { id: string; lastReplyAt?: number }[]): void {
+
+/**
+ * Messages from others after the local read mark: counted from `incomingMessageTimes` (so at
+ * most 99); a host without the list only says whether anything is new (1).
+ */
+export function botGroupUnreadCount(group: GroupReadSummary): number {
+  const readAt = getBotLastReadAt(botGroupReadKey(group.id));
+  if (readAt === null) return 0;
+  const latestUnread = latestGroupReplyAt(group) > readAt ? 1 : 0;
+  const times = group.incomingMessageTimes;
+  if (!Array.isArray(times)) return latestUnread;
+  let count = 0;
+  for (const time of times) {
+    const at = Date.parse(time);
+    if (Number.isFinite(at) && at > readAt) count += 1;
+  }
+  return Math.max(count, latestUnread);
+}
+
+export function isBotGroupUnread(group: GroupReadSummary): boolean {
+  return botGroupUnreadCount(group) > 0;
+}
+export function seedBotGroupReadState(groups: readonly GroupReadSummary[]): void {
   const current = readStorage();
   const next = { ...current };
   const alive = new Set(groups.map(group => botGroupReadKey(group.id)));
   for (const key of Object.keys(next)) if (key.startsWith('group:') && !alive.has(key)) delete next[key];
   for (const group of groups) {
     const key = botGroupReadKey(group.id);
-    if (next[key] === undefined) next[key] = Math.max(1, group.lastReplyAt ?? 0);
+    if (next[key] === undefined) next[key] = Math.max(1, latestGroupReplyAt(group));
   }
   if (JSON.stringify(next) !== JSON.stringify(current)) writeStorage(next);
 }

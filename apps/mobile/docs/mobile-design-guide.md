@@ -12,6 +12,7 @@
 
 - **iOS 优先**,触控优先,跟随系统 light / dark 自动切换(`useColorScheme`)。
 - **灰度环境**:除品牌 teal(就绪态)、Heart Orange(运行/thinking 态)和已登记的 Beta 渠道红色状态徽标外,界面全是黑白之间的灰阶。不引入任何品牌蓝 / 绿 / 红等装饰色。
+  - 唯一的个性化例外:用户在设置里主动选择的「我的消息气泡颜色」,只染用户自己的消息气泡,默认仍是灰阶;规则见根规范 `DESIGN.md`「Personal message bubble colors」。
 - **圆角走四档阶梯**(与 `src/theme/tokens.ts` 的 `radius` 一致,守护测试拦截阶梯外值):`micro`(4,缩略图内 chip、勾选指示器等微元素)/ `control`(8,卡片内层控件)/ `container`(12,卡片 / 容器)/ `pill`(9999,交互元素)。**禁止**阶梯外中间值(0 / 3 / 6 / 28 等)与字面量圆角。根规范 `docs/design-rules/DESIGN.md` §5 的三档制约束的是桌面 surface;其「Mobile」节明确把 §15.13 / §16 之外的 mobile 布局细节委托给 `apps/mobile` 的实现,mobile 圆角阶梯以 `tokens.ts` 为准。
 - **默认零阴影**:层次靠背景色差 + 1px 边框。2026-09-27 用户明确要求的局部例外：首页主菜单抽屉（含伙伴入口）用右侧容器圆角与柔和投影，颜色走 homeDrawerShadow，外壳承载阴影、内层裁切内容；不扩展到页面卡片或任务列表侧栏，见 DESIGN.md §6。
 - **字重克制**:按角色用 400 / 500 / 600(见 §3「字重与字色按角色搭配」)。**UI chrome 无 700+**。唯一例外是根规范 `docs/design-rules/DESIGN.md` §3「排版豁免登记表」已登记的域——原生 Markdown strong(`src/session/MessageRenderer.tsx` 的 `markdownStrong` → `fontWeight.bold`)与登录品牌画布(`app/(auth)/login.tsx`、`src/components/LoginSkinControls.tsx`、`src/auth/loginSkinLayout.ts`)。这些是用户内容语义与品牌画布,不算 chrome;chrome 本身的上限仍是 600。
@@ -133,7 +134,7 @@
 - 代码、diff、媒体 hint 等「行高即盒高」的紧凑场景(`micro` / `bodySmall` 行高);
 - 长文阅读的 `bodyRelaxed`(24):登录副标题、伙伴记忆。
 
-另有一类**对齐例外**:文字要与相邻图标、按钮或行内正文对齐时,行高跟随被对齐对象(如行内引用 chip、任务标签、消息操作行的时间、生成中状态、伙伴记忆日期)。
+另有一类**对齐例外**:文字要与相邻图标、按钮或行内正文对齐时,行高跟随被对齐对象(如行内引用 chip、任务标签、消息操作行的时间、伙伴记忆日期)。
 
 **单行输入框(TextInput)不设行高**:iOS 上会让占位字与光标偏位。多行编辑区可以配标准行高。登录品牌画布按其登记例外处理。
 
@@ -220,6 +221,11 @@ function Foo() {
 
 ### iOS 外壳 vs Cindy 内容
 
+- **任务／伙伴切换**：按左任务、右伙伴的顺序做同一套横向滑动转场，抽屉和标题下拉选择都复用 HomeModePanes；不重建已访问列表，不丢搜索或滚动位置。滑动用不回弹的临界阻尼弹簧（参数见 DESIGN.md §14.4），快速反向切换从当前位置继续；系统减弱动态效果或尚未取得该偏好时直接切换。滑动只用于 iOS；Android 顶栏画在各自页面里，滑动会带着顶栏一起走，因此保持直接切换。导航栏和顶部模糊固定不动，模糊由 HomeModePanes 统一绘制一层。
+- **首页菜单提示点**：可见圆点直径 6pt，原生工具栏用同尺寸画布的有点／无点模板图，避免空的数字徽章被系统放大。图标位置、按钮外框和点击范围不随提示点出现而变化。
+
+- **首页导航共用组件（2026-10-13）**：iOS 任务与伙伴首页都调用 platform/chrome/HomeStackHeader，统一系统导航栏、菜单按钮与居中标题宽度；顶部模糊背景由 HomeModePanes 在滑动层外统一绘制。页面只提供标题内容、菜单动作和右侧工具；仅当前可见首页注册导航栏。伙伴标题允许独立对齐，目前保持居中；任务标题保留长名称避让。伙伴列表、安全区、滚动指示器和下拉刷新只计算一次顶部占位。普通页面、聊天身份栏、面板及 Android 导航暂未纳入这一批，不视为全端迁移完成。
+
 iOS 新增与改造界面遵循 [iOS 原生界面规范](../../../docs/design-rules/ios-native-design.md)。该规范区分系统容器、原生控件和 Cindy 业务内容；取代原先“复杂内容面板一律使用 SheetSurface”的规定。
 
 - 首页和简单页继续使用系统导航栏。任务页采用原生操作控件与透明标题布局，按首页实际导航中心对齐；保留返回锚点及 testID。
@@ -228,7 +234,24 @@ iOS 新增与改造界面遵循 [iOS 原生界面规范](../../../docs/design-ru
 - 系统管理的圆角、字体、材质与反馈保留系统默认，不强制套自绘圆角档位或零阴影约束；自绘内容继续遵守本文 token 规则。
 - 模型／权限、Context、账号切换等存量自绘面板列为渐进迁移项，不因本规范批量重写。Android 与必要兼容回退继续复用现有基础组件，不降低业务能力。
 - 首页筛选继续使用原生 UIMenu；左侧抽屉和文件浏览顶部的存量实现不代表已经迁移，需分别审查。
-- **Android 交互跟随 iOS**（2026-09-27 产品裁决）：入口位置、顺序、分组、显示哪些信息、打开 / 关闭方式与输入校验以 iOS 为准；外观保持 Android 平台实现，不照搬玻璃。贴着控件弹出的菜单（iOS UIMenu）在 Android 用同一个 `NativePullDownMenu`，渲染为 Cindy 自绘的 `AnchoredPullDownMenu`：surfaceElevated 实底 + 1px 边框、零阴影，行首固定列打勾，内联分组带标题与分隔线，子菜单逐层进入，`keepPresented` 的项点完不收起，居中的触发器居中展开。不用系统 PopupMenu（画不出分组标题、给每个可勾选项画空复选框、不跟随主题）。触发器整块是一个读屏按钮；触发控件禁用时传 `disabled`，不挂菜单。
+- Android 首页任务行「选项」采用现有 Expo UI 的 Compose `ModalBottomSheet`
+  （`SessionActionSheetFrame.android.tsx`）：原生容器负责拖动、遮罩、系统返回与关闭动画，
+  任务标题、Lucide 图标和标签操作继续复用 RN 内容及双模式 token。关闭动画完成且容器卸载后，
+  才通过 `onClosed` 打开重命名或删除确认；不得用固定延时推测原生动画结束。
+  窄屏、横屏和标签展开时内容可滚动，系统容器保留平台几何，自绘内容仍遵守本文排版规则。
+  账号切换、权限、标签、消息操作、分支和浏览器菜单等单层面板通过 `SheetModal.nativePresentation`
+  复用 Material 容器。折叠屏分区、浮动布局、二级返回与未保存表单继续保留兼容外壳，
+  不把不同关闭回调合并。设置、模型、权限和 Context 的普通行保留 RN 实现，
+  复用既有主题、排版、禁用态、独立配置按钮与业务回调，不为静态表单逐行嵌套 Compose Host。
+  Android 模型目录通过 `FlatList` 按可见范围分批挂载 RN 行，分组标题与模型共用列表；
+  使用 `SheetSurface.renderScrollContent` 替换内容滚动层，不能嵌套同向 `ScrollView`。
+  搜索或来源变化须滚回首条结果，配置入口与模型选择仍是独立点击目标。
+  新建任务的设备、工作区和远程目录选择复用 RN `NewTaskSelectionRow`；设备使用原生底部弹层，
+  目录仍在同一兼容弹层内逐级返回，盘符通过原生菜单切换，继续调用被控端目录接口。
+  开关和普通文本输入原本已是原生控件；富文本编辑器不属于此次迁移。
+- **Android 交互跟随 iOS**（2026-09-27 产品裁决）：入口位置、顺序、分组、显示哪些信息与输入校验以 iOS 为准；外观保持 Android 平台实现，不照搬玻璃。贴着控件弹出的菜单统一走 `NativePullDownMenu`，Android 通过 `AnchoredPullDownMenu.android` 使用现有 Expo UI 的 Material `DropdownMenu`，保留分组标题、勾选、禁用、危险操作、子菜单返回行及 `keepPresented`。弹出定位、滚动、焦点及动画交给系统；外部点击和系统返回收起原生菜单。触发器整块是一个读屏按钮，触发控件禁用时不挂菜单。自绘实现保留用于兼容，不使用能力不足的基础 PopupMenu 替代。
+  原生菜单首次使用时创建 Compose 容器，随后随触发器复用；收起只修改 `expanded`，保留系统关闭动画，避免每次点击重建整棵原生树。锚点的 RN 外层使用 `pointerEvents="none"`，防止关闭后的容器挡住触发器；弹出窗口独立接收菜单点击。验收必须覆盖关闭后再次打开、外部点击和菜单项选择，不能只验证首次呈现。
+  可勾选菜单项在原生弹出窗口中使用 `RNHostView` 承载一个 RN `menuitem`，通过 `accessibilityState.checked` 表达选中、未选中和半选，禁用态与整行点击共用同一节点；勾号只是装饰，不能代替无障碍语义。现有 Compose modifier 未提供完整三态设置，不增加第二个可点击复选框。回归见 `androidMaterialMenu.test.tsx`，模拟器须核验真实节点。
 
 首页「所有任务」下拉只负责范围筛选：点设备名直接切换到该设备的任务，不得为补充管理动作改成设备子菜单或增加一次确认。设备详情、重命名与删除集中在左侧抽屉的「设备管理」页；列表不画进入箭头或重命名图标。所有设备无论在线、离线或未开启远程控制，都能点进资料详情，再重命名或删除；右滑显示重命名、左滑显示删除，删除需系统确认。iOS 使用系统原生列表与滑动操作。删除使用服务端接口，在线设备当前需先离线才能删除，不以本地隐藏代替删除。iOS 原生菜单与自绘回退、Android 遵守同一交互边界。
 
@@ -245,6 +268,8 @@ iOS 新增与改造界面遵循 [iOS 原生界面规范](../../../docs/design-ru
   降透明度;两个伙伴同名时名字后加「· 电脑名」。首次读取慢时显示同几何的骨架行。
 - **聊天顶栏 `ChatIdentityHeader`**:私聊与群聊共用。返回 + 32 标记 + 标题 16/22 600 + 副标题 12/18
   三级色 + 设置;点身份区与设置打开同一份资料 / 设置。私聊副标题保留设备名,离线时前面加「离线 ·」。
+  伙伴 Todo 使用顶栏中的独立待办入口,只在宿主返回该能力链接时显示;复用44px玻璃按钮与原身份布局,
+  不替代设置,不影响群聊,不新增手机例行任务管理。
 - **卡片外壳**:`surfaceElevated` 底 + 1px `border` + `radius.container` + 内边距 16。眉题 13/18 medium 二级色,
   标题 16/22 medium,状态行 13/18 二级色;只有运行中(`statusAccent` 呼吸)与失败(`statusError`)带颜色。
 - **卡片按钮 `CompanionCardButton`**:高 38(hitSlop 补到 44)、pill、15/20 medium,**文字始终居中**;一行里等宽
@@ -266,6 +291,7 @@ iOS 新增与改造界面遵循 [iOS 原生界面规范](../../../docs/design-ru
 - 库:**lucide-react-native**(统一,不混用其它图标库)。
 - **图标选择必须与桌面版保持一致**:同一动作 / 语义,手机和桌面用**同一个** lucide 图标。新增图标前先去桌面对应组件确认它用的是哪个(如权限模式用 `Hand`/`CodeXml`/`ClipboardList`/`Sparkles`/`TriangleAlert`,见桌面 `new-chat/PermissionSelector.tsx`),**不要**另选近似图标(如别用 `Shield` 系列代替)。这样跨端心智模型一致。
   - 已沉淀的对齐映射:权限模式的图标 + 语义色见 `src/session/permissionPresentation.ts`(严格对照桌面 PermissionSelector:`auto`→`permAutoAccent`、`bypassPermissions`→`statusAccent`,其余中性)。
+  - **伙伴私聊回复**：消息下方的回复按钮使用 `ChatReplyIcon`，与 Desktop 共用同一款扁圆、下尾的纯气泡路径。复用原「添加到对话」操作，并从伙伴更多菜单移除重复入口；普通任务的「添加到对话」仍用 `MessageSquarePlus`。手机尚未提供的群聊／话题引用回复入口不因此新增。实现见 `src/session/CompanionMessageActions.tsx`。
   - **模型下拉对齐桌面 provider-aware 结构**:同一 model 可挂多家「供应商(来源)」,选行 = 选「来源 + 模型」,选择经 device-link 把 `model + providerId` 路由到被控端。**复用 `@cindy/model-providers` 的 `buildProviderSections` 作分段唯一真相**(`src/session/providerModelSections.ts`),被控端供应商目录经隧道 `maker:provider:list` 取(`src/device-link/useDeviceProviders.ts`);0 供应商 / 旧被控端回退 capabilities 扁平列表。**来源 mark 与桌面同源**:三个内置供应商(Claude / Codex / XD)用官方单色 SVG mark(path 常量在 `src/components/vendorIconPaths.ts`,与桌面 ClaudeMark / CodexMark / XDIncMark 逐字同源),自定义供应商回退首字母 monogram(`MobileProviderMark`)。早期「手机故意不搬品牌 SVG、全用 monogram」的决策已在「模型选择列表与桌面完全对齐」改造(2026-07)中推翻:react-native-svg 本就在依赖里,复制 path 常量零成本,而跨端一眼可辨的来源图标价值更高。唯一保留差异:monogram 容器用 pill 圆角(桌面 4px 方盒)——圆角遵守手机二元规则,不引入中间值。
   - **Agent 身份与厂牌分槽**:`MobileAgentMark` / `MobileVendorIcon` 只表示运行时 Agent，使用 Claude Code 像素脸或 Codex CLI `>_` 多瓣花；Anthropic / OpenAI 来源与模型品牌继续由 `MobileProviderMark` / `MobileModelIconMark` 表示。两类 mark 即使名称相近也不得互换。
 - **设备「已撤销访问权限」状态**:控制端(手机)被某台被控电脑撤销访问时,设备 chip 用 `Lock` 图标(`colors.textSecondary`)替代状态圆点 —— 与「离线 / 未开启远控」的灰圆点明确区分,读作「被锁在外」,且不引入非调色板色(遵守 §1 灰度 + teal/orange 约束)。**无桌面对端**:桌面是被控方(管理「允许哪些控制器」),没有「控制器被撤销」这一侧视图,故此处不套用「与桌面同图标」规则。点按该 chip 弹 `RevokedAccessTip`(说明 + 「重试访问」),重试复用 device-link 探测路径(成功经 `withAccessRevokedHandling` 清除本地撤销标记);重连 / 回前台也会静默重试自愈。

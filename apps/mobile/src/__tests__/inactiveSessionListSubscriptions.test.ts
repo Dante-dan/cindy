@@ -20,10 +20,10 @@ describe('inactive session list subscriptions', () => {
   it('pauses list and row subscriptions while their route is covered', () => {
     const store = source('src/session/remoteSessionStore.ts');
     expect(store).toContain(
-      'enabled ? subscribe : INACTIVE_REMOTE_SESSION_STORE_SUBSCRIBE',
+      'gate ? gate.subscribe(subscribe, notify) : subscribe(notify)',
     );
     expect(store).toContain(
-      "usePausableRemoteSessionStoreSnapshot('sessions', remoteSessionStore.getSessions)",
+      "usePausableRemoteSessionStoreSnapshot('sessions', remoteSessionStore.getVisibleSessions)",
     );
     const previewHook = store.slice(
       store.indexOf('export function useRemoteSessionMessagePreview'),

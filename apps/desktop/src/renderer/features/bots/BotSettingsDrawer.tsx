@@ -3,9 +3,12 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { X } from 'lucide-react';
 import { matchPath, useBlocker, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 
+import { WINDOW_NO_DRAG_STYLE } from '@/components/layout/windowDrag';
+
 import { BotPronounProvider, useBotTranslation } from './botPronounContext';
 import { BotSettings } from './BotsHomeView';
 import { useBotProfiles } from './botStore';
+import { useCompanionCloud } from './companionCloudStore';
 import { useRemoteBots } from './useRemoteBots';
 import { RemoteBotSettings } from './RemoteBotSettings';
 
@@ -24,11 +27,17 @@ export function BotSettingsDrawer() {
   );
   const match =
     matchPath('/bots/:botId/*', location.pathname) ?? matchPath('/bots/:botId', location.pathname);
-  const bot = remoteMatch
+  const cloud = useCompanionCloud();
+  const localBot = remoteMatch
     ? null
     : (bots.find((candidate) => candidate.id === match?.params.botId) ?? null);
+  // A demoted copy (the companion runs on another computer) is read-only: edits here would never
+  // reach the companion. Its settings live on the main computer (the banner on its task links there).
+  const bot = localBot && cloud.demotedBotIds.includes(localBot.id) ? null : localBot;
   const open = searchParams.get('settings') === '1' && (bot !== null || !!remoteBot);
 
+  const requestedPage = searchParams.get('settingsPage');
+  const initialPage = requestedPage === 'memory' || requestedPage === 'capabilities' ? requestedPage : 'home';
   const allowNavigation = useRef(false);
   const pendingGuard = useRef<Promise<boolean> | null>(null);
   const beforeCloseRef = useRef<(() => Promise<boolean>) | null>(null);
@@ -86,6 +95,7 @@ export function BotSettingsDrawer() {
       (current) => {
         const next = new URLSearchParams(current);
         next.delete('settings');
+        next.delete('settingsPage');
         return next;
       },
       { replace: true },
@@ -102,7 +112,7 @@ export function BotSettingsDrawer() {
     <Dialog.Root open={open} onOpenChange={(next) => !next && close()}>
       <Dialog.Portal>
         {/* Keep portaled controls inside the overlay’s React tree so its scroll lock allows them. */}
-        <Dialog.Overlay className="fixed inset-0 z-50 bg-[var(--overlay-modal)]">
+        <Dialog.Overlay className="modal-scrim fixed inset-0 z-50">
           <Dialog.Content
             onPointerDownOutside={(event) => event.preventDefault()}
             aria-describedby={undefined}
@@ -111,6 +121,9 @@ export function BotSettingsDrawer() {
               if (event.isComposing || event.keyCode === 229) event.preventDefault();
             }}
             className="fixed inset-y-0 right-0 z-50 flex w-full max-w-md flex-col border-l border-[var(--border-default)] bg-[var(--surface)] outline-none"
+            // The header shares the window title strip; without no-drag the page's drag
+            // regions underneath swallow the close button's clicks (see windowDrag.tsx).
+            style={WINDOW_NO_DRAG_STYLE}
           >
             <header className="flex h-14 shrink-0 items-center justify-between border-b border-[var(--border-default)] px-5">
               <Dialog.Title className="text-15 font-medium text-[var(--text-primary)]">
@@ -125,8 +138,9 @@ export function BotSettingsDrawer() {
             </header>
             {remoteBot ? (
               <RemoteBotSettings
-                key={`${remoteBot.deviceId}:${remoteBot.id}`}
+                key={`${remoteBot.deviceId}:${remoteBot.id}:${open}:${initialPage}`}
                 bot={remoteBot}
+                initialPage={initialPage}
                 beforeCloseRef={beforeCloseRef}
                 onDeleted={() => {
                   allowNavigation.current = true;
@@ -136,7 +150,8 @@ export function BotSettingsDrawer() {
             ) : bot ? (
               <BotPronounProvider bot={bot}>
                 <BotSettings
-                  key={bot.id}
+                  key={`${bot.id}:${open}:${requestedPage === 'model' ? 'model' : initialPage}`}
+                  initialPage={requestedPage === 'model' ? 'model' : initialPage}
                   beforeCloseRef={beforeCloseRef}
                   bot={bot}
                   onBack={performClose}

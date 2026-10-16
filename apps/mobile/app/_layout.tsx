@@ -1,11 +1,14 @@
+import { completePrecreatedWorktreeRecovery } from '@/session/completePrecreatedWorktreeRecovery';
 import { recentTaskKey } from '@/session/recentTasks';
 import { readComposerEntry } from '@/session/composerMorph';
 import { RecentMessageHistoriesProvider } from '@/session/RecentMessageHistories';
+import { McpAppViewsProvider } from '@/session/McpAppViews';
 import { ResidentHomeListProvider } from '@/session/ResidentHomeList';
 import { AndroidUpdateSheet } from '@/update/AndroidUpdateSheet';
 import { PeerFileTransport } from '@/device-link/peerFileTransport';
 import { startLocalDiagnostics } from '@/debug/localDiagnostics';
 import { MobileOutboxBridge } from '@/session/MobileOutboxBridge';
+import { RemoteHistoryPrefetchBridge } from '@/session/RemoteHistoryPrefetchBridge';
 import {
   DarkTheme as NavigationDarkTheme,
   DefaultTheme as NavigationLightTheme,
@@ -51,6 +54,7 @@ import {
   useStartupSplash,
 } from '@/components/StartupSplashOverlay';
 import { registerDevCacheMenu } from '@/debug/devCacheMenu';
+import { migrateLegacySessionMessageCache } from '@/session/mobileSessionMessageCache';
 import { startJsStallWatchdog } from '@/debug/jsStallWatchdog';
 import { initMobileTapdb } from '@/analytics/mobileTapdb';
 import {
@@ -71,7 +75,7 @@ import { useUpdateChannelGate } from '@/update/useUpdateChannelGate';
 import type { UpdateChannel } from '@cindy/maker-shared/update-channel';
 import { useStartupEndpointGate } from '@/config/useStartupEndpointGate';
 import { IS_OTA_SELFHOST } from '@/config/env';
-import { getNewSessionCreationTask } from '@/session/newSessionCreation';
+import { hasLiveNewSessionCreation } from '@/session/newSessionCreation';
 import { isExactRemoteSessionClaimed } from '@/session/newSessionWorktree';
 import {
   isPrecreatedWorktreeRegistrationInFlight,
@@ -79,8 +83,7 @@ import {
 } from '@/session/precreatedWorktreeRecovery';
 import { IncomingShareBridge } from '@/session/IncomingShareBridge';
 import { usePendingSharedTaskInvitationIntent } from '@/device-link/sharedTaskInvitationIntent';
-import { useClipboardSharedTaskInvitation } from '@/device-link/useClipboardSharedTaskInvitation';
-import { ClipboardSharedTaskPrompt } from '@/session/ClipboardSharedTaskPrompt';
+import { removeLegacyClipboardInvitationHistory } from '@/device-link/legacyClipboardInvitationHistory';
 import { HomeEntryProvider, useHomeEntrySplashRelease } from '@/session/HomeEntryProvider';
 import { RemoteDesktopHost } from '@/remote-desktop/RemoteDesktopHost';
 
@@ -95,7 +98,7 @@ function NavigationGate() {
   const auth = useAuth();
   const router = useRouter();
   const segments = useSegments();
-  useClipboardSharedTaskInvitation(auth.initialized && auth.isAuthenticated, segments.join('/') === 'shared-session');
+  useEffect(() => { void removeLegacyClipboardInvitationHistory(); }, []);
   const { mode, colors, preferenceReady } = useTheme();
   const { releaseSplash, splashActive } = useStartupSplash();
   // iOS 状态栏样式走 react-native-screens 的 VC-based 通道(Info.plist 已翻
@@ -132,14 +135,15 @@ function NavigationGate() {
   useEffect(() => {
     if (!auth.initialized) return;
     const inAuthGroup = segments[0] === '(auth)';
-    if (!auth.isAuthenticated && !inAuthGroup) {
+    // 供应商分享链接的提示页只说明「请在电脑上打开」,不读账号数据,未登录也直接显示。
+    if (!auth.isAuthenticated && !inAuthGroup && segments[0] !== 'provider-share') {
       router.replace('/login');
       return;
     }
     if (auth.isAuthenticated && inAuthGroup) {
-      if (pendingSharedTaskInvitation?.source === 'link') router.replace('/shared-session');
+      if (pendingSharedTaskInvitation) router.replace('/shared-session');
       else router.replace('/');
-    } else if (auth.isAuthenticated && pendingSharedTaskInvitation?.source === 'link' && segments.join('/') !== 'shared-session') {
+    } else if (auth.isAuthenticated && pendingSharedTaskInvitation && segments.join('/') !== 'shared-session') {
       router.replace('/shared-session');
     }
   }, [auth.initialized, auth.isAuthenticated, pendingSharedTaskInvitation, router, segments]);
@@ -167,8 +171,9 @@ function NavigationGate() {
         />
       ) : null}
       <RemoteDesktopHost>
-        <ResidentHomeListProvider key={auth.accountGeneration}>
-        <RecentMessageHistoriesProvider>
+        <McpAppViewsProvider>
+        <RecentMessageHistoriesProvider key={auth.accountGeneration}>
+        <ResidentHomeListProvider>
         <Stack
           key={auth.accountGeneration}
           screenOptions={{
@@ -198,17 +203,15 @@ function NavigationGate() {
           <Stack.Screen name="sessions/new" options={({ route }) => ({
             animation: readComposerEntry((route.params as { composerMorph?: string } | undefined)?.composerMorph) ? 'none' : 'default',
           })} />
-          {/* 设置从左侧抽屉进入:接着抽屉方向从左边推出,不要默认从右边盖上来。 */}
-          <Stack.Screen name="settings" options={{ animation: 'slide_from_left' }} />
           <Stack.Screen
             name="add-account"
             options={{ animation: 'fade', gestureEnabled: false }}
           />
         </Stack>
-        </RecentMessageHistoriesProvider>
         </ResidentHomeListProvider>
+        </RecentMessageHistoriesProvider>
+        </McpAppViewsProvider>
       </RemoteDesktopHost>
-      {auth.initialized && auth.isAuthenticated && !splashActive && <ClipboardSharedTaskPrompt accountName={auth.user?.name} />}
     </NavigationThemeProvider>
   );
 }
@@ -300,12 +303,14 @@ function PrecreatedWorktreeRecoveryBridge() {
         'worktree:discard-precreated',
         [input],
       ),
+      cancelPrecreated: (deviceId, input) => invoke(deviceId, 'worktree:cancel-precreated', [input]),
+      onDiscarded: completePrecreatedWorktreeRecovery,
       isSessionClaimed: (deviceId, sessionId) => isExactRemoteSessionClaimed(
         sessionId,
         (id) => invoke(deviceId, 'local-db:sessions:get', [id]),
       ),
       shouldDefer: (record) => (
-        getNewSessionCreationTask(record.sessionId) !== null
+        hasLiveNewSessionCreation(record.sessionId)
         || isPrecreatedWorktreeRegistrationInFlight(record.sessionId)
       ),
       // Account selection updates user/token while the AuthProvider stays mounted.
@@ -377,6 +382,7 @@ function RootAfterUpdateChannel({ channel }: { channel: UpdateChannel }) {
         <PeerFileTransport />
         <PrecreatedWorktreeRecoveryBridge />
         <MobileOutboxBridge />
+        <RemoteHistoryPrefetchBridge />
         <HomeEntryProvider>
           <NavigationGate />
         </HomeEntryProvider>
@@ -403,6 +409,11 @@ function RootLayout() {
   // Dev-only:注册开发者菜单的"清缓存 + reload"项(内部 __DEV__ gate,生产为 no-op)。
   useEffect(() => {
     registerDevCacheMenu();
+  }, []);
+  // 旧版写在 AsyncStorage 的消息缓存会把安卓 6 MiB 库占满、导致发送失败(#5403);
+  // 消息缓存已改存文件,启动时把剩余旧副本迁过去、腾出库空间。
+  useEffect(() => {
+    void migrateLegacySessionMessageCache().catch(() => undefined);
   }, []);
   // Dev-only:JS 停摆探测器,把 JS 线程忙死的时间边界钉进 Metro 日志流(内部 __DEV__ gate)。
   useEffect(() => startJsStallWatchdog(), []);

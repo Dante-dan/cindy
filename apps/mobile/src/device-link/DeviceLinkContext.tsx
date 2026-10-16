@@ -1,6 +1,6 @@
 import Constants from 'expo-constants';
 import { tryMobilePeerInvoke, resetMobilePeer } from './peerFileRegistry';
-import { isHistoryViewUnavailable } from '@cindy/maker-shared/message-window';
+import { isHistoryViewUnavailable, type HistoryWorkPatch } from '@cindy/maker-shared/message-window';
 import { findRemoteHistoryView } from '@/session/remoteHistoryView';
 import { createBackgroundConnection } from './backgroundConnection';
 import { invokeWithHistoryViewCapability } from './historyViewCapability';
@@ -8,6 +8,7 @@ import { createRecoveryDiagnostics, settleMeasuredSnapshot, type RecoveryPhase }
 import { confirmTrackedSubscription, SubscriptionAcknowledgements } from './subscriptionAcknowledgements';
 import { AppState, Platform } from 'react-native';
 import { mobileDebugLog } from '@/debug/mobileDebugLog';
+import { dispatchCredentialSwitchOutcome } from '@/session/credentialSwitchOutcome';
 import { mobileRuntimeIdentity } from '@/debug/mobileRuntimeIdentity';
 import {
   DeviceLinkClient,
@@ -18,6 +19,7 @@ import {
   DeviceLinkError,
   CONTROLLER_CAPABILITY_MAKER_EVENT_BATCH_V1,
   CONTROLLER_CAPABILITY_SESSION_TEXT_SNAPSHOT_V1,
+  CONTROLLER_CAPABILITY_SESSION_LIST_MESSAGES_V1,
   CONTROLLER_CAPABILITY_PROVIDER_LOGO_KINDS_V2,
   DEVICE_LINK_CAPABILITY_COMPACT_MESSAGE_HISTORY_V1,
   DL_SUBSCRIBE_CHANNEL,
@@ -52,6 +54,10 @@ import {
   evictDeviceProviders,
   type DeviceProvidersPayload,
 } from '@/device-link/deviceProvidersCache';
+import {
+  clearAllProviderShareCatalogs,
+  evictProviderShareCatalogs,
+} from '@/device-link/providerShareCatalogCache';
 import {
   evictAgentCapabilitiesForDevice,
   resetAgentCapabilitiesCache,
@@ -127,6 +133,7 @@ import {
   createDeviceSendCohort,
   DEVICE_RESPONSIVENESS_PROBE_CHANNEL,
   isDeviceProbeDue,
+  noteAppLifecycleState,
   resetDeviceResponsivenessTracking,
   settleDeviceSend,
   unresponsiveDevicesStore,
@@ -155,9 +162,16 @@ import {
   updatePresenceAvailability,
 } from '@/device-link/presenceRecovery';
 import { createOfflineMirrorWipeQueue } from '@/device-link/offlineMirrorWipeQueue';
-import { hasMoreOlderMessages } from '@/session/messagePaging';
+import {
+  bridgeLatestMessagePage,
+  listMessagesWithPayloadRetry,
+  shouldKeepOlderMessagesAffordance,
+} from '@/session/messagePaging';
 import type { InputProjection, PendingInteraction, RemoteMessage } from '@/session/types';
-import { createVisualMockDeviceLinkContext, seedVisualMockStore } from '@/debug/visualMock';
+import { prepareVisualMockDeviceLinkContext } from '@/debug/visualMock';
+import { meterDeviceLinkInvokes, recordDeviceLinkPush } from '@/debug/deviceLinkTraffic';
+import { decodeGzipBase64TextBounded } from '@/utils/gzipBase64';
+import { jankMetricsEnabled, recordInvokeSent, recordPushHandled } from '@/debug/jankMetrics';
 
 export interface DeviceLinkContextValue {
   status: DeviceLinkStatus;
@@ -174,7 +188,11 @@ export interface DeviceLinkContextValue {
   lastPresenceSnapshot: PresenceSnapshot | null;
   /** 当前 relay 连接代内的逐设备 availability；null = 本代尚无权威 verdict。 */
   getPresenceAvailability(deviceId: string): boolean | null;
-  readDeviceList(): Promise<{ devices: DeviceView[] }>;
+  /**
+   * Read the account device roster. `fresh` starts a new REST snapshot instead of
+   * joining a request that may have started before the caller's reconciliation fence.
+   */
+  readDeviceList(options?: { fresh?: boolean }): Promise<{ devices: DeviceView[] }>;
   openLink(deviceId: string): Promise<LinkAcceptPayload>;
   /** 丢弃已结算的开链缓存并真正重开；并发重开仍按设备单飞。 */
   reopenLink(deviceId: string): Promise<LinkAcceptPayload>;
@@ -182,10 +200,10 @@ export interface DeviceLinkContextValue {
   /** Acquire before background grace ends; always release on settlement/cancellation. Hard deadline enforced by lifecycle. */
   beginBackgroundTransition?(): () => void;
   /**
-   * opts.preSend:在连接就绪之后、真正 client.invoke 之前的最后同步检查点。抛错即
+   * opts.preSend:在连接就绪并从 invoke 队列出队后、实际发送前的同步检查点。抛错即
    * 中止本次发送(错误原样上抛)。供写序敏感的调用方(patchHomeSession 的 isLatest
-   * 屏障)把「过期即放弃」判定贴到实际发送点——ensureOnlineForRequest 最长 1.5s 的
-   * 重连等待期间写可能被同字段新写取代,等待前的检查不够晚。
+   * 屏障)把「过期即放弃」判定贴到实际发送点——重连或排队期间写可能被同字段新写
+   * 取代,等待前的检查不够晚。
    */
   invoke<T = unknown>(
     deviceId: string,
@@ -214,6 +232,7 @@ const recoveryDiagnostics = new WeakMap<DeviceLinkClient, ReturnType<typeof crea
  * 被控端按能力缺失降级)。被控端只在看到对应能力后才发送新 wire 形状。
  */
 const CONTROLLER_CAPABILITIES = [
+  CONTROLLER_CAPABILITY_SESSION_LIST_MESSAGES_V1,
   SHARED_TASK_CAPABILITY,
   CONTROLLER_CAPABILITY_SESSION_TEXT_SNAPSHOT_V1,
   CONTROLLER_CAPABILITY_PROVIDER_LOGO_KINDS_V2,
@@ -423,6 +442,7 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
   const presenceAvailableByDeviceRef = useRef(new Map<string, boolean>());
   const rosterConsumerRef = useRef<(() => (devices: DeviceView[]) => void) | null>(null);
   const rosterRequestRef = useRef<{ client: DeviceLinkClient | null; epoch: number; promise: Promise<{ devices: DeviceView[] }> } | null>(null);
+  const rosterRequestGenerationRef = useRef(0);
   const presenceAvailabilityEpochsRef = useRef(createPresenceAvailabilityEpochs());
   const presencePendingRecoveryDeviceIdsRef = useRef(new Set<string>());
   const presenceUnavailableVerdictsRef = useRef(
@@ -457,15 +477,21 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
 
   // Home and direct task entry share the same in-flight roster read. Evidence
   // belongs to the connection that started it, not whichever one finishes it.
-  const readDeviceList = useCallback((): Promise<{ devices: DeviceView[] }> => {
+  const readDeviceList = useCallback((options: { fresh?: boolean } = {}): Promise<{ devices: DeviceView[] }> => {
     const client = clientRef.current;
     const epoch = connectionEpochRef.current;
     const pending = rosterRequestRef.current;
-    if (pending?.client === client && pending.epoch === epoch) return pending.promise;
+    if (!options.fresh && pending?.client === client && pending.epoch === epoch) return pending.promise;
+    const generation = ++rosterRequestGenerationRef.current;
     const apply = rosterConsumerRef.current?.();
     const promise = auth.apiFetch<{ devices: DeviceView[] }>('/api/device-link/devices', {
       baseUrl: DEVICE_LINK_API_BASE_URL, timeoutMs: 12_000,
-    }).then((result) => { apply?.(result.devices); return result; });
+    }).then((result) => {
+      // A fresh read supersedes every older roster consumer, even when the older
+      // response arrives first and would otherwise outrank the new snapshot.
+      if (rosterRequestGenerationRef.current === generation) apply?.(result.devices);
+      return result;
+    });
     rosterRequestRef.current = { client, epoch, promise };
     void promise.finally(() => {
       if (rosterRequestRef.current?.promise === promise) rosterRequestRef.current = null;
@@ -480,6 +506,7 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
     revokedDevicesStore.clearAll();
     resetDeviceResponsivenessTracking();
     clearAllDeviceProviders();
+    clearAllProviderShareCatalogs();
     clearAllDeviceModelMeta();
     resetAgentCapabilitiesCache();
     resetComposerPaletteCache();
@@ -936,6 +963,8 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
       }),
       createWebSocket: createRnWebSocket,
       logger: mobileDeviceLinkLogger,
+      // 弱网减流量：声明可解 gzip，大结果压缩、内容未变的结果只回标记（被控端支持时）。
+      transferCodec: { gunzipBase64: decodeGzipBase64TextBounded },
       // Mobile 具备按 deviceId 独立 openLink/订阅/快照恢复能力。可靠 ACK
       // 耗尽时只复位该 peer，共享 WSS 和其它远端继续工作；恢复仍只使用所有
       // Desktop 版本都支持的 link-open，不增加 wire/capability 要求。
@@ -956,6 +985,7 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
         requestTimeoutMs: 15_000,
       },
     });
+    meterDeviceLinkInvokes(client);
     clientRef.current = client;
     const catalogRefresh = createDeviceCatalogRefresh({
       connectionEpoch: () => connectionEpochRef.current,
@@ -1149,7 +1179,7 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
         }
       };
     };
-    const offFrame = client.onFrame((env) => routeFrame(env, {
+    const offFrame = client.onFrame((env) => routeFrameMeasured(env, {
       currentDataOwnerId: currentDataOwnerIdRef.current,
       onAccessRevoked: (deviceId) => {
         clearOnePresenceWipeTimer(presenceWipeTimersRef.current, deviceId);
@@ -1317,13 +1347,19 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
       releaseTopics: releaseHeavyTopics,
       pendingTransitions: () => [...backgroundTransitions.current],
       stop: () => client.stop(),
-      connect: () => client.connectNow('appstate-active', { overrideCongestionCooldown: true }),
+      connect: () => client.connectNow('appstate-active', {
+        overrideCongestionCooldown: true,
+        keepInFlightAttempt: true,
+      }),
       graceMs: BACKGROUND_STOP_GRACE_MS,
       releaseWaitMs: BACKGROUND_FINAL_UNSUBSCRIBE_WAIT_MS,
       suspendMs: BACKGROUND_SUSPEND_SUSPECT_MS,
       report: (event) => mobileDebugLog('debug', 'device-link', 'background lifecycle', event),
     });
+    noteAppLifecycleState(AppState.currentState);
     const sub = AppState.addEventListener('change', (next) => {
+      // 先于下面的恢复动作记账:回前台后 rehydrate 新发的请求属于新生命周期。
+      noteAppLifecycleState(next);
       if (next === 'active') {
         diagnostics.foreground();
         const resumingFromBackground = backgroundReleaseInFlightRef.current;
@@ -1601,20 +1637,42 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
 }
 
 function VisualMockDeviceLinkProvider({ children }: { children: ReactNode }) {
+  const [value, setValue] = useState<DeviceLinkContextValue | null>(null);
   useEffect(() => {
-    seedVisualMockStore();
+    let mounted = true;
+    void prepareVisualMockDeviceLinkContext().then((context) => {
+      if (mounted) setValue(context);
+    });
+    return () => { mounted = false; };
   }, []);
-  const value = useMemo(() => createVisualMockDeviceLinkContext(), []);
+  if (!value) return null;
   return <DeviceLinkContext.Provider value={value}>{children}</DeviceLinkContext.Provider>;
 }
 
-export function routeFrame(env: Envelope, handlers: {
+type RouteFrameHandlers = {
   currentDataOwnerId?: string | null;
   onAccessRevoked?: (deviceId: string) => void;
   onLinkClosed?: (deviceId: string, reason?: string) => void;
   onProviderChanged?: (deviceId: string) => void;
   onAgentsChanged?: (deviceId: string) => void;
-} = {}): void {
+};
+
+/** routeFrame plus per-channel push handling time while local diagnostics record. */
+function routeFrameMeasured(env: Envelope, handlers: RouteFrameHandlers): void {
+  if (!jankMetricsEnabled() || env.kind !== 'push') {
+    routeFrame(env, handlers);
+    return;
+  }
+  const started = performance.now();
+  try {
+    routeFrame(env, handlers);
+  } finally {
+    const channel = (env.payload as PushPayload | null)?.channel;
+    recordPushHandled(typeof channel === 'string' ? channel : '(unknown)', performance.now() - started);
+  }
+}
+
+export function routeFrame(env: Envelope, handlers: RouteFrameHandlers = {}): void {
   const peerLinkClosed = handlePeerLinkCloseFrame(
     env,
     (deviceId, reason) => handlers.onLinkClosed?.(deviceId, reason),
@@ -1626,6 +1684,8 @@ export function routeFrame(env: Envelope, handlers: {
   if (peerLinkClosed) return;
   if (env.kind !== 'push' || !env.src) return;
   const push = env.payload as PushPayload;
+  recordDeviceLinkPush(push.channel, push.payload);
+  dispatchCredentialSwitchOutcome(env.src, push.channel, push.payload);
   if (push.channel === 'local-db:task-tags:changed') {
     writeTaskTagCatalog(
       handlers.currentDataOwnerId,
@@ -1694,6 +1754,10 @@ export function routeFrame(env: Envelope, handlers: {
     historyView?.invalidate();
     return;
   }
+  if (push.channel === 'maker:history-work-patch') {
+    historyView?.applyWorkPatch(push.payload as HistoryWorkPatch);
+    return;
+  }
   remoteSessionStore.applyRemotePush(env.src, push.channel, push.payload);
   const patch = (push.payload as { patch?: { clearedAt?: unknown; status?: unknown } } | null)?.patch;
   if (historyView && push.channel === 'local-db:sessions:patched'
@@ -1741,15 +1805,14 @@ async function rebuildSessionSnapshot(
   // 其余(旧实现共用一个 catch,任一失败三份快照全丢)。goal 覆盖断连窗口内
   // 丢失的 maker:goal:status-changed push;model-pref / turn-cost 无对应查询通道,
   // 暂不在补齐范围(需扩桌面端 invoke 白名单)。
-  const applyHistory = (value: RemoteMessage[]) => {
+  const applyHistory = (value: RemoteMessage[], moreBeyondWindow: boolean) => {
     if (!isCurrent()) return false;
     if (Array.isArray(value)) {
       // moreBeyondWindow:这一页上沿之外服务端还有历史(满 80 条,或被 device-link 裁过行)。为真时
-      // store 不保留早于本页的缓存段 —— 断连期间漏收的 push 可能正落在两段之间,保留就在窗口里
-      // 留下孤岛,而漏收的量不大时两侧时间差很小、时间阈值的空洞检测发现不了(#1222)。
-      const windowOptions = {
-        moreBeyondWindow: hasMoreOlderMessages(value, RECONNECT_MESSAGE_WINDOW_LIMIT),
-      };
+      // store 不保留接不上已验证区间的缓存段 —— 断连期间漏收的 push 可能正落在两段之间,保留就在
+      // 窗口里留下孤岛,而漏收的量不大时两侧时间差很小、时间阈值的空洞检测发现不了(#1222)。
+      // readHistory 会先补读到接上为止,接上的旧段因此得以保留。
+      const windowOptions = { moreBeyondWindow };
       if (messageAuthorityAtRequestStart) {
         return remoteSessionStore.setLatestMessageWindow(sessionId, value, {
           ...windowOptions,
@@ -1829,7 +1892,27 @@ async function rebuildSessionSnapshot(
       if (!snapshot.error && snapshot.ready) return true;
       if (!isHistoryViewUnavailable(snapshot.error)) throw snapshot.error;
     }
-    return applyHistory(await readRawHistory());
+    const latest = await readRawHistory();
+    if (!Array.isArray(latest)) return applyHistory(latest, false);
+    // 断线期间漏收超过一页时，最新一页接不上已验证区间；先往前补读，避免旧历史被整段丢弃。
+    const page = await bridgeLatestMessagePage(
+      { messages: latest, limit: RECONNECT_MESSAGE_WINDOW_LIMIT, reducedByPayloadTooLarge: false },
+      {
+        needsBridge: (rows, more) =>
+          remoteSessionStore.latestMessageWindowNeedsBridge(sessionId, rows, more),
+        readBefore: (before) => listMessagesWithPayloadRetry(
+          (limit) => sendInvokeWithAccessHandling<RemoteMessage[]>(
+            client,
+            deviceId,
+            'local-db:messages:list',
+            [sessionId, { limit, before }],
+            sendOpts,
+          ),
+        ),
+        isCurrent,
+      },
+    );
+    return applyHistory(page.messages, shouldKeepOlderMessagesAffordance(page));
   };
   const [history, pending, projection, goal] = await Promise.all([
     measured('history', readHistory(), (applied) => applied),
@@ -1973,6 +2056,7 @@ async function sendInvoke<T>(
   args: unknown[],
   opts?: SendInvokeOptions,
 ): Promise<T> {
+  recordInvokeSent(channel);
   // 熔断门禁放在连接等待之前:open 时快速失败,不消耗 1.5s 重连等待也不上管道。
   // 同一轮显式 fan-out 复用 cohort;普通调用省略时每次 acquire 都是独立观测。
   const slot = acquireDeviceSendSlot(deviceId, opts?.responsivenessCohort, {
@@ -1980,7 +2064,7 @@ async function sendInvoke<T>(
   });
   try {
     await ensureOnlineForRequest(client);
-    // 连接就绪后、真正发送前的最后检查点:重连等待期间调用方状态可能已失效
+    // 连接就绪后先检查一次:重连等待期间调用方状态可能已失效
     // (写被同字段新写取代),抛错即中止发送。
     opts?.preSend?.();
   } catch (err) {
@@ -1989,6 +2073,7 @@ async function sendInvoke<T>(
     throw err;
   }
   let result: InvokeResultPayload;
+  let preSendFailed = false;
   try {
     // 长执行通道(desktop-cmd:run / worktree:create 等)按协议契约表放宽超时,
     // 与桌面控制端用法对齐,避免 mobile 收紧的默认 15s 误伤合法慢操作。
@@ -1998,9 +2083,18 @@ async function sendInvoke<T>(
       // 长通道(media / 文件搜索 / schedule 就绪窗口等)按 invokeTimeouts 解析
       // 规则保留更长窗口,避免 mobile 收紧的默认 15s 误伤合法慢操作。
       resolveMobileInvokeTimeoutMs(channel, args),
+      { preSend: () => {
+        try {
+          opts?.preSend?.();
+        } catch (err) {
+          preSendFailed = true;
+          throw err;
+        }
+      } },
     );
   } catch (err) {
-    settleDeviceSend(deviceId, slot, classifyDeviceSendFailure(err));
+    // A queued call rejected by its local guard is not a remote timeout.
+    settleDeviceSend(deviceId, slot, preSendFailed ? 'inconclusive' : classifyDeviceSendFailure(err));
     throw err;
   }
   // 收到 invoke-result 帧即为目标设备真实回包(即使 ok:false 的业务错误)。但
@@ -2148,6 +2242,7 @@ function markOfflineDeviceMirrors(deviceIds: readonly string[]): void {
   for (const deviceId of deviceIds) {
     invalidateScheduleIndexForDevice(deviceId);
     evictDeviceProviders(deviceId);
+    evictProviderShareCatalogs(deviceId);
     evictDeviceModelMeta(deviceId);
     evictAgentCapabilitiesForDevice(deviceId);
     evictComposerPaletteCacheForDevice(deviceId);
@@ -2165,6 +2260,7 @@ function wipeUnavailableDeviceMirror(deviceId: string): void {
   // Drop the cached provider catalog so a returning/re-granted device re-fetches it
   // instead of serving a list frozen from a previous connection.
   evictDeviceProviders(deviceId);
+  evictProviderShareCatalogs(deviceId);
   evictDeviceModelMeta(deviceId);
   // 能力表与供应商目录同时机驱逐:桌面端重连 / 升级 / 重新授权后必须重取,
   // 否则模型 / 权限 / plan 支持度会先按旧能力渲染并接受点击。

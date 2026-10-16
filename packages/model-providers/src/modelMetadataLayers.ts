@@ -1,4 +1,5 @@
 import { generationCapabilities, previousModelGenerations } from './modelGeneration.js';
+import { MODEL_NATIVE_APIS } from './modelAccessBean.js';
 import type { CatalogModel } from "./types.js";
 import type {
   ModelRegistry,
@@ -6,7 +7,7 @@ import type {
   ModelRegistryRoute,
   ModelEffort,
   ModelReferencePriceGroup,
-  ModelAccessWireProtocol,
+  ModelNativeApi,
 } from "./modelAccessBean.js";
 
 // Projection-only provenance; a symbol keeps it out of the public metadata schema
@@ -17,7 +18,7 @@ type ResolvedModelMetadata = ModelMetadata & { [inheritedContextWindow]?: true }
 /** Data only. Membership, credentials, routing and billed prices never inherit. */
 export interface ModelMetadata {
   /** Manufacturer language, independent of the connection's execution protocol. */
-  nativeApi?: ModelAccessWireProtocol | null;
+  nativeApi?: ModelNativeApi | null;
   mode?: string;
   modalities?: { input: string[]; output: string[] };
   officialDocs?: string;
@@ -75,7 +76,7 @@ export function validModelMetadata(value: unknown): value is ModelMetadata {
     if (!(MODEL_METADATA_FIELDS as readonly string[]).includes(key))
       return false;
     if (key === 'nativeApi') return v === null ||
-      ['anthropic-messages', 'openai-responses', 'openai-completions', 'google-generative-ai'].includes(v as string);
+      (MODEL_NATIVE_APIS as readonly unknown[]).includes(v);
     if (key === "mode")
       return typeof v === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(v);
     if (key === "modalities") {
@@ -270,6 +271,15 @@ export function resolveModelMetadata(
   }
   if (result.contextWindow === undefined && result.contextWindowMax !== undefined) {
     result.contextWindow = result.contextWindowMax;
+    result[inheritedContextWindow] = true;
+  }
+  // A maximum-only report can be below a public/preset working default.
+  // Tighten that default to this connection's capacity instead of discarding
+  // the live maximum. Explicit user/force windows still own their semantics.
+  if (currentLive?.contextWindowMax !== undefined && currentLive.contextWindow === undefined &&
+      user?.contextWindow === undefined && matched?.route.forceOverrides?.contextWindow === undefined &&
+      result.contextWindow !== undefined && result.contextWindow > currentLive.contextWindowMax) {
+    result.contextWindow = currentLive.contextWindowMax;
     result[inheritedContextWindow] = true;
   }
   if (result.contextWindow !== undefined && result.contextWindowMax !== undefined &&

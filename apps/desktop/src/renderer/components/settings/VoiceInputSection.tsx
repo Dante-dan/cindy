@@ -2,6 +2,7 @@ import { Button } from '@/components/ui/button';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import { useSettingsSearchNavigation } from './SettingsSearchNavigation';
 import { DefaultOverrideControls } from './DefaultOverrideControls';
+import { VoiceSpeakerFilterCard } from './VoiceSpeakerFilterCard';
 import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
 import * as Dialog from '@radix-ui/react-dialog';
@@ -1049,6 +1050,9 @@ export function VoiceInputSection() {
     setAutoDictionaryEnabled,
     setDictionarySyncEnabled,
     resetDictionarySyncEnabled,
+    setSpeakerFilterEnabled,
+    setSpeakerFilterStrictness,
+    resetSpeakerFilterStrictness,
     addDictionaryEntry: addDictionarySettingEntry,
     importDictionaryEntries: importDictionarySettingEntries,
     editDictionaryEntry: editDictionarySettingEntry,
@@ -2332,20 +2336,15 @@ export function VoiceInputSection() {
                     <Dialog.Portal>
                       <Dialog.Overlay
                         className={cn(
-                          'fixed inset-0 z-50 bg-[var(--overlay-modal)]',
-                          'data-[state=open]:animate-confirm-overlay-in',
-                          'data-[state=closed]:animate-confirm-overlay-out',
+                          'modal-scrim fixed inset-0 z-50',
                         )}
                         style={{ WebkitAppRegion: 'no-drag' } as CSSProperties}
                       />
                       <Dialog.Content
                         onPointerDownOutside={(event) => event.preventDefault()}
                         className={cn(
-                          'fixed left-1/2 top-1/2 z-50 w-[min(520px,calc(100vw-48px))] -translate-x-1/2 -translate-y-1/2',
-                          'rounded-[18px] border border-[var(--settings-theme-card-border)] bg-[var(--settings-theme-card-bg)]',
-                          'p-5 shadow-[var(--shadow-menu)] outline-none',
-                          'data-[state=open]:animate-confirm-content-in',
-                          'data-[state=closed]:animate-confirm-content-out',
+                          'modal-panel fixed left-1/2 top-1/2 z-50 w-[min(520px,calc(100vw-48px))] -translate-x-1/2 -translate-y-1/2',
+                          'p-5 outline-none',
                         )}
                         style={{ WebkitAppRegion: 'no-drag' } as CSSProperties}
                       >
@@ -2751,6 +2750,16 @@ export function VoiceInputSection() {
           />
         </div>
       </VoiceInputCard>
+
+      <VoiceSpeakerFilterCard
+        enabled={settings.speakerFilterEnabled}
+        strictness={settings.speakerFilterStrictness}
+        strictnessCustomized={settings.speakerFilterStrictnessOverride != null}
+        microphoneDeviceId={settings.microphoneDeviceId}
+        onEnabledChange={setSpeakerFilterEnabled}
+        onStrictnessChange={setSpeakerFilterStrictness}
+        onStrictnessReset={resetSpeakerFilterStrictness}
+      />
 
       <VoiceInputCard
         id="settings-search-voice-usage-data"

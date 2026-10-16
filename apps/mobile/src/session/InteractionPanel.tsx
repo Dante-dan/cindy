@@ -1,3 +1,9 @@
+import { PluginSetupNativeActions } from '@/plugins/PluginSetupNativeActions';
+import { sha256 } from '@noble/hashes/sha256';
+import { bytesToHex } from '@noble/hashes/utils';
+import { InputHandoffCard } from '@/inputHandoff/InputHandoffCard';
+import { parseInputHandoffSnapshotLike } from '@/inputHandoff/inputHandoffNative';
+import { mobilePluginSetupActions } from '@/plugins/pluginSetupActions';
 import { usePaneViewport } from '@/platform/AdaptiveWindowContext';
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -31,6 +37,8 @@ import {
 import { Text, TextInput } from '@/components/AppText';
 import { formatRemoteError } from '@/device-link/remoteStatus';
 import { useMobileMakerTransport } from '@/device-link/useMobileMakerTransport';
+import { asyncQuestionNeedsSupplement, formatAsyncQuestionSupplement } from '@cindy/maker-shared/interaction';
+import { buildQueuedTextMessage } from '@/session/inputProjection';
 import {
   answerKey,
   buildAskQuestionReviewPresentation,
@@ -68,9 +76,10 @@ import {
   type RemotePluginSetupStep,
 } from '@/session/interactionModel';
 import {
+  askQuestionsIdentity,
   clearAskUserDraft,
   clearPlanReviewDraft,
-  readAskUserDraft,
+  readAskUserDraftFor,
   readPlanReviewDraft,
   saveAskUserDraft,
   savePlanReviewDraft,
@@ -79,7 +88,7 @@ import {
   buildInteractionTouchLayout,
   type InteractionTouchLayout,
 } from '@/session/interactionTouchLayout';
-import { remoteSessionStore, useRemoteDeviceIdentity } from '@/session/remoteSessionStore';
+import { remoteSessionStore, useRemoteDeviceIdentity, useSessionInputProjection, useSessionRunStatus } from '@/session/remoteSessionStore';
 import type { PendingInteraction } from '@/session/types';
 import { fontWeight, iconStroke, lineHeight, monoFont, useTheme, useThemedStyles, type ThemeColors } from '@/theme';
 import { iconSize, radius, spacing, typeScale } from '@/theme/tokens';
@@ -105,6 +114,7 @@ const LOCALIZED_INTERACTION_KINDS = new Set([
   'rename_sessions_confirm',
   'ghost_grant_confirm',
   'plugin_setup',
+  'input_handoff',
 ]);
 
 function localizedInteractionKindKey(kind: string): string {
@@ -212,6 +222,7 @@ function InteractionPanelContent({
   };
   const fallbackInteraction = sortedInteractions[0] ?? null;
   const activeInteraction = useMemo(() => {
+    if (fallbackInteraction?.retainedDraft) return fallbackInteraction;
     if (!activeRequestId) return fallbackInteraction;
     return sortedInteractions.find((item) => readRequestId(item) === activeRequestId) ?? fallbackInteraction;
   }, [activeRequestId, fallbackInteraction, sortedInteractions]);
@@ -346,12 +357,15 @@ function InteractionPanelContent({
   }
   return (
     <View style={[styles.root, fillAvailableHeight && styles.rootFill, rootLayoutStyle]} testID="interaction.panel">
-      <PendingTaskHeader
-        onCollapse={canToggleCollapsed ? toggleCollapsed : undefined}
-        onSelectRequest={setActiveRequestId}
-        presentation={activeQueuePresentation}
-        touchLayout={touchLayout}
-      />
+      {/* 代输入条自带用途与位置,单独一条时不再叠一层队列头。 */}
+      {kind === 'input_handoff' && activeQueuePresentation.totalCount <= 1 ? null : (
+        <PendingTaskHeader
+          onCollapse={canToggleCollapsed ? toggleCollapsed : undefined}
+          onSelectRequest={setActiveRequestId}
+          presentation={activeQueuePresentation}
+          touchLayout={touchLayout}
+        />
+      )}
       <InteractionItem
         key={readRequestId(activeInteraction) ?? `${interactionKind(activeInteraction)}-${JSON.stringify(activeInteraction.request)}`}
         deviceId={deviceId}
@@ -520,6 +534,8 @@ function InteractionItem({
 }) {
   const { t } = useTranslation();
   const maker = useMobileMakerTransport(deviceId);
+  const inputProjection = useSessionInputProjection(sessionId);
+  const runStatus = useSessionRunStatus(sessionId);
   const [busy, setBusy] = useState(false);
   const submittingRequestIdRef = useRef<string | null>(null);
   const requestId = readRequestId(item);
@@ -536,7 +552,7 @@ function InteractionItem({
     // expectedRevision 裁决(旧快照会被改判成重新体检而非取消),抢先撤卡会在
     // 取消其实没生效时留下一张被抑制、再也灌不回来的幽灵卡 —— 那类卡走非乐观
     // 路径,等被控端 dismiss 推送为准。
-    const optimisticDismiss = options.optimisticDismiss !== false;
+    const optimisticDismiss = options.optimisticDismiss !== false && item.retainedDraft !== true;
     submittingRequestIdRef.current = currentRequestId;
     setBusy(true);
     onError(null);
@@ -545,9 +561,54 @@ function InteractionItem({
     // 登记在途抑制,防权威快照 / push 重放在被控端确认前把同卡灌回闪回;保留
     // item 快照,真失败时原卡复原供重试。
     const itemSnapshot = item;
+    // The retained object is scoped to this controller/account/task. Clearing or
+    // replacing it invalidates in-flight work without tying a reply to a view's
+    // mount lifetime (the user may switch tasks while it is being delivered).
+    const current = () => !item.retainedDraft || (
+      remoteSessionStore.getVisiblePendingInteractions(sessionId).includes(item) &&
+      (inputProjection.queuePaused || !remoteSessionStore.getInputProjection(sessionId).queuePaused)
+    );
     if (optimisticDismiss) remoteSessionStore.beginOptimisticInteractionDismiss(sessionId, currentRequestId);
     try {
-      await resolveInteractionResilient(maker, sessionId, currentRequestId, decision);
+      if (item.retainedDraft) {
+        const needsSupplement = await asyncQuestionNeedsSupplement(
+          () => maker.resolveInteraction(currentRequestId, decision),
+          async () => {
+            if (!current() || !item.persistId) return undefined;
+            const rows = await maker.aroundMessagesByClientId(sessionId, item.persistId, { radius: 0 });
+            return rows.find((row) => row.clientId === item.persistId && row.role === 'ask_user')?.content;
+          }, currentRequestId,
+        );
+        if (!current()) return;
+        const text = formatAsyncQuestionSupplement(normalizeAskQuestions(item.request.questions),
+          (decision.answers ?? {}) as Record<string, string>);
+        if (needsSupplement && text) {
+          const session = await maker.getSession(sessionId);
+          if (!current()) return;
+          const answerId = bytesToHex(sha256(text));
+          const queued = buildQueuedTextMessage(session, text, new Date(), `question-reply:${currentRequestId}:${answerId}`, { planMode: false });
+          // Only a definite negative ACK permits enqueue after steer.
+          const steered = inputProjection.queuePaused ? false
+            : await maker.input.steer(sessionId, queued, { touchUserSend: true });
+          if (steered !== true && steered !== false) throw new Error('Supplement receipt unavailable');
+          if (!steered) {
+            if (!current()) return;
+            let projection = await maker.input.enqueue(sessionId, queued, { sendAtMs: Date.now() });
+            if (!current()) return;
+            if (projection.queuePaused && inputProjection.queuePaused) {
+              projection = await maker.input.resume(sessionId);
+            }
+            if (!current()) return;
+            remoteSessionStore.setInputProjection(sessionId, projection);
+          }
+        }
+      } else {
+        await resolveInteractionResilient(maker, sessionId, currentRequestId, decision);
+      }
+      if (item.retainedDraft) {
+        remoteSessionStore.confirmProtectedQuestion(sessionId, currentRequestId);
+      }
+      remoteSessionStore.releaseProtectedQuestion(sessionId, currentRequestId);
       if (kind === 'ask_user_question') clearAskUserDraft(currentRequestId);
       if (kind === 'plan_review') clearPlanReviewDraft(currentRequestId);
       if (optimisticDismiss) {
@@ -564,6 +625,7 @@ function InteractionItem({
         );
       }
     } catch (err) {
+      if (item.retainedDraft && !current()) return;
       // resolveInteractionResilient 已带弱网重试 + pending 列表权威分辨,走到
       // 这里就是决定确未生效:复原卡片 + 报错。
       if (optimisticDismiss) {
@@ -572,7 +634,7 @@ function InteractionItem({
           item: itemSnapshot,
         });
       }
-      onError(formatRemoteError(err));
+      onError(item.retainedDraft ? t('interaction.panel.decisionNotAccepted') : formatRemoteError(err));
     } finally {
       if (submittingRequestIdRef.current === currentRequestId) {
         submittingRequestIdRef.current = null;
@@ -607,6 +669,8 @@ function InteractionItem({
         busy={busy}
         item={item}
         onDecision={(decision) => void submitDecision(decision)}
+        onStartAnswer={() => remoteSessionStore.protectAsyncQuestion(sessionId, item)}
+        resumeOnSubmit={item.retainedDraft && (inputProjection.queuePaused || !runStatus.isRunning)}
         touchLayout={touchLayout}
       />
     );
@@ -632,9 +696,36 @@ function InteractionItem({
       />
     );
   }
-  // plugin_setup:配置动作(OAuth / 写本地设置)只能在被控端完成,被控端的 IPC
-  // 边界也只放 cancel 过来。手机侧因此给只读摘要 + 取消出口,让用户至少能把
-  // 会话从等待里放出来,而不是对着一张没有任何按钮的卡干等。
+  // 代输入: values go through the sealed per-step channel inside the card;
+  // value-less decisions use resolve and wait for the Host's next snapshot.
+  if (kind === 'input_handoff') {
+    const snapshot = parseInputHandoffSnapshotLike(item.request);
+    if (!snapshot || !deviceId || isSharedTaskPeer(deviceId)) {
+      return (
+        <UnsupportedCard
+          message={t('interaction.panel.unsupportedType')}
+          request={item.request}
+          touchLayout={touchLayout}
+        />
+      );
+    }
+    return (
+      <InputHandoffCard
+        key={snapshot.requestId}
+        deviceId={deviceId}
+        snapshot={snapshot}
+        decisionBusy={busy}
+        onDecision={(decision) => void submitDecision(decision, { optimisticDismiss: false })}
+        // Claiming on first keystroke must not mark the card busy (that would
+        // disable the field being typed in); a failed claim is harmless.
+        onQuietDecision={(decision) => {
+          if (requestId) void resolveInteractionResilient(maker, sessionId, requestId, decision).catch(() => undefined);
+        }}
+      />
+    );
+  }
+  // 配置通过独立加密 v3 原生入口；通用交互 resolve 仍只允许取消。
+  // 旧 Host、共享访客及电脑本地回调保留电脑入口。
   if (kind === 'plugin_setup') {
     // 取消入口以共享分类器为准:terminal 快照(被控端 settle 后短暂保留的收尾帧)
     // 归 desktop-only,此时被控端已 complete、不再受理 resolve,给按钮只会让用户点出
@@ -822,6 +913,7 @@ function PermissionEvidence({
         <Text style={styles.companionMetaLabel}>{`${t(`interaction.companion.fields.${key}`)}  `}</Text>{value}
       </Text>)}
       <Text style={styles.companionMeta}><Text style={styles.companionMetaLabel}>{`${t('interaction.companion.operation')}  `}</Text>{presentation.toolName}</Text>
+      {presentation.sourceDescription ? <Text selectable style={styles.body}>{presentation.sourceDescription}</Text> : null}
       {presentation.autoReviewUnavailable ? <Text style={styles.body}>{t('interaction.permission.autoReviewUnavailable')}</Text> : null}
       {riskWarningText ? <View style={[styles.permissionRiskRow, armed && styles.permissionRiskRowArmed]} testID="interaction.permission.riskWarning">
         <Text style={styles.permissionRiskLabel}>{t('interaction.permission.highRisk')}</Text><Text style={styles.permissionRiskText}>{riskWarningText}</Text>
@@ -854,6 +946,9 @@ function PermissionEvidence({
           {presentation.toolName}
         </Text>
       </View>
+      {presentation.sourceDescription ? (
+        <Text selectable style={styles.permissionDescription}>{presentation.sourceDescription}</Text>
+      ) : null}
       {presentation.autoReviewUnavailable || presentation.description ? (
         <Text style={styles.permissionDescription}>
           {presentation.autoReviewUnavailable
@@ -877,30 +972,51 @@ function PermissionEvidence({
   );
 }
 
-function AskUserQuestionCard({
-  busy,
-  item,
-  onDecision,
-  touchLayout,
-}: {
+type AskUserQuestionCardProps = {
   busy: boolean;
   item: PendingInteraction;
   onDecision(decision: Record<string, unknown>): void;
+  onStartAnswer(): void;
+  resumeOnSubmit?: boolean;
   touchLayout: InteractionTouchLayout;
-}) {
+};
+
+function AskUserQuestionCard(props: AskUserQuestionCardProps) {
+  const questions = useMemo(() => normalizeAskQuestions(props.item.request.questions), [props.item.request.questions]);
+  // 与桌面 AskUserQuestionPrompt 同口径:内容相同的重新拉取保持挂载与输入;
+  // 同一 requestId 的问题内容真变了,则重挂并丢弃旧内容的草稿。
+  const questionsIdentity = askQuestionsIdentity(questions);
+  return <AskUserQuestionForm key={questionsIdentity} {...props} questions={questions} questionsIdentity={questionsIdentity} />;
+}
+
+function AskUserQuestionForm({
+  busy,
+  item,
+  onDecision,
+  onStartAnswer,
+  resumeOnSubmit,
+  questions,
+  questionsIdentity,
+  touchLayout,
+}: AskUserQuestionCardProps & { questions: AskQuestion[]; questionsIdentity: string }) {
   const styles = useInteractionStyles();
   const { colors } = useTheme();
   const { t, i18n: i18nInstance } = useTranslation();
   const companion = useContext(CompanionInteractionContext);
   const requestId = readRequestId(item) ?? '';
-  const questions = useMemo(() => normalizeAskQuestions(item.request.questions), [item.request.questions]);
   const draftCompletedRef = useRef(false);
-  const skipNextQuestionSyncRef = useRef(false);
-  const [currentIndex, setCurrentIndex] = useState(0);
-  const [answers, setAnswers] = useState<Record<string, string>>({});
-  const [selectedLabels, setSelectedLabels] = useState<Set<string>>(new Set());
-  const [customInput, setCustomInput] = useState('');
-  const [showCustomInput, setShowCustomInput] = useState(false);
+  // 表单按 requestId + 问题内容挂载,草稿在首帧同步恢复,
+  // 避免先渲染空状态再被同步 effect 覆盖。
+  const [initialDraft] = useState(() => readAskUserDraftFor(requestId, questionsIdentity));
+  const [currentIndex, setCurrentIndex] = useState(() =>
+    Math.min(initialDraft?.currentIndex ?? 0, Math.max(0, questions.length - 1)));
+  const [answers, setAnswers] = useState<Record<string, string>>(() => initialDraft?.answers ?? {});
+  const [selectedLabels, setSelectedLabels] = useState<Set<string>>(() => new Set(initialDraft?.selectedLabels ?? []));
+  const [customInput, setCustomInput] = useState(() => initialDraft?.customInput ?? '');
+  const [showCustomInput, setShowCustomInput] = useState(() => initialDraft?.showCustomInput ?? false);
+  // 选中态/自定义输入已对应的题号。只在切题时从 answers 回填:请求被重新拉取
+  // (截图后回到前台等)会换掉 current/answers 的引用,不能因此清掉正在输入的内容。
+  const syncedIndexRef = useRef(currentIndex);
   const presentation = useMemo(() => buildAskQuestionReviewPresentation({
     currentIndex,
     questions,
@@ -908,22 +1024,8 @@ function AskUserQuestionCard({
   const current = presentation.current;
 
   useEffect(() => {
-    draftCompletedRef.current = false;
-    const draft = readAskUserDraft(requestId);
-    skipNextQuestionSyncRef.current = !!draft;
-    setCurrentIndex(Math.min(draft?.currentIndex ?? 0, Math.max(0, questions.length - 1)));
-    setAnswers(draft?.answers ?? {});
-    setSelectedLabels(new Set(draft?.selectedLabels ?? []));
-    setCustomInput(draft?.customInput ?? '');
-    setShowCustomInput(draft?.showCustomInput ?? false);
-  }, [questions.length, requestId]);
-
-  useEffect(() => {
-    if (!current) return;
-    if (skipNextQuestionSyncRef.current) {
-      skipNextQuestionSyncRef.current = false;
-      return;
-    }
+    if (!current || syncedIndexRef.current === currentIndex) return;
+    syncedIndexRef.current = currentIndex;
     const next = selectionFromAnswer(
       { ...current, options: visibleAskOptions(current.options) },
       answers[answerKey(current)],
@@ -931,7 +1033,7 @@ function AskUserQuestionCard({
     setSelectedLabels(next.selectedLabels);
     setCustomInput(next.customInput);
     setShowCustomInput(next.showCustomInput);
-  }, [answers, current]);
+  }, [answers, current, currentIndex]);
 
   useEffect(() => {
     if (!requestId || draftCompletedRef.current) return;
@@ -939,6 +1041,7 @@ function AskUserQuestionCard({
       answers,
       currentIndex,
       customInput,
+      questionsIdentity,
       selectedLabels: [...selectedLabels],
       showCustomInput,
     });
@@ -992,13 +1095,14 @@ function AskUserQuestionCard({
     const nextAnswers = { ...answers, [currentAnswerKey]: answer };
     setAnswers(nextAnswers);
     if (isLast) {
-      draftCompletedRef.current = true;
+      draftCompletedRef.current = !item.retainedDraft;
       // Optimistic dismissal unmounts this form immediately. Save the final
       // choice now so a refused/lost receipt can restore exactly this draft.
       const finalSelection = selectionFromAnswer({ ...current, options }, answer);
       saveAskUserDraft(requestId, {
         answers: nextAnswers, currentIndex,
         customInput: finalSelection.customInput,
+        questionsIdentity,
         selectedLabels: [...finalSelection.selectedLabels],
         showCustomInput: finalSelection.showCustomInput,
       });
@@ -1027,6 +1131,7 @@ function AskUserQuestionCard({
   };
 
   const toggleLabel = (label: string) => {
+    onStartAnswer();
     if (!isMulti) {
       setShowCustomInput(false);
       setCustomInput('');
@@ -1116,7 +1221,9 @@ function AskUserQuestionCard({
               <TextInput
                 accessibilityLabel={t('interaction.panel.customAnswerInputAccessibility')}
                 autoFocus
-                onChangeText={setCustomInput}
+                editable={!busy}
+                onKeyPress={({ nativeEvent }) => { if (nativeEvent.key.length === 1) onStartAnswer(); }}
+                onChangeText={(text) => { onStartAnswer(); setCustomInput(text); }}
                 placeholder={t('interaction.panel.customAnswerPlaceholder')}
                 placeholderTextColor={colors.textPlaceholder}
                 style={styles.inlineInput}
@@ -1130,7 +1237,6 @@ function AskUserQuestionCard({
               disabled={busy}
               onPress={() => {
                 if (!isMulti) {
-                  skipNextQuestionSyncRef.current = true;
                   clearCurrentAnswer();
                   setSelectedLabels(new Set());
                 }
@@ -1159,7 +1265,9 @@ function AskUserQuestionCard({
           <TextInput
             accessibilityLabel={t('interaction.panel.answerInput')}
             autoFocus
-            onChangeText={setCustomInput}
+            editable={!busy}
+            onKeyPress={({ nativeEvent }) => { if (nativeEvent.key.length === 1) onStartAnswer(); }}
+            onChangeText={(text) => { onStartAnswer(); setCustomInput(text); }}
             placeholder={t('interaction.panel.answerInput')}
             placeholderTextColor={colors.textPlaceholder}
             style={styles.inlineInput}
@@ -1170,6 +1278,13 @@ function AskUserQuestionCard({
       )}
 
       <InteractionActions touchLayout={touchLayout}>
+        {item.retainedDraft ? (
+          <ResolveButton busy={busy} label={t('interaction.panel.closeAnswer')}
+            accessibilityLabel={t('interaction.panel.closeAnswer')}
+            onPress={() => onDecision(buildAskUserQuestionDecision({}))}
+            requestId={requestId} touchStyle={resolveButtonLayoutStyle(touchLayout, 'secondary', companion)}
+            testID="interaction.ask.closeButton" variant="secondary" />
+        ) : null}
         {currentIndex > 0 ? (
           <InteractionTouchButton
             accessibilityLabel={t('interaction.panel.previous')}
@@ -1202,10 +1317,10 @@ function AskUserQuestionCard({
         />
         {isMulti ? (
           <ResolveButton
-            accessibilityLabel={isLast ? t('interaction.panel.submitAnswerAccessibility') : t('interaction.panel.next')}
+            accessibilityLabel={isLast ? t(resumeOnSubmit ? 'interaction.panel.sendAndContinue' : 'interaction.panel.submitAnswerAccessibility') : t('interaction.panel.next')}
             busy={busy}
             invalidReason={!canSubmitMulti ? t('interaction.panel.answerRequired') : null}
-            label={isLast ? t('interaction.panel.submit') : t('interaction.panel.next')}
+            label={isLast ? t(resumeOnSubmit ? 'interaction.panel.sendAndContinue' : 'interaction.panel.submit') : t('interaction.panel.next')}
             onPress={submitMulti}
             requestId={requestId}
             touchStyle={resolveButtonLayoutStyle(touchLayout, 'primary', companion)}
@@ -1214,10 +1329,10 @@ function AskUserQuestionCard({
           />
         ) : (
           <ResolveButton
-            accessibilityLabel={isLast ? t('interaction.panel.submitAnswerAccessibility') : t('interaction.panel.next')}
+            accessibilityLabel={isLast ? t(resumeOnSubmit ? 'interaction.panel.sendAndContinue' : 'interaction.panel.submitAnswerAccessibility') : t('interaction.panel.next')}
             busy={busy}
             invalidReason={!canSubmitSingle ? t('interaction.panel.answerRequired') : null}
-            label={isLast ? t('interaction.panel.submit') : t('interaction.panel.next')}
+            label={isLast ? t(resumeOnSubmit ? 'interaction.panel.sendAndContinue' : 'interaction.panel.submit') : t('interaction.panel.next')}
             onPress={submitSingle}
             requestId={requestId}
             touchStyle={resolveButtonLayoutStyle(touchLayout, 'primary', companion)}
@@ -1567,10 +1682,8 @@ function PlanReviewCard({
 /**
  * plugin_setup 的**只读**状态卡。
  *
- * 手机端做不了配置动作(Secret 输入与 OAuth 必须留在被控端,见
- * docs/dev-rules/plugin-security-and-authoring.md §4 与 desktop 的
- * interactionResolveOrigin),所以这张卡的价值全在「看懂」:哪个插件、卡在哪一步、
- * 为什么失败、回电脑端要做什么。可进入目标电脑的远程桌面或取消请求。
+ * 手机原生配置只处理 Host 明确投影的专用加密动作。电脑专属步骤仍使用远程桌面入口；
+ * 普通 interaction resolve 不传 Secret/OAuth 内容。
  */
 export function PluginSetupMessageContent({ request, busy, onCancel, deviceId }: {
   request: PendingInteraction['request']; busy: boolean; onCancel?: () => void; deviceId?: string;
@@ -1606,6 +1719,8 @@ function PluginSetupCard({
     () => buildRemotePluginSetupPresentation(item.request),
     [item.request],
   );
+  const nativeSteps = new Set(deviceId && !isSharedTaskPeer(deviceId) ? mobilePluginSetupActions(item.request).map(action => action.stepId) : []);
+  const nativeSetup = nativeSteps.size > 0;
   const title = presentation.ghostName ?? t('interaction.kinds.plugin_setup.title');
   return (
     <View style={cardStyle(styles, touchLayout, companion)} testID="interaction.pluginSetup.card">
@@ -1622,7 +1737,7 @@ function PluginSetupCard({
           />
         ) : null}
         <View style={styles.compactCardTitleWrap}>
-          <Text style={styles.kind}>{t(presentation.terminal ? 'interaction.kinds.plugin_setup.label' : 'interaction.panel.desktopOnlyKind')}</Text>
+          <Text style={styles.kind}>{t(presentation.terminal || nativeSetup ? 'interaction.kinds.plugin_setup.label' : 'interaction.panel.desktopOnlyKind')}</Text>
           <Text numberOfLines={1} style={styles.compactCardTitle}>{title}</Text>
         </View>
         {presentation.stepCount > 0 && !presentation.terminal ? (
@@ -1643,13 +1758,14 @@ function PluginSetupCard({
             <Text style={styles.pluginSetupGroupHint}>{t('interaction.pluginSetup.chooseOne')}</Text>
           ) : null}
           {group.steps.map((step) => (
-            <PluginSetupStepRow key={step.id} step={step} terminal={presentation.terminal} />
+            <PluginSetupStepRow key={step.id} step={step} terminal={presentation.terminal} native={nativeSteps.has(step.id)} />
           ))}
         </View>
       ))}
+      {deviceId && !isSharedTaskPeer(deviceId) ? <PluginSetupNativeActions request={item.request} deviceId={deviceId} disabled={busy || presentation.terminal} /> : null}
       {/* 收尾帧已经 settle,再让用户「去电脑端完成」是错的引导。 */}
       {presentation.terminal ? null : (
-        <Text style={styles.pluginSetupFootnote}>{t('interaction.pluginSetup.completeOnDesktop')}</Text>
+        <Text style={styles.pluginSetupFootnote}>{t(nativeSetup ? 'plugins.nativeSetupHint' : 'interaction.pluginSetup.completeOnDesktop')}</Text>
       )}
       {!presentation.terminal && deviceId && !isSharedTaskPeer(deviceId) ? (
         <PluginSetupRemoteDesktopButton deviceId={deviceId} busy={busy} />
@@ -1694,7 +1810,7 @@ const PLUGIN_SETUP_RUNNING_PHASES: ReadonlySet<RemotePluginSetupPhase> = new Set
   'verifying',
 ]);
 
-function PluginSetupStepRow({ step, terminal }: { step: RemotePluginSetupStep; terminal: boolean }) {
+function PluginSetupStepRow({ step, terminal, native }: { step: RemotePluginSetupStep; terminal: boolean; native: boolean }) {
   const styles = useInteractionStyles();
   const { colors } = useTheme();
   const { t } = useTranslation();
@@ -1704,7 +1820,7 @@ function PluginSetupStepRow({ step, terminal }: { step: RemotePluginSetupStep; t
       ? colors.statusAccent
       : colors.textTertiary;
   const phaseText = step.phase ? t(`interaction.pluginSetup.phase.${step.phase}`) : null;
-  const actionHint = step.actionKind === 'inline_form'
+  const actionHint = native ? t('plugins.nativeStepHint') : step.actionKind === 'inline_form'
     ? (step.inlineFieldLabel
       ? t('interaction.pluginSetup.inlineFormAction', { label: step.inlineFieldLabel })
       : t('interaction.pluginSetup.inlineFormActionGeneric'))

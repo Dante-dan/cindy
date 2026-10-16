@@ -28,9 +28,12 @@ import {
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-import { CindyCapabilityPrefs } from '@/cindy-brain/CindyCapabilityPrefs';
+import { PluginUsageCard } from './PluginUsageCard';
+import { PluginSharedUsage } from './PluginSharedUsage';
+import type { PluginMarketItem } from '../../../shared/pluginMarket';
 import { GhostLibrarySection } from './GhostLibrarySection';
-import { GhostErrandPrefs } from '@/cindy-brain/GhostErrandPrefs';
+import { PluginBackgroundTasksSection } from './PluginBackgroundTasksSection';
+import { PluginTaskPrefs } from '@/cindy-brain/PluginTaskPrefs';
 import { GhostSettingsWebview } from '@/cindy-brain/GhostSettingsWebview';
 import { WINDOW_NO_DRAG_STYLE } from '@/components/layout/windowDrag';
 import {
@@ -45,14 +48,15 @@ import { Switch } from '@/components/ui/switch';
 import { toast } from '@/lib/toast';
 import { cn } from '@/lib/utils';
 import {
-  isOfficialGhostId,
+  ghostDeclaresHiddenTasks,
+  ghostTrustLabelKey,
+  isUserInstallReservedGhostId,
   type GhostPermissionItem,
   type GhostToolDecl,
   type InstalledGhost,
 } from '../../../shared/ghost';
 import { type GhostPluginDetail } from './lib/ghostPluginViewModel';
 import { GhostPluginIcon } from './GhostPluginIcon';
-import { IOSSimulatorPreferences } from './IOSSimulatorPreferences';
 import { ghostPluginSummary } from './lib/ghostPluginDetailModel';
 import { ghostPrimaryAction } from './lib/ghostPluginViewModel';
 import { permissionItemIcon } from './lib/permissionItemIcon';
@@ -62,9 +66,12 @@ import './plugin-motion.css';
 interface GhostPluginDetailViewProps {
   ghost: InstalledGhost | null;
   detail: GhostPluginDetail;
+  marketItem?: PluginMarketItem | null;
   panelStatus: string | null;
   enabledOverride?: boolean;
   onBack: () => void;
+  usageOwnerKey?: string;
+  confirmClearUsage?: () => Promise<boolean>;
   onToggle: (enabled: boolean) => void;
   /** 主动作:面板型「使用」/ 指令或 Host 能力型「对话」;纯工具型不渲染主按钮。 */
   onUse: () => void;
@@ -108,6 +115,9 @@ export function GhostPluginDetailView({
   onBack,
   onToggle,
   onUse,
+  marketItem,
+  usageOwnerKey,
+  confirmClearUsage,
   mainViewSidebarVisible = true,
   onMainViewSidebarVisibleChange,
   onUpdate,
@@ -125,6 +135,7 @@ export function GhostPluginDetailView({
   const enableSwitchId = useId();
   const [descriptionExpanded, setDescriptionExpanded] = useState(false);
   const [githubConnectionVersion, setGithubConnectionVersion] = useState(0);
+  const [taskApprovalPending, setTaskApprovalPending] = useState(false);
   const [descriptionOverflows, setDescriptionOverflows] = useState(false);
   const descriptionRef = useRef<HTMLParagraphElement>(null);
   // 安装记录不完整时不可运行:enabled 直接门控为 false(说明现状 + 给恢复入口,不让它
@@ -135,13 +146,11 @@ export function GhostPluginDetailView({
   const primaryEnabled =
     enabled &&
     (primaryAction === 'panel' ||
-      primaryAction === 'capability' ||
       (primaryAction === 'command' && detail.canUse));
-  const cindyCapabilities = detail.cindyCapabilities;
   // Local imports with the same id cannot use the host gh credential. Match the
   // official receipt before advertising that connection in this plugin's UI.
   const hasGithubConnection =
-    detail.id === 'cindy-github' &&
+    detail.ghostId === 'cindy-github' &&
     Boolean(ghost) &&
     ghost?.trust?.level === 'cindy-official' &&
     ghost.trust.publisherSigned &&
@@ -152,12 +161,10 @@ export function GhostPluginDetailView({
     hasGithubConnection ||
     detail.hasMainView ||
     detail.hasSettingsUi ||
-    detail.hostCapability === 'ios-simulator' ||
-    cindyCapabilities.length > 0 ||
-    detail.hasErrand;
+    detail.hasTaskPreferences;
   const summary = hasGithubConnection
     ? t('ccAgent.gitContext.pr.setup.account.summary')
-    : ghostPluginSummary(detail.description, detail.id);
+    : ghostPluginSummary(detail.description, detail.ghostId);
   /**
    * 「从 .cindy 文件更新」是否可用。官方保留前缀(cindy- / filo- / xd-)在**非 dev
    * 构建**上会被 Main 的用户装入通道以 GHOST_ID_RESERVED 直接拒绝(见
@@ -169,7 +176,7 @@ export function GhostPluginDetailView({
    * 会多隐藏一次入口——方向保守(少一个入口 vs 给用户一个必失败按钮),可接受。
    * 普通第三方插件不受影响。
    */
-  const localUpdateAvailable = import.meta.env.DEV || !isOfficialGhostId(detail.id);
+  const localUpdateAvailable = import.meta.env.DEV || !isUserInstallReservedGhostId(detail.ghostId);
   const hasAdditionalActions = localUpdateAvailable || onExport !== undefined;
 
   useLayoutEffect(() => {
@@ -216,7 +223,7 @@ export function GhostPluginDetailView({
 
   return (
     <main
-      className="plugin-motion-root h-full min-h-0 w-full overflow-y-auto bg-[var(--surface)] [scrollbar-gutter:stable_both-edges]"
+      className="app-wallpaper-surface plugin-motion-root h-full min-h-0 w-full overflow-y-auto bg-[var(--surface)] [scrollbar-gutter:stable_both-edges]"
       onScroll={onScroll}
     >
       <PluginDetailTopBar
@@ -234,11 +241,11 @@ export function GhostPluginDetailView({
               size="detail"
               onIconLoadError={onIconLoadError}
             />
-            <div className="min-w-0">
+            <div className="plugin-detail-heading min-w-0">
               <h1 className="truncate text-28 font-medium leading-[1.214] text-[var(--text-primary)]">
                 {detail.name}
               </h1>
-              <GhostPluginMetadata author={detail.author} version={detail.version} />
+              <GhostPluginMetadata author={detail.author} version={detail.version} marketItem={marketItem} />
             </div>
 
             <div
@@ -289,7 +296,7 @@ export function GhostPluginDetailView({
                   title={!enabled ? t('settings.ghosts.detail.useDisabled') : undefined}
                   className="plugin-detail-primary-action min-w-[88px] whitespace-nowrap"
                 >
-                  {primaryAction === 'command' || primaryAction === 'capability' ? (
+                  {primaryAction === 'command' ? (
                     <MessageCircle size={14} aria-hidden="true" />
                   ) : null}
                   {t(
@@ -342,13 +349,12 @@ export function GhostPluginDetailView({
                 <DropdownMenuContent
                   align="end"
                   sideOffset={8}
-                  className="w-56 rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-1.5 text-[var(--text-primary)] shadow-[var(--shadow-menu)]"
+                  className="w-56 p-1.5"
                 >
                   {localUpdateAvailable ? (
                     <DropdownMenuItem
                       onSelect={onUpdateFromFile}
                       disabled={updateBusy}
-                      className="h-10 rounded-lg px-3 text-13 focus:bg-[var(--surface-hover-soft)]"
                     >
                       {t('settings.ghosts.detail.updateFromFile')}
                     </DropdownMenuItem>
@@ -356,18 +362,19 @@ export function GhostPluginDetailView({
                   {onExport ? (
                     <DropdownMenuItem
                       onSelect={onExport}
-                      className="h-10 gap-2.5 rounded-lg px-3 text-13 focus:bg-[var(--surface-hover-soft)]"
+                      className="gap-2.5"
                     >
                       <Download size={15} aria-hidden="true" />
                       {t('settings.ghosts.detail.exportPackage')}
                     </DropdownMenuItem>
                   ) : null}
                   {hasAdditionalActions ? (
-                    <DropdownMenuSeparator className="mx-2 my-1 h-px bg-[var(--border-default)]" />
+                    <DropdownMenuSeparator />
                   ) : null}
                   <DropdownMenuItem
                     onSelect={onUninstall}
-                    className="h-10 gap-2.5 rounded-lg px-3 text-13 text-[var(--error-fg)] focus:bg-[var(--error-bg)] focus:text-[var(--error-fg-strong)]"
+                    variant="danger"
+                    className="gap-2.5"
                   >
                     <Trash2 size={15} aria-hidden="true" />
                     {t('settings.ghosts.uninstall')}
@@ -421,6 +428,14 @@ export function GhostPluginDetailView({
           ) : null}
         </header>
 
+        {ghost ? (
+          <PluginUsageCard
+            key={`${usageOwnerKey ?? 'local'}:${detail.id}`}
+            ghostId={detail.id}
+            confirmClear={confirmClearUsage}
+          />
+        ) : null}
+
         {hasConfiguration ? (
           <section
             className={hasGithubConnection ? 'mt-6' : DETAIL_SECTION_CLASS}
@@ -438,7 +453,6 @@ export function GhostPluginDetailView({
                 'space-y-3',
               )}
             >
-              {detail.hostCapability === 'ios-simulator' ? <IOSSimulatorPreferences /> : null}
               {detail.hasMainView ? (
                 <div
                   className={cn(
@@ -514,23 +528,38 @@ export function GhostPluginDetailView({
                   {t('routines.pluginCapability')}
                 </p>
               ) : null}
-              {cindyCapabilities.length > 0 ? (
-                <CindyCapabilityPrefs
-                  ghostId={detail.id}
-                  capabilities={cindyCapabilities}
-                  appearance="plugin"
-                />
-              ) : null}
-              {detail.hasErrand ? (
-                <GhostErrandPrefs ghostId={detail.id} appearance="plugin" />
+              {detail.hasTaskPreferences ? (
+                <PluginTaskPrefs ghostId={detail.id} appearance="plugin"
+                  showTaskRows={detail.hasPluginTasks}
+                  legacyDefault={ghost?.manifest.agent?.errand === true && !ghost.manifest.agent?.tasks && !ghost.manifest.workspace} />
               ) : null}
             </div>
           </section>
         ) : null}
 
+        <PluginBackgroundTasksSection
+          ghostId={detail.id}
+          installed={ghost !== null}
+          hiddenTasksDeclared={ghostDeclaresHiddenTasks(ghost?.manifest)}
+        />
+
         {detail.tools.length > 0 ? <ToolsSection tools={detail.tools} /> : null}
 
         {detail.permissions.length > 0 ? <PermissionSummary items={detail.permissions} /> : null}
+        {enabled && ghost?.manifest.agent?.tasks === true && ghost.taskCapabilityApproved !== true ? (
+          <Button variant="secondary" size="sm" className="mt-4" disabled={taskApprovalPending} onClick={async () => {
+            setTaskApprovalPending(true);
+            try {
+              await window.electronAPI.ghosts.requestTaskApproval(detail.id);
+            } catch {
+              toast.error(t('settings.ghosts.errors.generic'));
+            } finally {
+              setTaskApprovalPending(false);
+            }
+          }}>
+            {t('settings.ghosts.perm.agentTasksRequest')}
+          </Button>
+        ) : null}
 
         <GhostLibrarySection ghostId={detail.id} enabled={ghost?.manifest.library === true} />
 
@@ -558,13 +587,15 @@ export function OauthScopeStaleBadge() {
 export function GhostPluginMetadata({
   author,
   version,
+  marketItem,
 }: {
   author?: string | null;
   version: string;
+  marketItem?: PluginMarketItem | null;
 }) {
   const { t } = useTranslation();
   return (
-    <div className="plugin-detail-metadata mt-2 flex min-w-0 flex-nowrap items-center gap-2 overflow-hidden whitespace-nowrap text-13 leading-5 text-[var(--text-tertiary)]">
+    <div className="plugin-detail-metadata mt-2 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-13 leading-5 text-[var(--text-tertiary)]">
       {author ? (
         <>
           <span className="min-w-0 truncate">
@@ -574,6 +605,7 @@ export function GhostPluginMetadata({
         </>
       ) : null}
       <span className="shrink-0">v{version}</span>
+      {marketItem ? <PluginSharedUsage detail={marketItem} /> : null}
     </div>
   );
 }
@@ -796,16 +828,7 @@ export function DetailsSection({
   panelStatus: string | null;
 }) {
   const { t } = useTranslation();
-  const trustLabelKey =
-    detail.trust.level === 'cindy-official'
-      ? 'official'
-      : detail.trust.level === 'reviewed'
-        ? 'reviewed'
-        : detail.trust.level === 'verified-publisher'
-          ? 'verifiedPublisher'
-          : detail.trust.publisherSigned
-            ? 'signedUnverified'
-            : 'unsigned';
+  const trustLabelKey = ghostTrustLabelKey(detail.trust);
   const facts: Array<{
     key: string;
     label: string;
@@ -838,7 +861,7 @@ export function DetailsSection({
     {
       key: 'identifier',
       label: t('settings.ghosts.detail.infoId'),
-      value: detail.id,
+      value: detail.ghostId,
       monospace: true,
     },
     ...(detail.contents.length > 0
@@ -1008,12 +1031,12 @@ function DialogFrame({ children }: { children: ReactNode }) {
   return (
     <Dialog.Portal>
       <Dialog.Overlay
-        className="fixed inset-0 z-[10000] bg-[var(--overlay-modal)]"
+        className="modal-scrim fixed inset-0 z-[10000]"
         style={WINDOW_NO_DRAG_STYLE}
       />
       <Dialog.Content
         onPointerDownOutside={(event) => event.preventDefault()}
-        className="fixed left-1/2 top-1/2 z-[10000] flex max-h-[70vh] w-[calc(100vw-48px)] max-w-[560px] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)] text-[var(--text-primary)] shadow-[var(--shadow-menu)] focus:outline-none"
+        className="modal-panel fixed left-1/2 top-1/2 z-[10000] flex max-h-[70vh] w-[calc(100vw-48px)] max-w-[560px] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden text-[var(--text-primary)] focus:outline-none"
         style={WINDOW_NO_DRAG_STYLE}
       >
         {children}

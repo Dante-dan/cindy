@@ -1,3 +1,4 @@
+import type { ModelDisplayPricing } from './modelDisplayPricing.js';
 import type { ModelMetadata } from "./modelMetadataLayers.js";
 /**
  * @cindy/model-providers — 类型定义。
@@ -54,6 +55,20 @@ export const PI_MODEL_APIS = [
   "mistral-conversations",
 ] as const;
 export type PiModelApi = (typeof PI_MODEL_APIS)[number];
+
+/**
+ * Cindy 自带鉴权的订阅账号家族(ChatGPT / Claude / SuperGrok)。新增订阅家族只在这里加一项:
+ * 各端按家族读取账号余量的入口都以 `Record<NativeSubscriptionAuth, …>` 声明,漏接会直接
+ * 编译失败(mobile 任务菜单见 readSessionMenuAccountUsage)。
+ */
+export const NATIVE_SUBSCRIPTION_AUTHS = ["codex", "claude", "xai"] as const;
+export type NativeSubscriptionAuth = (typeof NATIVE_SUBSCRIPTION_AUTHS)[number];
+/** 每个订阅家族的内置默认账号 providerId(独立账号另有自己的 id,以 auth.native 标识家族)。 */
+export const NATIVE_SUBSCRIPTION_DEFAULT_PROVIDER_IDS = {
+  codex: "openai",
+  claude: "anthropic",
+  xai: "xai",
+} as const satisfies Record<NativeSubscriptionAuth, string>;
 
 /** Provider runtime 上游实际接受的推理 wire protocol。 */
 export type ProviderWireProtocol =
@@ -185,6 +200,10 @@ export interface RoutingDescriptor {
    * 缺省按 false 处理；它与模型图片输入能力独立，也不得从模型名推断。
    */
   supportsImageGeneration?: boolean;
+  /** Explicit standalone image API; independent of chat wire and Codex hosted tools. */
+  imageApi?: "openai-images";
+  /** Explicit standalone async video API, independent of the chat protocol. */
+  videoApi?: "xai-videos";
   /** Enterprise BYOK image model binding used by the Codex Images route. */
   imageModel?: { wireModel: string; litellmModel: string; supportsEdit: boolean };
   /** 真实上游 base URL（direct 时是供应商自家；gateway 时是 XD 网关 base）。 */
@@ -287,6 +306,11 @@ export interface ModelCost {
  * 跨 provider(如 gpt-5.5 同时由 openai 与 xd 提供)则必须元数据一致(见 catalog.ts 校验)。
  */
 export interface CatalogModel {
+  /** Same-provider display-only pricing; never inherited through public model metadata. */
+  displayPricing?: ModelDisplayPricing;
+  currency?: 'USD' | 'CNY';
+  costDiscount?: number;
+
   supportsToolCalls?: boolean;
   reasoningRequired?: boolean;
   userModelConfig?: ProviderRuntimeModelConfig;
@@ -295,7 +319,7 @@ export interface CatalogModel {
   discoveredCost?: ModelCost;
   nameExplicit?: boolean;
   /** Canonical model API from the accepted Registry; null explicitly means unverified. */
-  nativeApi?: PiModelApi | null;
+  nativeApi?: PiModelApi | import('./modelAccessBean.js').ModelNativeApi | null;
   /** 与 maker-core 现有 model id 一致（如 'claude-opus-4-8' / 'gpt-5.5' / 'codex/gpt-5.5'）。 */
   id: string;
   /** Server entitlement state. Paid-locked models remain present for UI but are never routable. */
@@ -380,6 +404,14 @@ export interface CatalogModel {
   effortDisplayNames?: Partial<Record<Effort, string>>;
   /** 默认 effort；null = 不支持。 */
   defaultEffort: Effort | null;
+  /**
+   * true = 该 (provider, agent) 下没有任何来源声明过推理档位：用户/运行时没填 reasoning，
+   * 目录、发现元数据与用户元数据也都没有 efforts。此时 `efforts: []` 只是占位，不等于
+   * 「明确无档位」（reasoning:false 或已声明空列表）；准入校验不得据此把显式档位判成
+   * valid: none（#5535）。Pi 不标记：Pi 运行时按 efforts 物化 reasoning，自定义 Pi 模型
+   * 在显式开启前就是非推理模型，放行的档位不会生效。
+   */
+  effortsUnknown?: boolean;
   /** 思考只有开/关两档时，选择器显示开关而不是档位列表。 */
   thinkingToggle?: boolean;
   /**
@@ -487,6 +519,10 @@ export interface ProviderMediaModel extends Pick<
   discoveredMetadata?: ModelMetadata;
   /** Local projection provenance; not part of the public Registry metadata. */
   sourceAgent?: AgentKind;
+  /** Same-provider display-only pricing; never inherited through public model metadata. */
+  displayPricing?: ModelDisplayPricing;
+  currency?: 'USD' | 'CNY';
+  costDiscount?: number;
   id: string;
   name: string;
   availability?: "available" | "requires_payment";
@@ -512,7 +548,7 @@ export interface Provider {
    * OAuth Runner（generic-oauth）；不带描述符的 oauth 供应商 = host bespoke 鉴权
    * （anthropic / openai / xai 现状）。
    */
-  auth: { method: AuthMethod; oauth?: OAuthProviderDescriptor; native?: "codex" | "claude" | "xai" };
+  auth: { method: AuthMethod; oauth?: OAuthProviderDescriptor; native?: NativeSubscriptionAuth };
   /** 用户使用该供应商时的额度来源；旧目录可缺省，由 source 从 bundled 同 id 条目补齐。 */
   access?: ProviderAccess;
   /**
@@ -747,6 +783,9 @@ export interface CustomProviderRuntimeConfig {
   requestPath?: string;
   /** Codex Responses runtime 是否支持原生图片生成与编辑；缺省为 false。 */
   supportsImageGeneration?: boolean;
+  /** Opt-in to standalone OpenAI Images generation/edits on this runtime's connection. */
+  imageApi?: "openai-images";
+  videoApi?: "xai-videos";
   /** 用户模型；contextWindow 可由预设带入，缺省时由 `buildUserProvider` 补保守默认。 */
   models: ProviderRuntimeModelConfig[];
   /**
@@ -794,7 +833,7 @@ export interface CustomProviderConfig {
   auth?:
     | { method: "apiKey"; oauth?: never; native?: never }
     | { method: "oauth"; oauth: OAuthProviderDescriptor; native?: never }
-    | { method: "oauth"; native: "codex" | "claude" | "xai"; oauth?: never }
+    | { method: "oauth"; native: NativeSubscriptionAuth; oauth?: never }
     | { method: "none"; oauth?: never; native?: never };
   /** per-runtime 独立配置（键为 agent，只含已配置的 runtime；至少一个）。 */
   runtimes: Partial<Record<AgentKind, CustomProviderRuntimeConfig>>;

@@ -9,6 +9,8 @@ const h = vi.hoisted(() => ({
   profiles: [] as Array<{ id: string; name: string; avatar: string; avatarColor: string }>,
   profileListeners: new Set<() => void>(),
 }));
+// 工作台在右侧栏里有自己的数据订阅，这里只验证伙伴对话的挂载与读位。
+vi.mock('@/features/right-sidebar/lib/openBotWorkbenchTab', () => ({ ensureBotWorkbenchTab: vi.fn(async () => {}) }));
 vi.mock('../botStore', async () => {
   const { useSyncExternalStore } = await import('react');
   return {
@@ -20,6 +22,7 @@ vi.mock('../botStore', async () => {
 });
 vi.mock('react-router-dom', () => ({
   useParams: () => h.params,
+  useLocation: () => ({ state: null }),
   useNavigate: () => vi.fn(),
   Navigate: () => <div>unavailable</div>,
 }));

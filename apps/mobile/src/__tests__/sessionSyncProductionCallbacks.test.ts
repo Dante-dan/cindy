@@ -6,7 +6,12 @@ import { createRemoteSyncCoordinator } from '@/device-link/remoteSyncTask';
 import { runConnectionScopedSessionMetadataRead, waitForIndependentSnapshotReads } from '@/device-link/sessionSnapshotSingleFlight';
 import { syncSessionMessageWindow } from '@/session/sessionMessageWindowSync';
 import { shouldClearOperationErrorAfterSync } from '@/session/sessionSyncErrorRecovery';
-import { hasOlderMessagesAfterReopen, shouldKeepOlderMessagesAffordance } from '@/session/messagePaging';
+import { resolveEffectiveConnectionError } from '@/components/connectionBannerVisibility';
+import {
+  bridgeLatestMessagePage,
+  hasOlderMessagesAfterReopen,
+  shouldKeepOlderMessagesAffordance,
+} from '@/session/messagePaging';
 import { HistoryViewController, isHistoryViewUnavailable, projectHistoryView } from '@cindy/maker-shared/message-window';
 
 // Execute the actual page callbacks, not a duplicate orchestration written for tests.
@@ -52,7 +57,9 @@ function historyAvailable(status: string, presence: boolean | null): boolean {
 }
 const tick = () => new Promise((done) => setTimeout(done, 0));
 const session = { id: 's1', updatedAt: '2026-09-06T00:00:00Z', _count: { messages: 100 } };
-const page = { messages: [{ id: 'm1' }], limit: 1, reducedByPayloadTooLarge: false };
+const page = {
+  messages: [{ id: 'm1' }] as { id: string; clientId?: string }[], limit: 1, reducedByPayloadTooLarge: false,
+};
 
 function fixture(reopen = false, remoteHistoryAvailable = true) {
   const state = {
@@ -81,6 +88,7 @@ function fixture(reopen = false, remoteHistoryAvailable = true) {
     isSessionMessageWindowSynced: vi.fn(() => false),
     setMessages: vi.fn((_id, rows) => { state.rows = rows; }),
     setLatestMessageWindow: vi.fn((_id, rows) => { state.rows = rows; }),
+    latestMessageWindowNeedsBridge: vi.fn(() => false),
     markSessionMessagesSynced: vi.fn(),
     setPendingInteractions: vi.fn(), setInputProjectionIfCurrent: vi.fn(),
     setActiveSessionSnapshots: vi.fn(),
@@ -117,6 +125,7 @@ function fixture(reopen = false, remoteHistoryAvailable = true) {
     getSubscriptionIdentity: (): number | null => null, notificationResponse: null,
     syncedNotificationResponseRef: { current: null },
     shouldKeepOlderMessagesAffordance, hasOlderMessagesAfterReopen,
+    bridgeLatestMessagePage,
     messageWindowReconciledRef: { current: false },
     setHasOlderMessages: (value: boolean) => { state.older = value; },
     setLoading: (value: boolean) => { state.loading = value; },
@@ -247,6 +256,34 @@ describe('production session recovery callbacks', () => {
     expect(f.state.rows).toEqual(page.messages);
     expect(f.store.markSessionMessagesSynced).toHaveBeenCalled();
   });
+  it('reads before the latest page until it joins the verified window, then commits once', async () => {
+    const f = fixture(true);
+    f.store.latestMessageWindowNeedsBridge.mockReturnValueOnce(true).mockReturnValue(false);
+    f.maker.listMessages
+      .mockResolvedValueOnce({ ...page, messages: [{ id: 'm2', clientId: 'm2' }], limit: 1 })
+      .mockResolvedValueOnce({ ...page, messages: [{ id: 'm1', clientId: 'm1' }], limit: 1 });
+    await f.sync();
+    expect(f.maker.listMessages.mock.calls.map((call) => (call as unknown[])[1])).toEqual([
+      { limit: 20 },
+      { limit: 20, before: 'm2' },
+    ]);
+    expect(f.store.setLatestMessageWindow).toHaveBeenCalledTimes(1);
+    expect(f.state.rows.map((row) => row.id)).toEqual(['m1', 'm2']);
+  });
+
+  it('does not commit an unbridged window when a bridge read fails', async () => {
+    const f = fixture(true);
+    const cached = f.state.rows;
+    f.store.latestMessageWindowNeedsBridge.mockReturnValue(true);
+    f.maker.listMessages
+      .mockResolvedValueOnce({ ...page, messages: [{ id: 'm2', clientId: 'm2' }], limit: 1 })
+      .mockRejectedValueOnce(new Error('INVOKE_TIMEOUT'));
+    await f.sync().catch(() => undefined);
+    expect(f.store.setLatestMessageWindow).not.toHaveBeenCalled();
+    expect(f.state.rows).toBe(cached);
+    expect(f.state.syncError).not.toBeNull();
+  });
+
   it('accepts a history view without certifying sparse rows as a complete raw window', async () => {
     const f = fixture();
     f.bindings.historyView.view.getSnapshot = () => ({ ready: true, error: null });
@@ -259,16 +296,18 @@ describe('production session recovery callbacks', () => {
   });
 
   it('routes the visible history retry to pagination rather than full sync', () => {
-    const screen = source.getFullText().replace(/\r\n/g, '\n');
-    expect(screen).toContain('const bannerError = connectionRecoveryError ?? historyError;');
-    expect(screen).toContain('const bannerRetriesHistory = connectionRecoveryError === null && historyError !== null;');
-    expect(screen).toContain('requestErrorAutoRecovering={bannerRetriesHistory ? false : undefined}');
-    expect(screen).toContain('loading={loading || loadingEarlier}');
+    const values = new Map<string, ts.Expression>();
+    const props = new Map<string, ts.Expression>();
     let onSync: ts.Expression | undefined;
     const find = (node: ts.Node) => {
+      if (ts.isVariableDeclaration(node) && node.initializer) values.set(node.name.getText(source), node.initializer);
       if (ts.isJsxSelfClosingElement(node) && node.tagName.getText(source) === 'ConnectionBanner') {
-        const prop = node.attributes.properties.find(p => ts.isJsxAttribute(p) && p.name.getText(source) === 'onSync') as ts.JsxAttribute;
-        onSync = (prop.initializer as ts.JsxExpression).expression;
+        for (const prop of node.attributes.properties) {
+          if (ts.isJsxAttribute(prop) && prop.initializer && ts.isJsxExpression(prop.initializer) && prop.initializer.expression) {
+            props.set(prop.name.getText(source), prop.initializer.expression);
+          }
+        }
+        onSync = props.get('onSync');
       }
       ts.forEachChild(node, find);
     };
@@ -279,8 +318,25 @@ describe('production session recovery callbacks', () => {
     expect(loadEarlierMessages).toHaveBeenCalledOnce(); expect(requestSync).not.toHaveBeenCalled(); expect(retry).not.toHaveBeenCalled();
     run(false, { error: 'lookup failed', retry }, loadEarlierMessages, requestSync);
     expect(retry).toHaveBeenCalledOnce(); expect(requestSync).toHaveBeenCalledExactlyOnceWith({ reason: 'manual', replaceMessages: false });
-    const errorSources = screen.slice(screen.indexOf('const connectionError ='), screen.indexOf('const bannerError ='));
-    expect(errorSources).not.toContain('historyError');
+    function evaluate(expression: ts.Expression | undefined, bindings: Record<string, unknown>) {
+      if (!expression) throw new Error('Missing production banner expression');
+      return new Function(...Object.keys(bindings), `return (${expression.getText(source)});`)(...Object.values(bindings));
+    }
+    for (const historyError of [null, 'earlier page failed']) {
+      for (const connectionFailure of [null, 'connection failed']) {
+        const connectionError = evaluate(values.get('connectionError'), { historyError, isDeviceAccessRevoked: false, syncError: connectionFailure, error: null, isDeviceUnresponsive: false, resolveEffectiveConnectionError });
+        expect(connectionError).toBe(connectionFailure);
+        const connectionRecoveryError = evaluate(values.get('connectionRecoveryError'), { companionEntry: { error: null }, activeOutboxTransportError: null, connectionError });
+        const bannerError = evaluate(values.get('bannerError'), { connectionRecoveryError, historyError });
+        const bannerRetriesHistory = evaluate(values.get('bannerRetriesHistory'), { connectionRecoveryError, historyError });
+        expect(bannerError).toBe(connectionFailure ?? historyError);
+        expect(bannerRetriesHistory).toBe(connectionFailure === null && historyError !== null);
+        expect(evaluate(props.get('requestErrorAutoRecovering'), { bannerRetriesHistory })).toBe(bannerRetriesHistory ? false : undefined);
+      }
+    }
+    for (const loading of [false, true]) for (const loadingEarlier of [false, true]) {
+      expect(evaluate(props.get('loading'), { loading, loadingEarlier })).toBe(loading || loadingEarlier);
+    }
   });
 
   it.each([false, true])('keeps late history and pagination after projection rejects (reopen=%s)', async (reopen) => {

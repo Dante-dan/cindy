@@ -5,7 +5,7 @@ import * as Clipboard from 'expo-clipboard';
 import * as Updates from 'expo-updates';
 import { useUpdates } from 'expo-updates';
 import { useRouter } from 'expo-router';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
   Alert,
   DevSettings,
@@ -85,6 +85,7 @@ import {
 } from '@/session/mobileVoiceDictionaryCache';
 import { buildMobileVoiceDictionaryEntryViews } from '@/session/mobileVoiceDictionaryView';
 import { buildMobileUpdateInfoRows, currentMobileOtaVersion } from '@/settings/updateInfo';
+import { UserBubbleSettings } from '@/settings/UserBubbleSettings';
 import { shouldCheckBundleUpdate } from '@/update/bundleUpdate';
 import { isGooglePlayInstallation } from '@/update/androidInstallSource';
 import {
@@ -111,6 +112,11 @@ import {
   SettingsGroup,
   SettingsSwitchRow,
 } from '@/session/SettingsGroupRows';
+import {
+  getMobileSpeakerFilterSnapshot,
+  hydrateMobileSpeakerFilter,
+  subscribeMobileSpeakerFilter,
+} from '@/session/mobileSpeakerFilter';
 import { useSettingsDeviceDirectory } from '@/session/settingsDeviceDirectory';
 import { confirmLogout } from '@/session/confirmLogout';
 import { THEME_PREFERENCES, useTheme, useThemedStyles, type ThemeColors } from '@/theme';
@@ -601,8 +607,12 @@ export default function SettingsScreen() {
     }
   }, [auth.apiFetch, pushBusy, pushEnabled, t]);
 
-  // 调试分组与首页列表共用同一套展开 / 收起过渡(listDisclosureTransition)。
-  const debugDisclosure = useListDisclosureTransition();
+  // Android 10 上快速反向切换这组父卡片 layout + 多行 exiting 时会出现重叠 / 空白。
+  // 设置页在 Android 上同步重排,避免退出视图参与后续布局;保留 iOS 动画与原状态逻辑。
+  const debugDisclosureMotionEnabled = Platform.OS !== 'android';
+  const debugDisclosure = useListDisclosureTransition({
+    motionEnabled: debugDisclosureMotionEnabled,
+  });
   const runDebugDisclosure = debugDisclosure.run;
   const toggleDebug = useCallback(() => {
     runDebugDisclosure(() => setDebugExpanded((value) => !value));
@@ -720,6 +730,14 @@ export default function SettingsScreen() {
     push('/settings/voice-dictionary');
   }, [push]);
 
+  const speakerFilter = useSyncExternalStore(subscribeMobileSpeakerFilter, getMobileSpeakerFilterSnapshot);
+  useEffect(() => {
+    void hydrateMobileSpeakerFilter();
+  }, []);
+  const openVoiceSpeakerFilter = useCallback(() => {
+    push('/settings/voice-speaker-filter');
+  }, [push]);
+
   // dictionaryRevision 只作为依赖存在:缓存是模块级的,刷新完成后靠它触发重算。
   const dictionaryEntries = useMemo(
     () =>
@@ -759,7 +777,10 @@ export default function SettingsScreen() {
       />
 
       <ScrollView {...simpleScrollInsetProps} contentContainerStyle={styles.content} testID="settings.scroll">
-        <ListDisclosureScope controller={debugDisclosure.controller}>
+        <ListDisclosureScope
+          controller={debugDisclosure.controller}
+          motionEnabled={debugDisclosureMotionEnabled}
+        >
           {/* 账号头部:身份 + 连接状态一次性呈现,下面分组不再重复 */}
           <View style={styles.headerCard} testID="settings.accountHeader">
             <MobileUserAvatar imageUrl={auth.user?.avatar} name={overview.header.name} size="large" />
@@ -829,7 +850,10 @@ export default function SettingsScreen() {
                       testID: 'settings.checkUpdateButton',
                       tone: 'secondary',
                     }}
+                    density="compact"
+                    numberOfLines={0}
                     style={styles.versionButton}
+                    textStyle={styles.versionButtonText}
                   />
                 ) : null}
               </View>,
@@ -869,6 +893,23 @@ export default function SettingsScreen() {
             />
           </SettingsGroup>
 
+          {/* 识别我的声音:声纹只在本机;老安装包缺原生推理模块时不显示入口 */}
+          {speakerFilter.supported ? (
+            <SettingsGroup
+              footer={t('settings.voiceSpeakerFilter.entryHint')}
+              title={t('settings.voiceSpeakerFilter.sectionTitle')}
+            >
+              <ActionInfoRow
+                accessibilityLabel={t('settings.voiceSpeakerFilter.openAccessibility')}
+                key="voice-speaker-filter"
+                label={t('settings.voiceSpeakerFilter.label')}
+                onPress={openVoiceSpeakerFilter}
+                testID="settings.voiceSpeakerFilter.row"
+                value={t(speakerFilter.enabled ? 'settings.voiceSpeakerFilter.on' : 'settings.voiceSpeakerFilter.off')}
+              />
+            </SettingsGroup>
+          ) : null}
+
           <SettingsGroup title={t('sharedTask.title')}>
             <ActionInfoRow
               accessibilityLabel={t('sharedTask.manageSharing')}
@@ -897,6 +938,7 @@ export default function SettingsScreen() {
                 value={t(`settings.appearance.options.${themePreference}`)}
               />
             </NativePullDownMenu>
+            <UserBubbleSettings />
           </SettingsGroup>
 
           {/* 显示语言:默认跟随系统,手动选择即持久化 override(恢复跟随系统 = 清除 override) */}
@@ -1167,6 +1209,7 @@ export default function SettingsScreen() {
       </ScrollView>
       <SheetModal
         backdropTestID="settings.appearancePicker.backdrop"
+        nativePresentation
         onBackdropPress={() => setAppearancePickerOpen(false)}
         onRequestClose={() => setAppearancePickerOpen(false)}
         visible={appearancePickerOpen}
@@ -1190,6 +1233,7 @@ export default function SettingsScreen() {
       </SheetModal>
       <SheetModal
         backdropTestID="settings.languagePicker.backdrop"
+        nativePresentation
         onBackdropPress={() => setLanguagePickerOpen(false)}
         onRequestClose={() => setLanguagePickerOpen(false)}
         visible={languagePickerOpen}
@@ -1275,14 +1319,14 @@ const makeStyles = (colors: ThemeColors) => StyleSheet.create({
   localLogOptions: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center' },
   // —— 版本行 ——
   versionRow: {
-    alignItems: 'center',
-    flexDirection: 'row',
+    alignItems: 'stretch',
+    flexDirection: 'column',
     gap: spacing.md,
     minHeight: 60,
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.md,
   },
-  versionTexts: { flex: 1, gap: spacing.xs, minWidth: 0 },
+  versionTexts: { gap: spacing.xs, minWidth: 0 },
   versionValueRow: { alignItems: 'center', flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },
   versionLabel: { color: colors.textPrimary, flexShrink: 1, fontSize: typeScale.body, fontWeight: fontWeight.medium, lineHeight: lineHeight.body },
   versionDetail: { color: colors.textSecondary, fontSize: typeScale.footnote, fontWeight: fontWeight.regular, lineHeight: lineHeight.caption },
@@ -1298,7 +1342,8 @@ const makeStyles = (colors: ThemeColors) => StyleSheet.create({
     lineHeight: lineHeight.micro,
     fontWeight: fontWeight.semibold,
   },
-  versionButton: { flexShrink: 0 },
+  versionButton: { alignSelf: 'flex-start', flexShrink: 0, maxWidth: '100%', paddingVertical: spacing.xs },
+  versionButtonText: { textAlign: 'center' },
   // —— 可复制行 ——
   copyRow: {
     alignItems: 'center',

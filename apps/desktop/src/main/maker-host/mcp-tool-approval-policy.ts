@@ -22,11 +22,9 @@
 import type {
   McpToolApprovalContext,
   McpToolApprovalPolicy,
-  McpToolApprovalPresentation,
 } from '@cindy/maker-core';
-import { canAutoApproveContactsMcpTool, canonicalIOSSimulatorToolName } from '@cindy/mcps';
+import { canAutoApproveContactsMcpTool } from '@cindy/mcps';
 
-import { t } from '../i18n.js';
 
 /**
  * 精确到工具的只读放行表，键为 `<server>::<tool>`。
@@ -57,7 +55,6 @@ const READ_ONLY_MCP_TOOLS: ReadonlySet<string> = new Set([
   'cindy::ghost_forge_guide',
   'cindy_browser::list_tools',
   'cindy_android::list_tools',
-  'cindy_ios_simulator::list_tools',
   'cindy_computer::list_tools',
   'cindy_feishu_bot::list_tools',
   'cindy_scheduler::list_tools',
@@ -126,60 +123,6 @@ function readJsonObject(value: unknown): Record<string, unknown> | undefined {
   return undefined;
 }
 
-/**
- * 取 iOS Simulator progressive 调用的内层动作。
- *
- * 内层名一律过 canonical 化：改名后旧名仍是可调用的隐藏别名，别名必须命中与新名
- * 完全相同的审批判定，否则旧名就成了绕过设备授权的口子。
- */
-function readIOSSimulatorInnerCall(
-  context: McpToolApprovalContext,
-): { name: string | undefined; args: unknown } | undefined {
-  if (context.serverName !== 'cindy_ios_simulator') return undefined;
-  // Some Codex app-server versions omit the outer tool name but retain the
-  // validated progressive payload. Preserve the inner action's stricter policy
-  // instead of falling back to a persistable generic server prompt.
-  if (context.toolName !== 'call_tool' && context.toolName !== undefined) {
-    return undefined;
-  }
-  const params = readJsonObject(context.toolParams);
-  const rawName = typeof params?.name === 'string' ? params.name.trim() : '';
-  return {
-    name: rawName ? canonicalIOSSimulatorToolName(rawName) : undefined,
-    args: params?.args,
-  };
-}
-
-/**
- * 设备级动作必须自带它要操作的那条 owned instance 路由。
- */
-function hasIOSSimulatorInstanceRoute(args: Record<string, unknown>): boolean {
-  const { instanceId, generation, leaseId } = args;
-  return (
-    typeof instanceId === 'string' &&
-    instanceId.trim() !== '' &&
-    typeof generation === 'number' &&
-    Number.isInteger(generation) &&
-    generation > 0 &&
-    typeof leaseId === 'string' &&
-    leaseId.trim() !== ''
-  );
-}
-
-/**
- * 只有「能确凿读出、且确实没有 owned 路由」的调用才免掉设备授权卡：那种调用到不了
- * 任何设备（registry 的严格参数校验先拒，Host 收不到），弹窗纯属噪音 —— 无关任务把
- * 「打开一个网址」误路由到模拟器时正是这个形状。
- *
- * 读不出形状时一律 fail closed 照旧弹窗：判定不能依赖「传输层此刻恰好也会拒」这种
- * 外部前提，否则哪天入口多加一层 coercion，读不懂就会变成静默放行。
- */
-function skipsRoutelessDeviceApproval(args: unknown): boolean {
-  const parsed = readJsonObject(args);
-  if (!parsed) return false;
-  return !hasIOSSimulatorInstanceRoute(parsed);
-}
-
 /** 第一方 Cindy Art 的媒体生成工具。风险是额度而非越权，用户点名作图即授权。 */
 const CINDY_ART_MEDIA_TOOLS: ReadonlySet<string> = new Set([
   'gen_image',
@@ -201,6 +144,27 @@ function canAutoApproveCindyArtGhostCall(context: McpToolApprovalContext): boole
   const ghostId = typeof params.ghost_id === 'string' ? params.ghost_id.trim() : '';
   const tool = typeof params.tool === 'string' ? params.tool.trim() : '';
   return ghostId === 'cindy-art' && CINDY_ART_MEDIA_TOOLS.has(tool);
+}
+
+/** cindy_scheduler 里接受 `device` 的写工具（与 packages/lizi-mcps/src/scheduler 的 writeDeviceShape 一致）。 */
+const SCHEDULER_CROSS_DEVICE_WRITE_TOOLS: ReadonlySet<string> = new Set([
+  'schedule_update',
+  'schedule_pause',
+  'schedule_resume',
+  'schedule_delete',
+  'schedule_run_now',
+]);
+
+/** `device` 指向本机以外的电脑。缺省与 "local" 是本机；其余值（含形状异常）一律按非本机处理。 */
+function targetsAnotherComputer(device: unknown): boolean {
+  return device !== undefined && device !== null && device !== 'local';
+}
+
+/** `deviceId::sessionId` 的设备段；本机 id（无前缀或前缀残缺）返回 undefined。 */
+function sessionIdDevice(sessionId: unknown): string | undefined {
+  if (typeof sessionId !== 'string') return undefined;
+  const split = sessionId.indexOf('::');
+  return split > 0 && split < sessionId.length - 2 ? sessionId.slice(0, split) : undefined;
 }
 
 /** Claude SDK 工具名格式固定为 `mcp__<server>__<tool>`。 */
@@ -267,6 +231,25 @@ export function getDesktopMcpToolApprovalPolicy(
       return 'prompt-each-time';
     }
     if (action === 'move_session' || action === 'publish_skill') return 'prompt-each-time';
+    // 发给另一台电脑上的任务：作用范围越出本机，交给当前任务的权限档，不走可信 server 的静默放行。
+    if (action === 'send_to_session' && targetsAnotherComputer(sessionIdDevice(args?.target_session_id))) {
+      return 'prompt-each-time';
+    }
+    if ((action === 'archive_sessions' || action === 'unarchive_sessions') &&
+      (!Array.isArray(args?.session_ids) || args.session_ids.some((id) =>
+        typeof id !== 'string' || targetsAnotherComputer(sessionIdDevice(id))))) {
+      return 'prompt-each-time';
+    }
+  }
+  // 改动另一台电脑上的定时任务（可改写并触发那台电脑上的命令）同样交给权限档：Full Access
+  // 免审批，Auto 走统一审阅，Ask 由用户确认。本机操作与跨电脑读取保持原样。
+  if (serverName === 'cindy_scheduler' && (toolName === 'call_tool' || !toolName)) {
+    const params = readJsonObject(toolParams);
+    const innerName = typeof params?.name === 'string' ? params.name.trim() : '';
+    const args = readJsonObject(params?.args);
+    if (SCHEDULER_CROSS_DEVICE_WRITE_TOOLS.has(innerName) && targetsAnotherComputer(args?.device)) {
+      return 'prompt-each-time';
+    }
   }
   // Choosing a new Worker root delegates filesystem access. Do not let the
   // trusted-server shortcut or a cached server grant authorize another root.
@@ -287,50 +270,8 @@ export function getDesktopMcpToolApprovalPolicy(
         return 'prompt-each-time';
     }
   }
-  const iosSimulatorCall = readIOSSimulatorInnerCall(context);
-  if (iosSimulatorCall) {
-    const innerName = iosSimulatorCall.name;
-    // Taking control of a device is itself the authorization step, so it asks
-    // even before any route exists.
-    if (innerName === 'create_instance' || innerName === 'attach_device') {
-      return 'prompt-each-time';
-    }
-    if (innerName === 'build_app' || innerName === 'open_simulator_url') {
-      return skipsRoutelessDeviceApproval(iosSimulatorCall.args)
-        ? 'auto-approve'
-        : 'prompt-each-time';
-    }
-    return 'auto-approve';
-  }
   if (TRUSTED_MCP_SERVERS.has(serverName)) {
     return 'auto-approve';
   }
   return 'prompt';
-}
-
-/**
- * Host-owned security copy for progressive MCP actions whose outer
- * `call_tool` description cannot explain the inner action's real authority.
- */
-export function getDesktopMcpToolApprovalPresentation(
-  context: McpToolApprovalContext,
-): McpToolApprovalPresentation | undefined {
-  const innerName = readIOSSimulatorInnerCall(context)?.name;
-  if (innerName === 'build_app') {
-    return {
-      title: t('rightSidebar.iosSimulator.buildApproval.title'),
-      description: t('rightSidebar.iosSimulator.buildApproval.description'),
-    };
-  }
-  if (innerName === 'attach_device' || innerName === 'create_instance') {
-    return {
-      title: t(
-        innerName === 'attach_device'
-          ? 'rightSidebar.iosSimulator.agentControlApproval.attachTitle'
-          : 'rightSidebar.iosSimulator.agentControlApproval.createTitle',
-      ),
-      description: t('rightSidebar.iosSimulator.agentControlApproval.description'),
-    };
-  }
-  return undefined;
 }

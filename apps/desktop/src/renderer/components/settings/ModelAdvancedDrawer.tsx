@@ -1,3 +1,4 @@
+import { DisplayPricingDetails } from '@/components/DisplayPricingDetails';
 import { Button } from '@/components/ui/button';
 import { localizedModelDescription } from '@/lib/modelDescriptions';
 import { localizedModelName, localizedBrandName } from '@/lib/modelDisplayNames';
@@ -73,7 +74,8 @@ import type {
   ProviderView,
 } from '@cindy/model-providers';
 
-import { isLocalRuntimeBetaProviderId, MANAGED_OLLAMA_PROVIDER_ID } from '../../../shared/localModelRuntime';
+import { isLocalRuntimeBetaProviderId, isManagedSidecarProviderId, MANAGED_OLLAMA_PROVIDER_ID } from '../../../shared/localModelRuntime';
+import { MANAGED_LLAMACPP_PROVIDER_ID, supportsLlamaCppMillionContext, llamaCppMaxContextSize } from '../../../shared/llamaCpp';
 import { modelBrand } from './modelManagementPresentation';
 import { ModelPriceOverrideDialog } from './ModelPriceOverrideDialog';
 import type { UnionModelRow } from './UnifiedModelList';
@@ -229,6 +231,7 @@ export function ModelAdvancedDrawer({
     isApplied: (snapshot: ProviderView) => boolean;
   } | null>(null);
   const protocolSaving = providerSave !== null;
+  const imageCapabilitySaving = protocolSaving;
   useEffect(() => {
     const saved = savedProviderRef.current;
     if (saved && (saved.providerId !== provider.id || saved.isApplied(provider))) {
@@ -318,6 +321,26 @@ export function ModelAdvancedDrawer({
           : agent === 'pi',
     ) ?? primaryCandidates?.[0] ?? null;
   const primaryModel = row && primaryAgent ? (row.byAgent[primaryAgent] ?? null) : null;
+  const [localModelRepo, setLocalModelRepo] = useState<{ id: string; repo: string } | null>(null);
+  const [localConfigurationBlocked, setLocalConfigurationBlocked] = useState(false);
+  useEffect(() => {
+    let active = true;
+    setLocalModelRepo(null);
+    setLocalConfigurationBlocked(false);
+    if (open && provider.id === MANAGED_LLAMACPP_PROVIDER_ID && primaryModel) {
+      const modelId = primaryModel.id;
+      void window.electronAPI.maker.llamaCppStatus().then((snapshot) => {
+        if (active) setLocalConfigurationBlocked(snapshot.canConfigure === false);
+        if (active) setLocalModelRepo(snapshot.models.find((model) => model.id === modelId) ?? null);
+      }).catch(() => {});
+    }
+    return () => { active = false; };
+  }, [open, provider.id, primaryModel?.id]);
+  const supportsMillionContext = provider.id === MANAGED_LLAMACPP_PROVIDER_ID &&
+    !!primaryModel && localModelRepo?.id === primaryModel.id && supportsLlamaCppMillionContext(localModelRepo);
+  const maximumContext = provider.id === MANAGED_LLAMACPP_PROVIDER_ID
+    ? llamaCppMaxContextSize(localModelRepo?.id === primaryModel?.id && localModelRepo ? localModelRepo : { repo: '' })
+    : 100_000_000;
 
   const contextAgent = primaryAgent && chatAgents.includes(primaryAgent) ? primaryAgent : null;
   const contextModel = contextAgent ? row?.byAgent[contextAgent] : null;
@@ -340,8 +363,43 @@ export function ModelAdvancedDrawer({
     [contextAgent, contextModel, provider.id, row, chatAgents],
   );
   const ctx = useModelContextLimit(open ? contextTarget : null);
+  const canEditProtocol = provider.source === 'user' && !provider.auth?.native && !isManagedSidecarProviderId(provider.id);
+  const imageAgents = canEditProtocol
+    ? provider.agents.filter(agent => provider.routing?.[agent]?.imageApi === 'openai-images')
+    : [];
+  const imageAgent = imageAgents.length === 1 ? imageAgents[0] : undefined;
+  const imageModel = imageAgent ? row?.byAgent[imageAgent] : undefined;
+  const imageCapability = imageModel?.userModelConfig?.mode === 'image_generation'
+    ? imageModel.userModelConfig.modalities?.input.includes('image') ? 'edit' : 'generate'
+    : 'default';
+  const videoAgents = canEditProtocol
+    ? provider.agents.filter(agent => provider.routing?.[agent]?.videoApi === 'xai-videos') : [];
+  const videoAgent = videoAgents.length === 1 ? videoAgents[0] : undefined;
+  const videoModel = videoAgent ? row?.byAgent[videoAgent] : undefined;
+  const videoCapability = videoModel?.userModelConfig?.mode === 'video_generation'
+    ? videoModel.userModelConfig.modalities?.input.includes('image') ? 'edit' : 'generate' : 'default';
+  const setImageCapability = async (value: string, kind: 'image' | 'video' = 'image') => {
+    const agent = kind === 'image' ? imageAgent : videoAgent;
+    const sourceModel = kind === 'image' ? imageModel : videoModel;
+    if (providerSaveRef.current || !agent || !sourceModel || !['default', 'generate', 'edit'].includes(value)) return;
+    const config = providerConfigForEdit();
+    const model = config.runtimes[agent]?.models.find(item => item.id === sourceModel.id);
+    if (!model) return;
+    if (value === 'default') {
+      delete model.mode;
+      delete model.modalities;
+    } else {
+      model.mode = kind === 'image' ? 'image_generation' : 'video_generation';
+      model.modalities = { input: value === 'edit' ? ['text', 'image'] : ['text'], output: [kind] };
+    }
+    await saveProviderConfig(config, `${agent}:${model.id}:${kind}-capability`, snapshot => {
+      const saved = providerViewToCustomProviderConfig(snapshot).runtimes[agent]?.models.find(candidate => candidate.id === model.id);
+      return saved !== undefined && saved.mode === model.mode
+        && JSON.stringify(saved.modalities) === JSON.stringify(model.modalities);
+    });
+  };
   const setModelApi = async (agent: AgentKind, api: PiModelApi) => {
-    if (providerSaveRef.current || provider.source !== 'user' || provider.auth?.native || !row?.byAgent[agent]) return;
+    if (providerSaveRef.current || !canEditProtocol || !row?.byAgent[agent]) return;
     const config = providerConfigForEdit();
     const previousPi = config.runtimes.pi && structuredClone(config.runtimes.pi);
     const runtime = config.runtimes[agent];
@@ -373,7 +431,7 @@ export function ModelAdvancedDrawer({
 
 
   const setImageInput = async (value: boolean | undefined) => {
-    if (providerSaveRef.current || provider.source !== 'user' || provider.auth?.native || !row?.byAgent.pi) return;
+    if (providerSaveRef.current || !canEditProtocol || !row?.byAgent.pi) return;
     const config = providerConfigForEdit();
     const model = config.runtimes.pi?.models.find(model => model.id === row.byAgent.pi!.id);
     if (!model) return;
@@ -398,7 +456,7 @@ export function ModelAdvancedDrawer({
     .filter((window): window is number => typeof window === 'number' && Number.isFinite(window) && window > 0);
   const minimumContextK = isLocalRuntimeBetaProviderId(provider.id)
     ? 1 : Math.max(1, Math.floor(Math.min(100_000, ...modelWindows) / 1000));
-  const routeWindow = primaryModel?.contextWindowMax ?? primaryModel?.contextWindow ?? 0;
+  const routeWindow = supportsMillionContext ? 1_000_000 : primaryModel?.contextWindowMax ?? primaryModel?.contextWindow ?? 0;
   const effectiveLimit = ctx.limit ?? (defaultWindow > 0 ? defaultWindow : null);
   useEffect(() => {
     ctxDirtyRef.current = false;
@@ -413,17 +471,18 @@ export function ModelAdvancedDrawer({
   const parsedTokens = parsedK * 1000;
   const ctxInvalid =
     ctxDirtyRef.current && ctxDraft.trim() !== '' &&
-    (!Number.isSafeInteger(parsedK) || parsedK < minimumContextK || parsedTokens > 100_000_000);
+    (!Number.isSafeInteger(parsedK) || parsedK < minimumContextK || parsedTokens > maximumContext);
   const commitCtxDraft = useCallback(() => {
-    if (!ctxDirtyRef.current || ctxInvalid || ctx.loading) return;
+    if (!ctxDirtyRef.current || ctxInvalid || ctx.loading || localConfigurationBlocked) return;
     ctxDirtyRef.current = false;
     void ctx.setLimit(ctxDraft.trim() === '' ? null : parsedTokens);
-  }, [ctx, ctxDraft, ctxInvalid, parsedTokens]);
+  }, [ctx, ctxDraft, ctxInvalid, parsedTokens, localConfigurationBlocked]);
   const resetCtx = useCallback(() => {
+    if (localConfigurationBlocked) return;
     ctxDirtyRef.current = false;
     setCtxDraft(defaultWindow > 0 ? editableContextK(defaultWindow) : '');
     void ctx.reset();
-  }, [ctx, defaultWindow]);
+  }, [ctx, defaultWindow, localConfigurationBlocked]);
 
   if (!row || !primaryAgent || !primaryModel) {
     return (
@@ -442,7 +501,8 @@ export function ModelAdvancedDrawer({
     if (saved) acknowledgedModels[agent] = saved;
   }
   const imageInputModel = acknowledgedModels.pi;
-  const visionModel = primaryAgent === 'pi' ? imageInputModel ?? primaryModel : primaryModel;
+  const visionModel = primaryModel.mode === 'video_generation' ? videoModel ?? primaryModel
+    : imageModel ?? videoModel ?? (primaryAgent === 'pi' ? imageInputModel ?? primaryModel : primaryModel);
   const vision =
     visionModel.supportsImageInput !== undefined
       ? visionModel.supportsImageInput
@@ -544,18 +604,13 @@ export function ModelAdvancedDrawer({
         <Dialog.Portal>
           <Dialog.Overlay
             className={cn(
-              'fixed inset-0 z-[10001] bg-[var(--overlay-modal)]',
-              'data-[state=open]:animate-confirm-overlay-in',
-              'data-[state=closed]:animate-confirm-overlay-out',
+              'modal-scrim fixed inset-0 z-[10001]',
             )}
           />
           <Dialog.Content
             onPointerDownOutside={(event) => event.preventDefault()}
             className={cn(
-              'fixed inset-0 z-[10001] m-auto flex h-fit max-h-[calc(100dvh-48px)] w-[800px] max-w-[calc(100vw-32px)] flex-col overflow-hidden rounded-xl',
-              'border border-[var(--settings-theme-card-border)] bg-[var(--settings-theme-card-bg)]',
-              'data-[state=open]:animate-confirm-content-layout-in',
-              'data-[state=closed]:animate-confirm-content-layout-out',
+              'modal-panel fixed inset-0 z-[10001] m-auto flex h-fit max-h-[calc(100dvh-48px)] w-[800px] max-w-[calc(100vw-32px)] flex-col overflow-hidden',
             )}
             style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
             aria-describedby={undefined}
@@ -620,7 +675,7 @@ export function ModelAdvancedDrawer({
                         if (model) {
                           // 同一模型在不同引擎下的元数据差异如实标出来 —— 这些值来自目录的
                           // perAgent 覆盖，用户看到「Codex 下 272K / 6 档」才知道差异是真的。
-                          if (model.contextWindow > 0 && model.contextWindow !== routeWindow) {
+                          if (!supportsMillionContext && model.contextWindow > 0 && model.contextWindow !== routeWindow) {
                             notes.push(approxTokens(model.contextWindow));
                           }
                           if (
@@ -661,7 +716,7 @@ export function ModelAdvancedDrawer({
                                   id={protocolId}
                                   className="mt-0.5 text-11 leading-4 text-[var(--text-tertiary)]"
                                 >
-                                  {provider.source === 'user' && !provider.auth?.native && !model?.catalogPresetId && supported ? (
+                                  {canEditProtocol && !model?.catalogPresetId && supported ? (
                                     <DropdownMenu>
                                       <DropdownMenuTrigger asChild>
                                         <button type="button" disabled={protocolSaving}
@@ -756,7 +811,7 @@ export function ModelAdvancedDrawer({
                     </Section>
                   )}
 
-                  {provider.source === 'user' && !provider.auth?.native && row.byAgent.pi && conversational && (
+                  {canEditProtocol && row.byAgent.pi && conversational && (
                     <Section title={`Pi · ${t('settings.providers.custom.fields.modelSupportsImageInput')}`}>
                       <div className="flex min-h-8 items-center justify-between gap-4">
                         <p className="text-12 text-[var(--form-field-hint)]">
@@ -833,12 +888,28 @@ export function ModelAdvancedDrawer({
                   {conversational && (
                     <Section
                       title={t('settings.providers.models.advanced.contextLimit')}
-                      hint={t(/^(?:(?:codex|openai|chatgpt)\/)?gpt-/.test(primaryModel.id) && provider.source !== 'user' && ['openai', 'xd'].includes(provider.id)
+                      hint={t(supportsMillionContext ? 'settings.providers.models.advanced.contextLimitLocalMillionHint' : /^(?:(?:openai-codex|codex|openai|chatgpt)\/)?gpt-/.test(primaryModel.id) && provider.source !== 'user' && ['openai', 'xd'].includes(provider.id)
                         ? 'settings.providers.models.advanced.contextLimitGptHint'
                         : 'settings.providers.models.advanced.contextLimitHint')}
                     >
                       {contextTarget && (
                         <>
+                          {localConfigurationBlocked && <p className="text-12 text-[var(--text-secondary)]">{t('settings.providers.llamacpp.ownedElsewhere')}</p>}
+                          {supportsMillionContext && (
+                            <div className="mt-2 flex gap-2">
+                              {[{ label: '256K', tokens: 262144 }, { label: '1M', tokens: 1_000_000 }].map((preset) => (
+                                <Button key={preset.tokens} variant={effectiveLimit === preset.tokens ? 'primary' : 'secondary'} compact
+                                  aria-pressed={effectiveLimit === preset.tokens}
+                                  disabled={paymentRequired || ctx.loading || localConfigurationBlocked}
+                                  onClick={() => {
+                                    ctxDirtyRef.current = false;
+                                    setCtxDraft(editableContextK(preset.tokens));
+                                    void ctx.setLimit(preset.tokens);
+                                  }}
+                                >{preset.label}</Button>
+                              ))}
+                            </div>
+                          )}
                           <div className="mt-1 flex flex-wrap items-center gap-2.5">
                             <span
                               className={cn(
@@ -863,7 +934,7 @@ export function ModelAdvancedDrawer({
                                 }}
                                 aria-invalid={ctxInvalid || undefined}
                                 inputMode="numeric"
-                                disabled={paymentRequired || ctx.loading}
+                                disabled={paymentRequired || ctx.loading || localConfigurationBlocked}
                                 aria-label={t(
                                   'settings.providers.models.advanced.contextLimitAria',
                                 )}
@@ -883,7 +954,7 @@ export function ModelAdvancedDrawer({
                               <button
                                 type="button"
                                 onClick={resetCtx}
-                                disabled={paymentRequired || ctx.loading}
+                                disabled={paymentRequired || ctx.loading || localConfigurationBlocked}
                                 className="shrink-0 text-11 text-[var(--text-tertiary)] transition-colors hover:text-[var(--text-primary)]"
                               >
                                 {t('settings.providers.models.advanced.restoreDefault')}
@@ -938,6 +1009,56 @@ export function ModelAdvancedDrawer({
                     title={t('settings.providers.models.advanced.capability')}
                     hint={t('settings.providers.models.advanced.capabilityHint')}
                   >
+                    {imageModel && (
+                      <>
+                        <Row label={t('settings.providers.models.advanced.imageCapability.label')}>
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <button type="button" disabled={imageCapabilitySaving || !selectionAvailable || paymentRequired}
+                                aria-label={t('settings.providers.models.advanced.imageCapability.label')}
+                                className="rounded-full px-2 py-1 text-[var(--text-secondary)] hover:bg-[var(--surface-hover)]">
+                                {t(`settings.providers.models.advanced.imageCapability.${imageCapability}`)} <ChevronDown size={12} className="inline" aria-hidden />
+                              </button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent className="z-[10003]" align="start">
+                              <DropdownMenuRadioGroup value={imageCapability} onValueChange={value => void setImageCapability(value)}>
+                                {(['default', 'generate', 'edit'] as const).map(value => (
+                                  <DropdownMenuRadioItem key={value} value={value}>{t(`settings.providers.models.advanced.imageCapability.${value}`)}</DropdownMenuRadioItem>
+                                ))}
+                              </DropdownMenuRadioGroup>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        </Row>
+                        <p className="text-12 leading-5 text-[var(--text-tertiary)]">
+                          {t('settings.providers.models.advanced.imageCapability.hint', { agent: AGENT_LABEL[imageAgent!] })}
+                        </p>
+                      </>
+                    )}
+                    {videoModel && (
+                      <>
+                        <Row label={t('settings.providers.models.advanced.videoCapability.label')}>
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <button type="button" disabled={imageCapabilitySaving || !selectionAvailable || paymentRequired}
+                                aria-label={t('settings.providers.models.advanced.videoCapability.label')}
+                                className="rounded-full px-2 py-1 text-[var(--text-secondary)] hover:bg-[var(--surface-hover)]">
+                                {t(`settings.providers.models.advanced.videoCapability.${videoCapability}`)} <ChevronDown size={12} className="inline" aria-hidden />
+                              </button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent className="z-[10003]" align="start">
+                              <DropdownMenuRadioGroup value={videoCapability} onValueChange={value => void setImageCapability(value, 'video')}>
+                                {(['default', 'generate', 'edit'] as const).map(value => (
+                                  <DropdownMenuRadioItem key={value} value={value}>{t(`settings.providers.models.advanced.videoCapability.${value}`)}</DropdownMenuRadioItem>
+                                ))}
+                              </DropdownMenuRadioGroup>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        </Row>
+                        <p className="text-12 leading-5 text-[var(--text-tertiary)]">
+                          {t('settings.providers.models.advanced.videoCapability.hint', { agent: AGENT_LABEL[videoAgent!] })}
+                        </p>
+                      </>
+                    )}
                     <Row label={t('settings.providers.models.advanced.imageInput')}>
                       <span
                         title={
@@ -954,13 +1075,13 @@ export function ModelAdvancedDrawer({
                         />
                       </span>
                     </Row>
-                    {primaryModel.modalities &&
+                    {visionModel.modalities &&
                       (['input', 'output'] as const).map((direction) => (
                         <Row
                           key={direction}
                           label={t(`settings.providers.models.advanced.${direction}Modalities`)}
                         >
-                          {primaryModel
+                          {visionModel
                             .modalities![direction].map((modality) =>
                               ['text', 'image', 'audio', 'video', 'file'].includes(modality)
                                 ? t(`settings.providers.models.advanced.modalities.${modality}`)
@@ -980,7 +1101,9 @@ export function ModelAdvancedDrawer({
                   </Section>
 
                   <Section title={t('settings.providers.models.advanced.pricing')}>
-                    {price === null ? (
+                    {primaryModel.displayPricing && primaryModel.currency ? (
+                      <DisplayPricingDetails model={primaryModel} />
+                    ) : price === null ? (
                       <Row label={t('settings.providers.models.advanced.pricingLabel')} muted>
                         {t(
                           provider.access?.kind === 'subscription'
@@ -1012,7 +1135,7 @@ export function ModelAdvancedDrawer({
                         </Row>
                       ))
                     )}
-                    {price?.kind === 'priced' && price.discount !== undefined && (
+                    {!primaryModel.displayPricing && price?.kind === 'priced' && price.discount !== undefined && (
                       <Row label={t('settings.providers.models.advanced.discount')}>
                         <span
                           className="inline-flex items-center rounded-full px-2 py-[1px] text-10 font-medium"
