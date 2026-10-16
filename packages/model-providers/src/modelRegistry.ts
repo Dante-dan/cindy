@@ -4,6 +4,7 @@ import {
   referencePricesForRoute,
 } from "./modelMetadataLayers.js";
 import { modelRegistryCanonicalJson } from "./modelRegistryCanonical.js";
+import { MODEL_ACCESS_WIRE_PROTOCOLS } from './modelAccessBean.js';
 import type {
   ModelAccessV2Agent,
   ModelPriceVariant,
@@ -23,6 +24,7 @@ export function resolveModelNativeApi(
   registry: ModelRegistry | undefined,
   providerId: string,
   modelId: string,
+  mode?: string,
 ): import("./modelAccessBean.js").ModelNativeApi | null | undefined {
   if (!registry) return undefined;
   const rawId = modelId.replace(/\[1m\]$/, "");
@@ -52,15 +54,64 @@ export function resolveModelNativeApi(
     ),
   ];
   if (explicit.length) return explicit.length === 1 ? explicit[0] : null;
+  const effectiveMode = mode ?? entries.map(entry => registryEntryDefaults(registry, entry).mode)
+    .find(value => value !== undefined) ?? findBaseModel(registry, id)?.defaults.mode;
+  // Family prefixes describe chat APIs, not every model sharing the name (e.g. gpt-*-tts).
+  // Keep media protocols unknown unless they are declared; mode is not a transport adapter.
   return registry.nativeApiRules
     ?.filter(
       (rule) =>
         rule.providerId === providerId &&
         id.startsWith(rule.modelIdPrefix) &&
-        !id.slice(rule.modelIdPrefix.length).includes("/"),
+        !id.slice(rule.modelIdPrefix.length).includes("/") &&
+        (effectiveMode === undefined || effectiveMode === 'chat' || effectiveMode === 'responses' ||
+          !(MODEL_ACCESS_WIRE_PROTOCOLS as readonly string[]).includes(rule.nativeApi)),
     )
     .sort((a, b) => b.modelIdPrefix.length - a.modelIdPrefix.length)[0]
     ?.nativeApi;
+}
+
+/** Model identity only, using exact declarations or server-declared family prefixes.
+ * Reuse the declarations already used by Gateway; do not turn an execution API
+ * into a manufacturer declaration or copy a Gateway endpoint/capability override.
+ * Unknown/private namespaces stay unknown; connection transport is never evidence.
+ */
+export function resolveCatalogModelNativeApi(
+  registry: ModelRegistry | undefined,
+  modelId: string,
+  mode?: string,
+): import("./modelAccessBean.js").ModelNativeApi | null | undefined {
+  if (!registry) return undefined;
+  const base = findBaseModel(registry, modelId);
+  const entries = registry.models.filter(entry =>
+    entry.id === modelId || (base && (entry.id === base.id || entry.modelRef === base.id)),
+  );
+  const target = entries.find(entry => entry.id === modelId);
+  if (target?.status === 'retired') return null;
+  if (registry.schemaVersion < 3) return undefined;
+  const live = entries.filter(entry => entry.status !== 'retired');
+  const declarations = new Set(live.flatMap(entry =>
+    entry.nativeApi !== undefined ? [entry.nativeApi] : [],
+  ));
+  if (declarations.size) return declarations.size === 1 ? [...declarations][0] : null;
+  const canonicalId = base?.id ?? modelId;
+  const effectiveMode = mode ?? (target ? registryEntryDefaults(registry, target).mode : base?.defaults.mode);
+  const declared = resolveModelNativeApi(registry, 'xd', canonicalId, effectiveMode);
+  if (declared !== undefined) return declared;
+  if (canonicalId.includes('/')) return undefined;
+  // Direct catalogs may omit the vendor namespace (gemini-*, claude-*, qwen*).
+  // Apply only existing declared family prefixes; never strip an unknown input namespace.
+  const rules = registry.nativeApiRules?.flatMap(rule => {
+    const slash = rule.modelIdPrefix.lastIndexOf('/');
+    const prefix = rule.modelIdPrefix.slice(slash + 1);
+    return rule.providerId === 'xd' && slash >= 0 && prefix && canonicalId.startsWith(prefix)
+      ? [{ prefix, nativeApi: resolveModelNativeApi(registry, 'xd', `${rule.modelIdPrefix.slice(0, slash + 1)}${canonicalId}`, effectiveMode) }]
+      : [];
+  }) ?? [];
+  const longest = Math.max(0, ...rules.map(rule => rule.prefix.length));
+  const matches = new Set(rules.filter(rule => rule.prefix.length === longest)
+    .flatMap(rule => rule.nativeApi !== undefined ? [rule.nativeApi] : []));
+  return matches.size > 1 ? null : [...matches][0];
 }
 
 export type ModelRegistrySnapshotDecision =

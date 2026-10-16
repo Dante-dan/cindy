@@ -8,7 +8,12 @@
 
 import { randomUUID } from 'node:crypto';
 import { validateHeaderName, validateHeaderValue } from 'node:http';
-import { isLoopbackProviderUrl } from '@cindy/model-providers';
+import {
+  isLoopbackProviderUrl,
+  MODEL_METADATA_FIELDS,
+  pickModelMetadata,
+  validModelMetadata,
+} from '@cindy/model-providers';
 
 import type {
   AgentKind,
@@ -27,9 +32,12 @@ import type {
 import { isBuiltinApiKeyProviderId, type ProviderSecretId } from '../../shared/providerSecrets.js';
 import {
   MANAGED_LMSTUDIO_PROVIDER_ID,
-  MANAGED_OLLAMA_PROVIDER_ID,
+  isManagedSidecarProviderId,
 } from '../../shared/localModelRuntime.js';
-import { configuredPresetAgents } from '../../shared/piRuntimeInitialization.js';
+import {
+  adaptCustomProviderModelEfforts,
+  configuredPresetAgents,
+} from '../../shared/piRuntimeInitialization.js';
 import { presetConnectionRuntime } from '../../shared/presetConnectionRuntime.js';
 
 const IMPORT_TTL_MS = 10 * 60_000;
@@ -48,6 +56,7 @@ const PROTOCOLS: readonly ProviderWireProtocol[] = [
   'anthropic-messages',
   'openai-responses',
   'openai-chat',
+  'google-generative-ai',
 ];
 const PI_EFFORTS: readonly PiReasoningEffort[] = [
   'minimal',
@@ -61,18 +70,20 @@ function normalizeOAuthParamKey(key: string): string {
   return key.toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
-const FORBIDDEN_OAUTH_IMPORT_PARAM_KEYS = new Set([
-  'access_token',
-  'assertion',
-  'client_assertion',
-  'client_secret',
-  'code',
-  'device_code',
-  'id_token',
-  'password',
-  'refresh_token',
-  'token',
-].map(normalizeOAuthParamKey));
+const FORBIDDEN_OAUTH_IMPORT_PARAM_KEYS = new Set(
+  [
+    'access_token',
+    'assertion',
+    'client_assertion',
+    'client_secret',
+    'code',
+    'device_code',
+    'id_token',
+    'password',
+    'refresh_token',
+    'token',
+  ].map(normalizeOAuthParamKey),
+);
 
 type ProviderImportScope = { dataOwnerId: string | null; generation: number };
 
@@ -232,17 +243,32 @@ function parseModel(value: unknown, label: string): ProviderRuntimeModelConfig {
     [
       'id',
       'name',
-      'contextWindow',
+      ...MODEL_METADATA_FIELDS,
       'defaultEnabled',
       'supportsImageInput',
       'reasoning',
       'reasoningEfforts',
+      'reasoningDefaultEffort',
+      'discoveredMetadata',
     ],
     label,
   );
   const id = boundedString(model.id, `${label}.id`, 256);
   const name = model.name === undefined ? id : boundedString(model.name, `${label}.name`, 256);
-  const result: ProviderRuntimeModelConfig = { id, name };
+  for (const field of MODEL_METADATA_FIELDS) {
+    if (model[field] !== undefined && !validModelMetadata({ [field]: model[field] }))
+      fail(`${label}.${field} is invalid`);
+  }
+  if (model.discoveredMetadata !== undefined && !validModelMetadata(model.discoveredMetadata))
+    fail(`${label}.discoveredMetadata is invalid`);
+  const result: ProviderRuntimeModelConfig = {
+    ...pickModelMetadata(model),
+    id,
+    name,
+    ...(model.discoveredMetadata
+      ? { discoveredMetadata: pickModelMetadata(model.discoveredMetadata as object) }
+      : {}),
+  };
   if (model.contextWindow !== undefined) {
     if (!Number.isInteger(model.contextWindow) || (model.contextWindow as number) <= 0) {
       fail(`${label}.contextWindow must be a positive integer`);
@@ -254,23 +280,31 @@ function parseModel(value: unknown, label: string): ProviderRuntimeModelConfig {
       fail(`${label}.${field} must be a boolean`);
     }
   }
+  // A link selects a model, not compatibility engines. Explicit off remains off.
   if (model.defaultEnabled === false) result.defaultEnabled = false;
-  if (model.supportsImageInput === true) result.supportsImageInput = true;
+  if (typeof model.supportsImageInput === 'boolean')
+    result.supportsImageInput = model.supportsImageInput;
+  if (model.reasoning === false) result.reasoning = false;
   if (model.reasoning === true) {
-    if (!Array.isArray(model.reasoningEfforts) || model.reasoningEfforts.length === 0) {
+    if (model.reasoningEfforts !== undefined && !Array.isArray(model.reasoningEfforts)) {
       fail(`${label}.reasoningEfforts is required when reasoning is enabled`);
     }
-    const efforts = model.reasoningEfforts.map((effort) => {
+    const efforts = model.reasoningEfforts?.map((effort) => {
       if (typeof effort !== 'string' || !PI_EFFORTS.includes(effort as PiReasoningEffort)) {
         fail(`${label}.reasoningEfforts contains an unsupported value`);
       }
       return effort as PiReasoningEffort;
     });
-    if (new Set(efforts).size !== efforts.length)
+    if (efforts && new Set(efforts).size !== efforts.length)
       fail(`${label}.reasoningEfforts contains duplicates`);
     result.reasoning = true;
-    result.reasoningEfforts = efforts;
-  } else if (model.reasoningEfforts !== undefined) {
+    if (efforts) result.reasoningEfforts = efforts;
+    if (model.reasoningDefaultEffort !== undefined) {
+      if (!efforts?.includes(model.reasoningDefaultEffort as PiReasoningEffort))
+        fail(`${label}.reasoningDefaultEffort is unsupported`);
+      result.reasoningDefaultEffort = model.reasoningDefaultEffort as PiReasoningEffort;
+    }
+  } else if (model.reasoningEfforts !== undefined || model.reasoningDefaultEffort !== undefined) {
     fail(`${label}.reasoningEfforts requires reasoning=true`);
   }
   return result;
@@ -287,11 +321,20 @@ type ParsedEndpoint = {
   apiKey?: string;
 };
 
-/** Discovery is untrusted input too: apply the same count and core model field bounds. */
-export function assertProviderImportModels(models: readonly { id: string; name: string; contextWindow?: number }[]): void {
-  if (models.length > MAX_MODELS_PER_ENDPOINT) fail('models must be a bounded array');
+/** Discovery uses catalog-sized limits, independently of the compact deep-link payload. */
+export function assertProviderImportModels(
+  models: readonly { id: string; name: string; contextWindow?: number }[],
+): void {
+  if (models.length > 10_000) fail('discovered models exceed the catalog limit');
   for (const model of models) {
-    parseModel({ id: model.id, name: model.name, ...(model.contextWindow !== undefined ? { contextWindow: model.contextWindow } : {}) }, 'models');
+    parseModel(
+      {
+        id: model.id,
+        name: model.name,
+        ...(model.contextWindow !== undefined ? { contextWindow: model.contextWindow } : {}),
+      },
+      'models',
+    );
   }
 }
 
@@ -339,9 +382,10 @@ function parseEndpoint(value: unknown, index: number): ParsedEndpoint {
   if (endpoint.apiKey !== undefined)
     apiKey = parseApiKey(endpoint.apiKey, `${label}.apiKey`, MAX_API_KEY_LENGTH);
   const baseUrl = httpUrl(endpoint.baseUrl, `${label}.baseUrl`, false, true);
-  const modelsUrl = endpoint.modelsUrl !== undefined
-    ? httpUrl(endpoint.modelsUrl, `${label}.modelsUrl`, false, true)
-    : undefined;
+  const modelsUrl =
+    endpoint.modelsUrl !== undefined
+      ? httpUrl(endpoint.modelsUrl, `${label}.modelsUrl`, false, true)
+      : undefined;
   if (modelsUrl && new URL(modelsUrl).origin !== new URL(baseUrl).origin) {
     fail(`${label}.modelsUrl must share the endpoint origin`);
   }
@@ -367,7 +411,7 @@ function parseOAuth(auth: Record<string, unknown>): OAuthProviderDescriptor {
   const common = {
     tokenUrl: httpUrl(auth.tokenUrl, 'auth.tokenUrl', true, true),
     clientId: boundedString(auth.clientId, 'auth.clientId', 512),
-    scopes: boundedString(auth.scopes, 'auth.scopes', 2_048),
+    scopes: auth.scopes === '' ? '' : boundedString(auth.scopes, 'auth.scopes', 2_048),
     ...(auth.modelsDiscoveryUrl !== undefined
       ? {
           modelsDiscoveryUrl: httpUrl(
@@ -451,12 +495,20 @@ function parseOAuth(auth: Record<string, unknown>): OAuthProviderDescriptor {
 }
 
 function defaultTargets(protocol: ProviderWireProtocol): AgentKind[] {
-  if (protocol === 'anthropic-messages') return ['claude-code', 'codex', 'pi'];
+  if (protocol === 'anthropic-messages' || protocol === 'google-generative-ai') {
+    return ['claude-code', 'codex', 'pi'];
+  }
   return ['codex', 'pi'];
 }
 
 function protocolPriority(agent: AgentKind, protocol: ProviderWireProtocol): number {
-  if (agent === 'claude-code') return protocol === 'anthropic-messages' ? 100 : -1;
+  if (agent === 'claude-code') {
+    if (protocol === 'anthropic-messages') return 100;
+    if (protocol === 'google-generative-ai') return 30;
+    if (protocol === 'openai-chat') return 20;
+    if (protocol === 'openai-responses') return 10;
+    return -1;
+  }
   if (agent === 'codex') {
     if (protocol === 'openai-responses') return 30;
     if (protocol === 'openai-chat') return 20;
@@ -513,9 +565,9 @@ function parsePayload(value: unknown): ProviderImportDraft {
       'cindy',
       'gemini',
       'openai-images',
-      MANAGED_OLLAMA_PROVIDER_ID,
       MANAGED_LMSTUDIO_PROVIDER_ID,
-    ].includes(id)
+    ].includes(id) ||
+    isManagedSidecarProviderId(id)
   ) {
     fail('data.id is reserved');
   }
@@ -551,9 +603,10 @@ function parsePayload(value: unknown): ProviderImportDraft {
   const endpoints = input.endpoints.map(parseEndpoint);
   if (
     auth?.method === 'none' &&
-    endpoints.some((endpoint) =>
-      !isLoopbackProviderUrl(endpoint.baseUrl) ||
-      (endpoint.modelsUrl !== undefined && !isLoopbackProviderUrl(endpoint.modelsUrl)),
+    endpoints.some(
+      (endpoint) =>
+        !isLoopbackProviderUrl(endpoint.baseUrl) ||
+        (endpoint.modelsUrl !== undefined && !isLoopbackProviderUrl(endpoint.modelsUrl)),
     )
   ) {
     fail('no-auth endpoints and model discovery must use loopback URLs');
@@ -584,8 +637,8 @@ function parsePayload(value: unknown): ProviderImportDraft {
         (target) => auth?.method !== 'oauth' || target !== 'pi',
       );
     for (const target of targets) {
-      if (target === 'claude-code' && endpoint.protocol !== 'anthropic-messages') {
-        fail('Claude Code only supports anthropic-messages endpoints');
+      if (target === 'claude-code' && !PROTOCOLS.includes(endpoint.protocol)) {
+        fail('Claude Code endpoint protocol is unsupported');
       }
       if (target === 'pi' && auth?.method === 'oauth')
         fail('custom OAuth providers do not support Pi');
@@ -609,11 +662,7 @@ function parsePayload(value: unknown): ProviderImportDraft {
     ) {
       fail(`multiple endpoints compete for ${agent}; set explicit targets`);
     }
-    const models = selected.models.map((model) => {
-      if (agent === 'pi') return { ...model };
-      const { reasoning: _reasoning, reasoningEfforts: _efforts, ...portable } = model;
-      return portable;
-    });
+    const models = selected.models.map((source) => adaptCustomProviderModelEfforts(source, agent));
     runtimes[agent] = {
       wireProtocol: selected.protocol,
       baseUrl: selected.baseUrl,
@@ -703,7 +752,8 @@ export function importKeysForCurrentConfig(
     draft.kind !== 'custom' ||
     (draft.config.auth?.method ?? 'apiKey') !== 'apiKey' ||
     (current.auth?.method ?? 'apiKey') !== 'apiKey' ||
-    [MANAGED_OLLAMA_PROVIDER_ID, MANAGED_LMSTUDIO_PROVIDER_ID].includes(current.id)
+    isManagedSidecarProviderId(current.id) ||
+    current.id === MANAGED_LMSTUDIO_PROVIDER_ID
   )
     fail('connection cannot receive imported keys');
   const agents = AGENTS.filter((agent) => draft.keys[agent]);

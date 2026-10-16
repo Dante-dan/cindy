@@ -38,6 +38,40 @@ function makeDeps(overrides: Partial<{
 }
 
 describe('fetchRemoteAbsFileToUrl', () => {
+  it('separates streaming and complete-file cache entries in either order', async () => {
+    for (const first of [true, false]) {
+      const { deps, fetchRemoteMedia } = makeDeps();
+      await fetchRemoteAbsFileToUrl({ ...deps, stream: first }, '/media.mp4');
+      await fetchRemoteAbsFileToUrl({ ...deps, stream: !first }, '/media.mp4');
+      await fetchRemoteAbsFileToUrl({ ...deps, stream: first }, '/media.mp4');
+      expect(fetchRemoteMedia).toHaveBeenCalledTimes(2);
+      expect(fetchRemoteMedia.mock.calls.map((call) => (call as unknown[])[1])).toEqual(
+        first ? [undefined, { stream: false }] : [{ stream: false }, undefined],
+      );
+    }
+  });
+  it('aborts an in-flight fetch once the caller cancels and does not retry', async () => {
+    const { deps, fetchRemoteMedia, presignGet } = makeDeps();
+    let cancelled = false;
+    let seenSignal: AbortSignal | undefined;
+    fetchRemoteMedia.mockImplementation(
+      (...args: unknown[]) =>
+        new Promise((_resolve, reject) => {
+          seenSignal = (args[1] as { signal?: AbortSignal } | undefined)?.signal;
+          seenSignal?.addEventListener('abort', () => reject(new Error('aborted')));
+        }),
+    );
+    const pending = fetchRemoteAbsFileToUrl(
+      { ...deps, stream: false, isCancelled: () => cancelled },
+      '/tmp/big.zip',
+    );
+    await vi.waitFor(() => expect(seenSignal).toBeDefined());
+    cancelled = true;
+    await expect(pending).rejects.toThrow();
+    expect(seenSignal?.aborted).toBe(true);
+    expect(fetchRemoteMedia).toHaveBeenCalledTimes(1);
+    expect(presignGet).not.toHaveBeenCalled();
+  });
   it('走 media:fetch 绝对路径通道并 presign 出下载地址', async () => {
     const { deps, fetchRemoteMedia, presignGet } = makeDeps();
     const url = await fetchRemoteAbsFileToUrl(deps, '/tmp/shot.png');

@@ -1,13 +1,20 @@
 export * from './base-agent.js';
 // toSdkModelString: host 侧标题 oneShot 需要把 catalog model id 还原成 Anthropic wire 串
 // (claude-haiku-4-5 → claude-haiku-4-5-20251001),复用 SSoT 映射,避免在 host 硬编码 dated id。
-export { ClaudeCodeAgent, toSdkModelString, setClaudeSupportedModelsListener } from './claude-code/index.js';
+export {
+  ClaudeCodeAgent,
+  toSdkModelString,
+  setClaudeSupportedModelsListener,
+  setClaudeRateLimitInfoListener,
+} from './claude-code/index.js';
 export type {
   ClaudeSubagentModelAccessResult,
   ClaudeSubagentModelAccessStatus,
 } from './claude-code/subagent-model-access.js';
 export { CodexAgent } from './codex/index.js';
 export { CODEX_COMPACTION_TRANSPORT_INTERRUPTED_REASON } from './codex/compaction-transport-interrupt.js';
+export { findUnenforcedCapabilityRoutes } from './capability-route-support.js';
+export { isCodexExplicitOnlyOverlayRoute } from './codex/capability-routing.js';
 export { isCodexHistoryRecoveryRequired } from './codex/history-recovery.js';
 export {
   CODEX_HISTORY_OVERSIZED_REASON,
@@ -29,6 +36,7 @@ export {
 // host 在 boot 阶段需要的 env 守卫(详见 claude-code/env-builder.ts 注释)
 export {
   SENSITIVE_ANTHROPIC_ENV_KEYS,
+  cleanProcessEnv,
   stripSensitiveAnthropicEnv,
 } from './claude-code/env-builder.js';
 // host 配置 LLM-context 图片预缩 resizer (注入 logger / 调阈值)
@@ -96,7 +104,12 @@ export {
   autoReviewRetryBudgetMs,
   DEFAULT_AUTO_REVIEW_TIMEOUT_POLICY,
   extractAutoReviewUserIntent,
+  resolveAutoReviewDecision,
+  annotatePermissionRequestForUnavailableReview,
   appendAutoReviewUserIntent,
+  normalizeAutoReviewUserIntent,
+  type AutoReviewUserIntent,
+  type AutoReviewUserReferences,
   getAutoReviewActionTextLength,
   getAutoReviewDelegateHardCeilingMs,
   isAutoReviewConfirmUndeliveredNotice,
@@ -110,7 +123,15 @@ export {
   type AutoReviewTimeoutPolicy,
 } from './shared/auto-review-decision.js';
 export { toolAutoReviewAction } from './shared/auto-review-decision.js';
-export type { ReviewableAction } from './shared/auto-review.js';
+export { AUTO_REVIEW_CONTINUATION_POLICY } from './shared/continuation-policy.js';
+export type { CredentialCommandOptions, GitRead, ReviewableAction } from './shared/auto-review.js';
+export { classifyShellCommand, reviewAction, shellCommandReadsCredentials } from './shared/auto-review.js';
+export type {
+  ToolLoopReviewDecision,
+  ToolLoopReviewer,
+  ToolLoopReviewRequest,
+} from './shared/tool-loop-review.js';
+export type { ToolLoopEvidence } from './shared/loop-guard.js';
 export {
   ORCA_NESTED_REPORT_DENIAL_REASON,
   ORCA_NESTED_REPORT_ERROR_CODE,

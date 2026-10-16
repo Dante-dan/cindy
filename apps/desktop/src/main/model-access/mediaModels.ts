@@ -200,6 +200,7 @@ async function fetchGatewayMediaModels(): Promise<GatewayMediaCatalogEntry[]> {
     baseUrl: () => getClientEndpoint('modelAccessApiBaseUrl'),
     timeoutMs: MEDIA_MODEL_REQUEST_TIMEOUT_MS,
     logLabel: MEDIA_MODELS_PATH,
+    headers: { 'X-Cindy-Model-Capabilities': 'display_pricing' },
   });
   if (
     typeof payload !== 'object' ||
@@ -226,8 +227,10 @@ async function fetchGatewayMediaModels(): Promise<GatewayMediaCatalogEntry[]> {
 
 export async function listAvailableMediaModels(
   capability?: MediaCapability,
+  options?: { skipGateway?: boolean },
 ): Promise<ExecutableMediaModel[]> {
   const providerModels = availableProviderMediaModels(capability);
+  if (options?.skipGateway) return providerModels;
   try {
     const gatewayModels = filterEnabledGatewayMediaModels(
       await fetchGatewayMediaModels(),

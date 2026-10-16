@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
-import { Navigate, useParams } from 'react-router-dom';
+import { Navigate, useLocation, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 
 import { CCAgentSessionView } from '@/features/cc-agent/CCAgentSessionView';
 import type { BotChatIdentity } from './BotSessionContentHeader';
+import { readIslandEntryRouteState, requestIslandEntryAlertDisposal } from './islandEntryAlert';
 import { useBotIslandVisibleSession } from './useBotIslandVisibleSession';
 
 function readBotChatIdentity(bot: unknown, botId: string): BotChatIdentity | null {
@@ -28,6 +29,11 @@ function BotHistorySessionGateView() {
   const { botId, sessionId } = useParams();
   const [allowed, setAllowed] = useState<boolean | null>(null);
   useBotIslandVisibleSession(allowed === true ? sessionId ?? null : null);
+  // 灵动岛点进来的那张卡,只在本门禁确认并显示了这段历史后才处置;被重定向走则保留。
+  const islandEntryId = readIslandEntryRouteState(useLocation().state);
+  useEffect(() => {
+    if (allowed === true && sessionId && islandEntryId) requestIslandEntryAlertDisposal(sessionId, islandEntryId);
+  }, [allowed, sessionId, islandEntryId]);
   /**
    * 归档的对话里,那个伙伴仍然是那个伙伴:气泡挂 TA 的头像,顶栏是 TA 的 lockup。
    * 这个视图本来就已经查过 `bots.history(botId)` 确认归属,顺手把身份取回来即可
@@ -60,7 +66,7 @@ function BotHistorySessionGateView() {
       .catch(() => {
         if (!cancelled) setAllowed(false);
       });
-    // 身份是装饰,拿不到就退回没有头像的只读历史——不因为它失败挡住整页。
+    // Profile 装饰可异步补齐；已验证的伙伴历史始终保持伙伴界面。
     void window.electronAPI.localDb.bots
       .get(botId)
       .then((bot) => {
@@ -81,8 +87,13 @@ function BotHistorySessionGateView() {
       </main>
     );
   }
-  if (!allowed || !sessionId) {
+  if (!allowed || !botId || !sessionId) {
     return <Navigate to={botId ? `/bots/${botId}?settings=1` : '/bots'} replace />;
   }
-  return <CCAgentSessionView readOnly {...(identity ? { botIdentity: identity } : {})} />;
+  return (
+    <CCAgentSessionView
+      readOnly
+      botIdentity={{ ...(identity ?? { id: botId, name: '' }), sessionId }}
+    />
+  );
 }
