@@ -244,7 +244,7 @@ function buildMathRuntimeScript(): string {
 /**
  * 渲染态「定位到源码行」脚本:选出 data-src-line ≤ 目标行的最后一个块
  * (= 覆盖目标行的块),滚到视口中部并闪两下高亮。window load 后补滚一次
- * (图片加载会推移布局)。高亮走 CSS animation 两次迭代,animationend 移除
+ * (图片加载会推移布局),首次交互后停止异步重定位。高亮走 CSS animation 两次迭代,animationend 移除
  * class——闪完即恢复原样,不驻留。
  */
 function buildTargetLineScript(targetLine: number | undefined): string {
@@ -258,9 +258,19 @@ for(var i=0;i<nodes.length;i++){
   if(!isNaN(n)&&n<=${target}&&n>=bestLine){bestLine=n;best=nodes[i];}
 }
 if(!best)return;
-var scroll=function(){best.scrollIntoView({block:'center'});};
+var cancelled=false;
+var scroll=function(){if(!cancelled)best.scrollIntoView({block:'center'});};
+var onLoad=function(){setTimeout(scroll,50);};
+var inputs=['touchstart','pointerdown','wheel','keydown'];
+var cancel=function(){
+  cancelled=true;
+  window.removeEventListener('load',onLoad);
+  document.removeEventListener('cindy-mermaid-settled',scroll);
+  inputs.forEach(function(name){document.removeEventListener(name,cancel,true);});
+};
+inputs.forEach(function(name){document.addEventListener(name,cancel,{capture:true,passive:true});});
 scroll();
-window.addEventListener('load',function(){setTimeout(scroll,50);});
+window.addEventListener('load',onLoad);
 document.addEventListener('cindy-mermaid-settled',scroll);
 best.classList.add('xdt-line-flash');
 best.addEventListener('animationend',function(){best.classList.remove('xdt-line-flash');},{once:true});

@@ -33,6 +33,39 @@ describe('buildSelectableMarkdownHtml 渲染态行定位', () => {
     expect(html).toContain('classList.remove');
   });
 
+  it.each([undefined, 'touchstart', 'pointerdown', 'wheel', 'keydown'])(
+    'only repositions the target line before reader input (%s)',
+    (input) => {
+      const html = buildSelectableMarkdownHtml(DOC, { targetLine: 5 });
+      const script = html.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+      expect(script).toBeDefined();
+      const readerWindow = new EventTarget();
+      const readerDocument = new EventTarget();
+      const best = document.createElement('div');
+      best.setAttribute('data-src-line', '4');
+      const scrollIntoView = vi.fn();
+      best.scrollIntoView = scrollIntoView;
+      const callbacks: (() => void)[] = [];
+      Function('window', 'document', 'setTimeout', script!)(
+        readerWindow,
+        Object.assign(readerDocument, { querySelectorAll: () => [best] }),
+        (callback: () => void) => callbacks.push(callback),
+      );
+      expect(scrollIntoView).toHaveBeenLastCalledWith({ block: 'center' });
+      readerWindow.dispatchEvent(new Event('load'));
+      // Interaction can arrive after load has already queued its delayed scroll.
+      if (input) readerDocument.dispatchEvent(new Event(input));
+      callbacks.forEach((callback) => callback());
+      readerDocument.dispatchEvent(new Event('cindy-mermaid-settled'));
+      readerDocument.dispatchEvent(new Event('cindy-mermaid-settled'));
+      readerWindow.dispatchEvent(new Event('load'));
+      expect(callbacks).toHaveLength(input ? 1 : 2);
+      expect(scrollIntoView).toHaveBeenCalledTimes(input ? 1 : 4);
+      best.dispatchEvent(new Event('animationend'));
+      expect(best.classList.contains('xdt-line-flash')).toBe(false);
+    },
+  );
+
   it('不传 targetLine 不注入脚本;非法值(0 / 非整数)同样不注入', () => {
     expect(buildSelectableMarkdownHtml(DOC)).not.toContain('<script>');
     expect(buildSelectableMarkdownHtml(DOC, { targetLine: 0 })).not.toContain('<script>');
