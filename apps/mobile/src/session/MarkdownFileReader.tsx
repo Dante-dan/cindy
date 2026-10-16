@@ -49,9 +49,14 @@ export function MarkdownFileReader({
   const { colors, mode } = useTheme();
   const quoteEnabled = !!onQuoteSelection;
   const hasMermaid = useMemo(() => parseMobileMarkdown(markdown).some((block) => block.type === 'mermaid'), [markdown]);
-  const scrollPosition = useRef({ markdown, targetLine, y: 0 });
+  // Unknown until the WebView reports a position; zero is a valid saved position.
+  const scrollPosition = useRef<{
+    markdown: string;
+    targetLine: number | null | undefined;
+    y: number | undefined;
+  }>({ markdown, targetLine, y: undefined });
   if (scrollPosition.current.markdown !== markdown || scrollPosition.current.targetLine !== targetLine) {
-    scrollPosition.current = { markdown, targetLine, y: 0 };
+    scrollPosition.current = { markdown, targetLine, y: undefined };
   }
   // 菜单项在渲染时构造(而非模块常量):label 走 i18n;依赖 t 使语言切换后随重渲更新。
   const quoteMenuItems = useMemo(

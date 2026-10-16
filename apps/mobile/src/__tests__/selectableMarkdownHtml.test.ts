@@ -66,6 +66,27 @@ describe('buildSelectableMarkdownHtml 渲染态行定位', () => {
     },
   );
 
+  it.each([0, 420])('restores a saved position (%s) instead of revisiting targetLine', (y) => {
+    const html = buildSelectableMarkdownHtml(DOC, { targetLine: 5, restoreScrollY: y });
+    expect(html).not.toContain('scrollIntoView');
+    expect(html).not.toContain('data-src-line');
+    const script = html.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+    expect(script).toBeDefined();
+    const readerWindow = new EventTarget();
+    const readerDocument = new EventTarget();
+    const scrollTo = vi.fn();
+    Function('window', 'document', script!)(Object.assign(readerWindow, { scrollTo }), readerDocument);
+    readerWindow.dispatchEvent(new Event('load'));
+    readerDocument.dispatchEvent(new Event('cindy-mermaid-settled'));
+    expect(scrollTo.mock.calls).toEqual([[0, y], [0, y], [0, y]]);
+  });
+
+  it.each([undefined, -1, NaN, Infinity])('keeps initial targetLine when no valid position exists (%s)', (restoreScrollY) => {
+    const html = buildSelectableMarkdownHtml(DOC, { targetLine: 5, restoreScrollY });
+    expect(html).toContain('scrollIntoView');
+    expect(html).not.toContain('window.scrollTo');
+  });
+
   it('不传 targetLine 不注入脚本;非法值(0 / 非整数)同样不注入', () => {
     expect(buildSelectableMarkdownHtml(DOC)).not.toContain('<script>');
     expect(buildSelectableMarkdownHtml(DOC, { targetLine: 0 })).not.toContain('<script>');

@@ -30,7 +30,7 @@ export interface SelectableMarkdownHtmlOptions {
   dark?: boolean;
   /** Offscreen file pages keep Mermaid source without embedding its runtime. */
   mermaidEnabled?: boolean;
-  /** Restore a revisited reader after its heavy runtime was released. */
+  /** Restore a revisited reader; a saved position (including zero) takes priority over targetLine. */
   restoreScrollY?: number;
   fontSize?: number;
   /** 文件预览正文左右边距；调用方传入共享 spacing.lg。 */
@@ -75,10 +75,14 @@ export function buildSelectableMarkdownHtml(
   markdown: string,
   options: SelectableMarkdownHtmlOptions = {},
 ): string {
+  const restoreScrollY = options.restoreScrollY !== undefined
+    && Number.isFinite(options.restoreScrollY) && options.restoreScrollY >= 0
+    ? options.restoreScrollY : undefined;
+  const targetLine = restoreScrollY === undefined ? options.targetLine : undefined;
   // srcLines 仅在有合法定位目标时开启:无 targetLine 的消费方保持原 HTML 结构,
   // 不为用不上的 data-src-line 容器多付 DOM 节点(bot review 建议)。
   const wantsTargetLine =
-    options.targetLine !== undefined && Number.isInteger(options.targetLine) && options.targetLine > 0;
+    targetLine !== undefined && Number.isInteger(targetLine) && targetLine > 0;
   const blocks = parseMobileMarkdown(markdown, { srcLines: wantsTargetLine });
   const css = buildSelectableMarkdownCss(options);
   // KaTeX runtime 只在文档确实含公式时注入(绝大多数文档没有,不为它们付
@@ -101,8 +105,8 @@ export function buildSelectableMarkdownHtml(
     '</main>',
     hasMath ? buildMathRuntimeScript() : '',
     hasMermaid && options.mermaidEnabled !== false ? buildMermaidRuntimeScript(options.dark === true) : '',
-    buildTargetLineScript(options.targetLine),
-    buildScrollRestoreScript(options.restoreScrollY),
+    buildTargetLineScript(targetLine),
+    buildScrollRestoreScript(restoreScrollY),
     '</body>',
     '</html>',
   ].join('');
@@ -110,7 +114,7 @@ export function buildSelectableMarkdownHtml(
 
 /** Restore during async layout only until the reader starts interacting. */
 function buildScrollRestoreScript(y: number | undefined): string {
-  if (y === undefined || !Number.isFinite(y) || y <= 0) return '';
+  if (y === undefined || !Number.isFinite(y) || y < 0) return '';
   return `<script>(function(){
 var cancelled=false;
 var scroll=function(){if(!cancelled)window.scrollTo(0,${y});};
