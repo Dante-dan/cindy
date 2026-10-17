@@ -51,7 +51,6 @@ import {
 } from '@/session/pastedImageAttachment';
 import {
   getSentAttachmentThumbUri,
-  registerSentAttachmentThumb,
 } from '@/session/sentAttachmentThumbStore';
 import type { RemoteSerializedAttachment } from '@/session/types';
 
@@ -164,6 +163,8 @@ export interface UseMobileLocalAttachmentsResult {
    * 计数会放行超额选图 / 标注,占位兑现时轮到粘贴图自己撞上限被丢(review P2)。
    */
   getPendingUploadCount: () => number;
+  /** Synchronous picker, upload and paste activity, including before the first slot exists. */
+  hasAttachmentInput: () => boolean;
 }
 
 export function useMobileLocalAttachments(
@@ -305,21 +306,13 @@ export function useMobileLocalAttachments(
         try { candidate.onAbandoned?.(); } catch { /* 回收失败不影响管线 */ }
         return;
       }
-      // 发送后气泡的本地缩略图兜底:消息里持久化的是 cindy-oss-attach:// 中转引用,
-      // 被控端物化改写前(乐观渲染 / 电脑离线窗口)渲染端没有任何预览路径——把
-      // 实际上传的文件拷进自有目录记映射,气泡用本地图顶上。
+      // The upload entry already retained the exact snapshot with its owner/cancellation
+      // fence. Do not register again here under a potentially newer account.
       let deliveredCandidate = candidate;
-      if (candidate.kind === 'image') {
+      if (candidate.kind === 'image' && candidate.cleanupLocalUris) {
         const ossRef = attachment.url ?? attachment.path;
-        if (candidate.cleanupLocalUris) {
-          // 粘贴源文件需要回收:先等持久缩略图完成接管，才能安全删源文件。
-          await registerSentAttachmentThumb(ossRef, uploadedUri || candidate.uri);
-          const durablePreviewUri = ossRef ? getSentAttachmentThumbUri(ossRef) : null;
-          if (durablePreviewUri) deliveredCandidate = { ...candidate, uri: durablePreviewUri };
-        } else {
-          // 相册 / 相机原有路径不拥有源文件，保持 fire-and-forget，不拉长上传落定时间。
-          void registerSentAttachmentThumb(ossRef, uploadedUri || candidate.uri);
-        }
+        const durablePreviewUri = ossRef ? getSentAttachmentThumbUri(ossRef) : null;
+        if (durablePreviewUri) deliveredCandidate = { ...candidate, uri: durablePreviewUri };
       }
       if (candidate.cleanupLocalUris) {
         for (const uri of localUris) {
@@ -681,5 +674,6 @@ export function useMobileLocalAttachments(
     ),
     hasPastePlaceholders: () => isAttachmentScopeActive() && getPastePlaceholderTotal() > 0,
     getPendingUploadCount: () => (isAttachmentScopeActive() ? getPendingSlotCount() : 0),
+    hasAttachmentInput: () => isAttachmentScopeActive() && (pickerBusyRef.current || getPendingSlotCount() > 0),
   };
 }

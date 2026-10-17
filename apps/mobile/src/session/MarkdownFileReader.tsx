@@ -23,6 +23,8 @@ import { parseMobileMarkdown } from '@/session/messageMarkdown';
 import { buildSelectableMarkdownHtml } from '@/session/selectableMarkdownHtml';
 import { MARKDOWN_FILE_PAGER_SCRIPT, parseMarkdownPageSwipe } from '@/session/markdownFilePager';
 import { selectionQuoteMenuLabel } from '@/session/selectionQuote';
+import { useHtmlBrowserViewport } from '@/session/useHtmlBrowserViewport';
+import type { BrowserInsets } from '@/session/htmlBrowserViewport';
 import { lineHeight, useTheme } from '@/theme';
 import { spacing, typeScale } from '@/theme/tokens';
 
@@ -33,6 +35,7 @@ export function MarkdownFileReader({
   onQuoteSelection,
   targetLine,
   testID,
+  viewportInsets,
 }: {
   markdown: string;
   /** True only for the focused pager page; neighbours still prefetch text. */
@@ -44,9 +47,13 @@ export function MarkdownFileReader({
   /** 定位到源码行(1-based):加载后滚到覆盖该行的块并闪两下高亮(不驻留)。 */
   targetLine?: number | null;
   testID?: string;
+  viewportInsets?: BrowserInsets;
 }) {
   const { t } = useTranslation();
   const { colors, mode } = useTheme();
+  const { viewRef, measure, viewportStyle, obscuredContentInsets } = useHtmlBrowserViewport(
+    viewportInsets ?? { top: 0, bottom: 0, left: 0, right: 0 },
+  );
   const quoteEnabled = !!onQuoteSelection;
   const hasMermaid = useMemo(() => parseMobileMarkdown(markdown).some((block) => block.type === 'mermaid'), [markdown]);
   // Unknown until the WebView reports a position; zero is a valid saved position.
@@ -111,7 +118,7 @@ export function MarkdownFileReader({
   }, [onPageSwipe]);
 
   return (
-    <View style={styles.fill} testID={testID}>
+    <View ref={viewRef} onLayout={measure} collapsable={false} style={[styles.fill, viewportStyle]} testID={testID}>
       <WebView
         // A new native view releases the previous Mermaid JS heap on blur.
         // The replacement retains the lightweight source document.
@@ -119,6 +126,10 @@ export function MarkdownFileReader({
         onScroll={({ nativeEvent: { contentOffset } }) => {
           if (visible) scrollPosition.current.y = contentOffset.y;
         }}
+        automaticallyAdjustContentInsets={false}
+        contentInsetAdjustmentBehavior="never"
+        obscuredContentInsets={obscuredContentInsets}
+        contentInset={obscuredContentInsets}
         injectedJavaScript={onPageSwipe ? MARKDOWN_FILE_PAGER_SCRIPT : undefined}
         onMessage={onPageSwipe ? handleMessage : undefined}
         menuItems={quoteEnabled ? quoteMenuItems : undefined}
