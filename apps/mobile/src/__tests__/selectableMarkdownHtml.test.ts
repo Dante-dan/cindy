@@ -230,7 +230,7 @@ describe('buildSelectableMarkdownHtml Mermaid 渲染', () => {
     expect(html).not.toContain('renderMermaidNodes');
   });
 
-  it('在真实 Mermaid SVG 中仅保留同窗口的 http(s) 链接', async () => {
+  it('在真实 Mermaid SVG 中仅保留有效链接且不暗示未绑定节点可点', async () => {
     const frame = document.createElement('iframe');
     document.body.append(frame);
     const frameWindow = frame.contentWindow;
@@ -255,12 +255,25 @@ describe('buildSelectableMarkdownHtml Mermaid 渲染', () => {
         'click B href "mailto:reader@example.com" _blank',
         'click C href "https://example.com" _blank',
         '```',
+        '```mermaid',
+        'gantt',
+        'dateFormat YYYY-MM-DD',
+        'section Work',
+        'Website :website, 2026-01-01, 1d',
+        'click website href "https://example.com"',
+        '```',
       ].join('\n')));
       frameDocument!.close();
       await vi.waitFor(
         () => {
           const rendered = frameDocument!.querySelector('.xdt-mermaid > svg');
           expect(rendered).not.toBeNull();
+          expect(frameDocument!.querySelectorAll('.xdt-mermaid > svg')).toHaveLength(2);
+          // Review 4298995475 / DESIGN §14.5: Gantt uses bindFunctions,
+          // unlike flowchart anchors. Its unbound task/text must not look clickable.
+          const gantt = frameDocument!.querySelectorAll('.xdt-mermaid > svg')[1]!;
+          expect(gantt.textContent).toContain('Website');
+          expect(gantt.querySelectorAll('.clickable')).toHaveLength(0);
           expect(rendered?.getAttribute('role')).toBe('graphics-document document');
           expect(rendered?.textContent).toContain('Phone');
           expect(rendered?.textContent).toContain('Mail');

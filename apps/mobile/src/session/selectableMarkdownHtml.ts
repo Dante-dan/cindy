@@ -188,6 +188,13 @@ function renderMermaidNodes() {
         anchor.setAttribute('href', href);
         anchor.removeAttribute('target');
       });
+      // Gantt and other binder-based diagrams mark nodes clickable, but their
+      // bindFunctions can install callbacks/new-window navigation outside the
+      // reader's policy. Leave those unbound and remove the false affordance;
+      // only sanitized SVG anchors above provide actual navigation.
+      Array.prototype.forEach.call(replacement.querySelectorAll('.clickable'), function (element) {
+        if (!element.closest('a')) element.classList.remove('clickable');
+      });
       // Several Mermaid diagram families ignore the per-family useMaxWidth
       // options above and emit width="100%" plus an inline max-width. Restore
       // the viewBox's intrinsic width so every wide diagram can overflow this
