@@ -225,19 +225,12 @@ export function classifyOllamaPullError(value: unknown, pullName?: string): Olla
   ) {
     return 'unauthorized';
   }
-  if (
-    text.includes('404') ||
-    text.includes('not found') ||
-    text.includes('file does not exist') ||
-    text.includes('no such host')
-  ) {
+  if (text.includes('404') || text.includes('not found') || text.includes('file does not exist')) {
     return 'not-found';
   }
-  if (
-    text.includes('not reachable') ||
-    text.includes('econnrefused') ||
-    text.includes('connection refused')
-  ) {
+  // Only the local transport emits this marker; remote registry errors may also
+  // contain ECONNREFUSED, but restarting Ollama cannot fix those downloads.
+  if (/(?:^|: )ollama is not reachable$/.test(text)) {
     return 'refused';
   }
   return 'generic';

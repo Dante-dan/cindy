@@ -92,7 +92,26 @@ describe('localModelRuntime', () => {
       ),
     ).toBe('not-gguf');
     expect(classifyOllamaPullError('not-found')).toBe('not-found');
-    expect(classifyOllamaPullError('connection refused')).toBe('refused');
+    expect(classifyOllamaPullError('ollama is not reachable')).toBe('refused');
+    expect(
+      classifyOllamaPullError(
+        new Error(
+          "Error invoking remote method 'local-model:pull': Error: ollama is not reachable",
+        ),
+      ),
+    ).toBe('refused');
+  });
+
+  // #6311: remote download failures must not suggest a missing model or local daemon.
+  // Existing MLX coverage never exercised DNS or a remote registry refusing a connection.
+  it.each([
+    ['pull model manifest: lookup registry.ollama.ai: no such host', 'generic'],
+    ['getaddrinfo ENOTFOUND registry.ollama.ai', 'generic'],
+    ['Get "https://registry.ollama.ai/v2/": dial tcp 1.2.3.4:443: connection refused', 'generic'],
+    ['connect ECONNREFUSED 1.2.3.4:443', 'generic'],
+    ['pull model manifest: file does not exist', 'not-found'],
+  ] as const)('classifies download diagnostic %s as %s', (message, expected) => {
+    expect(classifyOllamaPullError(message)).toBe(expected);
   });
 
   it('picks mlx then mxfp8 by unified memory', () => {

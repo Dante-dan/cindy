@@ -1,5 +1,7 @@
 import http from 'node:http';
 
+import { redactSensitiveText } from '@cindy/maker-shared/error-redaction';
+
 import { OLLAMA_LOOPBACK_ORIGIN } from '../../shared/localModelRuntime.js';
 
 export const OLLAMA_PROBE_TIMEOUT_MS = 1_500;
@@ -240,14 +242,34 @@ export function streamOllamaPull(
         headers: { 'content-type': 'application/json' },
       },
       (response) => {
+        response.setEncoding('utf8');
         if (!response.statusCode || response.statusCode >= 300) {
-          finish(
-            new OllamaHttpError('http', `ollama /api/pull failed (${response.statusCode ?? 0})`),
-          );
-          response.resume();
+          const message = `ollama /api/pull failed (${response.statusCode ?? 0})`;
+          // Ollama returns a JSON error even for non-2xx responses. Keep only a
+          // bounded structured error, never a proxy's arbitrary HTML/body.
+          const maxErrorBodyLength = 16_384;
+          let body = '';
+          let oversized = false;
+          response.on('data', (chunk: string) => {
+            if (oversized) return;
+            if (body.length + chunk.length > maxErrorBodyLength) {
+              oversized = true;
+              body = '';
+            } else body += chunk;
+          });
+          response.on('end', () => {
+            let detail = '';
+            if (!oversized) {
+              const parsed = parseOllamaPullLine(body);
+              if (typeof parsed?.error === 'string') {
+                detail = redactSensitiveText(parsed.error).slice(0, 2_048);
+              }
+            }
+            finish(new OllamaHttpError('http', detail ? `${message}: ${detail}` : message));
+          });
+          response.on('error', () => finish(new OllamaHttpError('http', message)));
           return;
         }
-        response.setEncoding('utf8');
         let buffer = '';
         let sawSuccess = false;
         const consume = (parsed: OllamaPullEvent) => {
@@ -287,7 +309,7 @@ export function streamOllamaPull(
           finish(
             signal?.aborted
               ? new OllamaHttpError('invalid', 'aborted')
-              : new OllamaHttpError('refused', error.message),
+              : new OllamaHttpError('http', error.message),
           );
         });
       },
@@ -301,7 +323,9 @@ export function streamOllamaPull(
       finish(
         new OllamaHttpError(
           code === 'ECONNREFUSED' || code === 'ECONNRESET' ? 'refused' : 'http',
-          error.message,
+          code === 'ECONNREFUSED' || code === 'ECONNRESET'
+            ? 'ollama is not reachable'
+            : error.message,
         ),
       );
     });
