@@ -23,6 +23,8 @@ import { FailedScheduleNotice } from '@/session/FailedScheduleNotice';
 import { shouldShowFailedScheduleNotice, type FailedScheduleRunSnapshot } from '@cindy/maker-shared/schedule-model';
 import type { TokenSpeedSnapshot } from '@cindy/maker-shared/usage-format';
 import { CompanionHeader } from '@/session/CompanionHeader';
+import { CloudHomeUnreachableNotice, useSustained } from '@/session/CloudHomeUnreachableNotice';
+import { useCloudCompanionHome } from '@/chat/useCloudCompanion';
 import { CHAT_HEADER_BLUR_FADE_INSIDE } from '@/session/ChatIdentityHeader';
 import { useHiddenHistoryChase } from '@/session/hiddenHistoryChase';
 import { collectCompanionPluginInvocations } from '@/session/pluginInvocations';
@@ -280,6 +282,7 @@ import { RecentPhotosStrip } from '@/session/ContextSheetMediaViews';
 import { ContextSheetGoalView, goalStatusLabel } from '@/session/ContextSheetGoalView';
 import { parseGoalLimitsRouteParam } from '@/session/goalLimitsRouteParam';
 import { ComposerAttachmentCollapsedBadge, ComposerAttachmentTray } from '@/session/ComposerAttachmentTray';
+import { useComposerPendingImagePreview } from '@/session/useComposerPendingImagePreview';
 import { useSlowSendVisible, type SlowSendPhase } from '@/session/SlowSendNotice';
 import { ComposerActivityPill, composerActivityPillOverlayColor, makeComposerActivityPillStyles } from '@/session/ComposerActivityPill';
 import { PlanModeChip } from '@/session/PlanModeChip';
@@ -1412,6 +1415,7 @@ function SessionScreenContent() {
     waitForPendingUploads,
     beginOutboxAttachmentHandoff,
     getUploadedSource,
+    getUploadedAttachmentId,
     releaseUploadedSources,
     waitForPastePlaceholdersSettled,
     hasPastePlaceholders,
@@ -2357,6 +2361,15 @@ function SessionScreenContent() {
     connectionIssue,
     isDeviceUnresponsive,
   );
+  // A cloud companion on its main computer (cloud-companions.md §3.1): like an IM chat, a briefly
+  // unreachable computer does not interrupt reading; only a message that cannot get through for a
+  // while offers to continue on another computer.
+  const cloudHome = useCloudCompanionHome(!!companionResource);
+  const cloudHomeActor = cloudHome.supported && companionResource
+    ? cloudHome.actors.find(actor => actor.kind === 'bot' && actor.externalId === companionResource.ref.id && actor.homeDeviceId === deviceId) ?? null
+    : null;
+  const cloudHomeUnreachable = useSustained(!!cloudHomeActor && outboxItems.length > 0 && outboxConnectionDispatchBlocked);
+  const quietConnection = !!cloudHomeActor;
   const hasCurrentSession = currentSession !== null;
   const currentAgentKind = useMemo(
     () => currentSession ? agentKindForSession(currentSession) : null,
@@ -7197,6 +7210,7 @@ function SessionScreenContent() {
       .finally(() => setStopPending(false));
   };
 
+  const pendingImagePreview = useComposerPendingImagePreview({ attachments, previews: attachmentPreviews, pendingUploads, getUploadedAttachmentId });
   const renderComposerControls = ({ composerLayout, composerSendUnavailableReason, composerStopDisabledReason, composerStopDisabled, composerShowInlineStop, composerSendSlotIsStop, composerShowSendButton, composerSendDisabled, voiceIsListening, voiceIsProcessing, voiceProcessingIndicator, voiceIsBusy, voiceRecordingTimer, composerVoicePlacement }: SessionComposerControlState): SessionComposerControls => {
     composerSendTargetEnabledRef.current = composerShowSendButton && !composerLayout.send.disabled;
     if (!composerShowSendButton) sendButtonFrameRef.current = null;
@@ -7407,6 +7421,7 @@ function SessionScreenContent() {
   const renderComposerAttachmentTray = () => (
     <ComposerAttachmentTray
       attachments={attachments}
+      onPreviewPending={pendingImagePreview.open}
       onPreview={setComposerPreviewAttachmentId}
       onRemove={removeRemoteFileAttachment}
       onRemovePending={removePendingUpload}
@@ -8932,6 +8947,7 @@ function SessionScreenContent() {
     || (modelSheetOpen && canUseComposer)
     || (permissionSheetOpen && canUseComposer)
     || composerPreviewAttachmentId !== null
+    || pendingImagePreview.active
     || sessionListDrawerOverlayMounted
     || messageBlockingOverlay
   );
@@ -9704,7 +9720,14 @@ function SessionScreenContent() {
           <View style={[styles.sessionChromeContent, { paddingTop: horizontalSystemHeader ? nativeHeaderHeight : insets.top + (paneLayout.persistent ? spacing.lg : 0) }, companionChat && Platform.OS !== 'ios' && { backgroundColor: colors.surface }]}>
             {headerNode}
 
-            {!isSharedTaskAccessRevoked && (showConnectionBanner || showCachedHistoryNotice) ? (
+            {cloudHomeActor && cloudHomeUnreachable ? (
+              <CloudHomeUnreachableNotice deviceName={deviceName} onSwitch={() => router.push({
+                pathname: '/companions/cloud/[actorId]',
+                params: { actorId: cloudHomeActor.id, botId: cloudHomeActor.externalId, deviceId, deviceName,
+                  title: resolveRemoteText(companionResource!.display.title, i18nInstance.language) },
+              })} />
+            ) : null}
+            {!isSharedTaskAccessRevoked && !quietConnection && (showConnectionBanner || showCachedHistoryNotice) ? (
               <ConnectionBanner
                 density="compact"
                 cachedOnly={showCachedHistoryNotice}
@@ -10134,6 +10157,7 @@ function SessionScreenContent() {
             testID="session.permissionSheet"
           />
         ) : null}
+        {pendingImagePreview.host}
         {composerPreviewUrl && composerGalleryImages.length > 0 ? (
           // composer 托盘图片的全屏查看(沿用聊天消息同款 ImageLightbox;本地图无需远端取件)。
           // annotation:托盘图可圈点标注 / 再编辑,保存后烧录替换附件重新上传。
