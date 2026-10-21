@@ -183,6 +183,16 @@ export function reconcileBotSettingsDraft(
   };
 }
 
+/** Same trimmed UTF-16 length limit as the host profile handler. */
+export const BOT_PERSONALITY_MAX_LENGTH = 12000;
+
+export class BotPersonalityLengthError extends Error {
+  constructor() {
+    super('identitySource exceeds the saved personality length limit');
+    this.name = 'BotPersonalityLengthError';
+  }
+}
+
 /** 自动保存对用户可见的状态。`saved` 由 UI 侧短暂显示后淡出,不常驻。 */
 export type BotAutosaveStatus = 'idle' | 'saving' | 'saved' | 'error';
 
@@ -201,7 +211,7 @@ export interface BotSettingsAutosaveOptions {
   /** 真正提交(IPC)。resolve = 已落库(此时 commit 侧应已推进基线);reject = 失败。 */
   commit: (payload: BotSettingsPayload) => Promise<void>;
   /** 状态变化回调。dispose 之后不再触发。 */
-  onStatusChange?: (status: BotAutosaveStatus) => void;
+  onStatusChange?: (status: BotAutosaveStatus, error?: unknown) => void;
 }
 
 export interface BotSettingsAutosaveHandle {
@@ -231,9 +241,9 @@ export function createBotSettingsAutosave(
   let inFlight: Promise<void> | null = null;
   let detached = false;
 
-  const emit = (status: BotAutosaveStatus): void => {
+  const emit = (status: BotAutosaveStatus, error?: unknown): void => {
     if (detached) return;
-    options.onStatusChange?.(status);
+    options.onStatusChange?.(status, error);
   };
 
   const clearTimer = (): void => {
@@ -265,10 +275,14 @@ export function createBotSettingsAutosave(
     // 看到 inFlight 为 null 而重复提交同一份 payload。
     const attempt = (async () => {
       try {
+        // Match host readText: trimmed UTF-16 code units, never truncate a draft.
+        if (payload.identitySource.trim().length > BOT_PERSONALITY_MAX_LENGTH) {
+          throw new BotPersonalityLengthError();
+        }
         await options.commit(payload);
         emit(isDirty() ? 'idle' : 'saved');
-      } catch {
-        emit('error');
+      } catch (error) {
+        emit('error', error);
       }
     })();
     inFlight = attempt;

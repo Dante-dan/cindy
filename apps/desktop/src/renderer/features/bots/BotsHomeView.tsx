@@ -19,6 +19,7 @@ import {
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useBotTranslation } from './botPronounContext';
 
+import { extractIpcError, mapIpcErrorToI18nKey } from '@/utils/ipcError';
 import { Spinner } from '@/components/ui/spinner';
 import { useProviders } from '@/hooks/useProviders';
 import { useAvailableAgents } from '@/hooks/useAvailableAgents';
@@ -64,6 +65,8 @@ import { BotTodoList } from './BotTodoList';
 import { BotMemorySettings } from './BotMemorySettings';
 import { BotChannelsPage } from './BotChannelsPage';
 import {
+  BOT_PERSONALITY_MAX_LENGTH,
+  BotPersonalityLengthError,
   botSettingsChanges,
   normalizeBotSettingsPayload,
   reconcileBotSettingsDraft,
@@ -475,10 +478,15 @@ export function BotSettings({
             </span>
           ) : autosave.status === 'error' ? (
             <p className="flex items-center gap-2 text-11 text-[var(--text-danger)]" role="alert">
-              {t('bots.profileSaveFailed')}
+              {autosave.error instanceof BotPersonalityLengthError
+                ? t('bots.autosave.personalityTooLong', { count: identitySource.trim().length, max: BOT_PERSONALITY_MAX_LENGTH })
+                : t(mapIpcErrorToI18nKey(autosave.error), {
+                  defaultValue: extractIpcError(autosave.error)?.message || t('bots.profileSaveFailed'),
+                })}
               <button
                 type="button"
                 onClick={() => void autosave.retry()}
+                disabled={identitySource.trim().length > BOT_PERSONALITY_MAX_LENGTH}
                 className="font-medium text-[var(--text-primary)]"
               >
                 {t('bots.autosave.retry')}
@@ -575,6 +583,8 @@ export function BotSettings({
         <div hidden={page !== 'personality'} className="pt-3">
           <Textarea
             aria-label={t('bots.profile.personality')}
+            aria-invalid={identitySource.trim().length > BOT_PERSONALITY_MAX_LENGTH}
+            aria-describedby="bot-personality-length"
             readOnly={!!invitationPending}
             value={identitySource}
             onChange={(next) => {
@@ -586,6 +596,9 @@ export function BotSettings({
             rows={6}
             className="min-h-40 resize-none p-3 leading-6 [field-sizing:content]"
           />
+          <p id="bot-personality-length" className="mt-2 text-11 text-[var(--text-tertiary)]">
+            {t('bots.autosave.personalityLength', { count: identitySource.trim().length, max: BOT_PERSONALITY_MAX_LENGTH })}
+          </p>
         </div>
         <section
           hidden={page !== 'model'}

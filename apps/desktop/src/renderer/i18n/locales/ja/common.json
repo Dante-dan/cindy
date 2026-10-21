@@ -9065,6 +9065,8 @@
     "cancel": "キャンセル",
     "save": "保存",
     "autosave": {
+      "personalityTooLong": "性格の内容が長すぎます（{{count}}/{{max}}）。短くして保存してください。",
+      "personalityLength": "{{count}}/{{max}} 文字",
       "saving": "保存中…",
       "saved": "保存しました",
       "retry": "再保存"

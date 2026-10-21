@@ -43,6 +43,7 @@ export interface UseBotSettingsAutosaveOptions {
 
 export interface BotSettingsAutosaveController {
   status: BotAutosaveStatus;
+  error: unknown;
   /** 字段变化:文本走防抖,离散选择走即时合并窗口。 */
   onEdit: (trigger: BotAutosaveTrigger) => void;
   /** blur / 返回聊天等显式边界的冲刷。 */
@@ -83,16 +84,18 @@ export function useBotSettingsAutosave(
   enabledRef.current = enabled;
 
   const [status, setStatus] = useState<BotAutosaveStatus>('idle');
+  const [error, setError] = useState<unknown>(null);
   const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mountedRef = useRef(true);
 
-  const handleStatus = useCallback((next: BotAutosaveStatus) => {
+  const handleStatus = useCallback((next: BotAutosaveStatus, failure?: unknown) => {
     if (!mountedRef.current) return;
     if (savedTimerRef.current !== null) {
       clearTimeout(savedTimerRef.current);
       savedTimerRef.current = null;
     }
     setStatus(next);
+    setError(next === 'error' ? failure : null);
     if (next !== 'saved') return;
     savedTimerRef.current = setTimeout(() => {
       savedTimerRef.current = null;
@@ -163,5 +166,5 @@ export function useBotSettingsAutosave(
 
   const isDirty = useCallback(() => enabledRef.current && autosave.isDirty(), [autosave]);
 
-  return { status, onEdit, flush, retry, isDirty, composition };
+  return { status, error, onEdit, flush, retry, isDirty, composition };
 }

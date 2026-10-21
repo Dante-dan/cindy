@@ -9065,6 +9065,8 @@
     "cancel": "취소",
     "save": "저장",
     "autosave": {
+      "personalityTooLong": "성격 내용이 너무 깁니다({{count}}/{{max}}). 줄인 후 저장하세요.",
+      "personalityLength": "{{count}}/{{max}}자",
       "saving": "저장 중…",
       "saved": "저장됨",
       "retry": "다시 저장"

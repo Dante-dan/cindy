@@ -621,6 +621,41 @@ describe('Bot settings profile consolidation', () => {
 });
 
 describe('Bot settings unified autosave', () => {
+  // #6568: an oversized personality must remain editable, explain why it is
+  // unsaved, and save the complete corrected value on retry (no truncation).
+  it('explains oversized personality drafts and retries the complete corrected value', async () => {
+    vi.useFakeTimers();
+    renderSettings();
+    fireEvent.click(screen.getByRole('button', { name: 'bots.profile.personality' }));
+    const input = screen.getByRole('textbox', { name: 'bots.profile.personality' });
+    const oversized = '😀'.repeat(6000) + 'x';
+    fireEvent.change(input, { target: { value: oversized } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(1600); });
+    expect(mocks.updateBotProfile).not.toHaveBeenCalled();
+    expect(input).toHaveProperty('value', oversized);
+    expect(input.getAttribute('aria-invalid')).toBe('true');
+    expect(screen.getByRole('button', { name: 'bots.autosave.retry' })).toHaveProperty('disabled', true);
+    expect(screen.getByRole('alert').textContent).toContain('bots.autosave.personalityTooLong');
+    const corrected = '  ' + '😀'.repeat(6000) + '\n';
+    fireEvent.change(input, { target: { value: corrected } });
+    fireEvent.click(screen.getByRole('button', { name: 'bots.autosave.retry' }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(mocks.updateBotProfile).toHaveBeenLastCalledWith('bot-1', { identitySource: corrected.trim() });
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('shows an identifiable IPC save failure and clears it after retry succeeds', async () => {
+    vi.useFakeTimers();
+    mocks.updateBotProfile.mockRejectedValueOnce(new Error('[NOT_FOUND] missing bot'));
+    renderSettings();
+    fireEvent.change(screen.getByLabelText('bots.nameLabel'), { target: { value: 'Changed name' } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(1600); });
+    expect(screen.getByRole('alert').textContent).toContain('ipcError.NOT_FOUND');
+    fireEvent.click(screen.getByRole('button', { name: 'bots.autosave.retry' }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
   it('clears an override with no default route and follows defaults when they recover', async () => {
     vi.useFakeTimers();
     const route = capabilities().modelChain[0]!;

@@ -9104,6 +9104,8 @@
     "cancel": "Cancel",
     "save": "Save",
     "autosave": {
+      "personalityTooLong": "Personality is too long ({{count}}/{{max}}). Shorten it to save.",
+      "personalityLength": "{{count}}/{{max}} characters",
       "saving": "Saving…",
       "saved": "Saved",
       "retry": "Save Again"
