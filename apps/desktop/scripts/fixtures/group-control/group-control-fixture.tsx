@@ -8,7 +8,14 @@ interface GroupData {
   members: Array<{ botId: string; name: string }>;
   messages: number;
   sidebar: boolean;
+  richAnswer?: boolean;
 }
+
+const richAnswer = 'Before the answer\n\n```cindy-ui\n' + [
+  { seq: 1, op: 'create', id: 'root', kind: 'stack' },
+  { seq: 2, op: 'create', id: 'title', parent: 'root', kind: 'heading', props: { text: 'Weekend plan' } },
+  { seq: 3, op: 'create', id: 'body', parent: 'root', kind: 'markdown', props: { text: '**Bring a camera**\n\n- Walk by the river\n- Stop for lunch' } },
+].map(op => JSON.stringify(op)).join('\n') + '\n```\n\nAfter the answer';
 
 function groupFrom(data: GroupData) {
   return {
@@ -35,10 +42,15 @@ function groupFrom(data: GroupData) {
       id: `m${i}`,
       sequence: i + 1,
       kind: 'message',
-      authorKind: 'user',
-      authorBotId: null,
-      authorName: '',
-      content: `Layout message ${i + 1}`,
+      authorKind: data.richAnswer ? 'bot' : 'user',
+      authorBotId: data.richAnswer ? 'a' : null,
+      authorName: data.richAnswer ? 'Aster' : '',
+      content: data.richAnswer ? richAnswer : `Layout message ${i + 1}`,
+      ...(data.richAnswer && i === 1 ? { threadShare: {
+        messageId: 'source-reply', threadRootId: 'source-root', status: 'available',
+        authorKind: 'bot', authorBotId: 'b', authorName: 'Nova', sharedByAuthor: false,
+        content: richAnswer, attachments: [], createdAt: 1700000000000, edited: false,
+      } } : {}),
       mentions: { all: false, botIds: [] },
       noticeCode: null,
       planId: null,

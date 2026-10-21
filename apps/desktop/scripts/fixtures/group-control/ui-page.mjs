@@ -17,6 +17,10 @@ export default {
     'Sending, round control, real device-link control and revocation, pending interactions, plans and attachments; the sidebar is an empty frame',
   cases: {
     default: { about: 'Empty group, short controller name, expanded sidebar', data: base },
+    'rich-answer': {
+      about: 'Read-only Markdown projection of a rich answer and shared reply (#6550)',
+      data: { ...base, messages: 2, richAnswer: true },
+    },
     'long-thread': {
       about: '40 messages: bottom pin and history position survive notice changes',
       viewport: { width: 800, height: 600 },

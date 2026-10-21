@@ -6,6 +6,7 @@
 import { useId, useState, type ReactNode } from 'react';
 import { ChevronRight, CornerDownRight, MessageSquare } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { hasRichAnswer, richAnswerText } from '@cindy/maker-shared/rich-answer';
 import { MarkdownRenderer } from '@/components/chat/MarkdownRenderer';
 import { CHAT_BODY_CLASS } from '@/components/chat/chatChrome';
 import { formatAbsolute, useRelativeTime } from '@/hooks/useRelativeTime';
@@ -128,7 +129,7 @@ export function BotGroupThreadShareQuote({ share, members, attachments, onOpenTh
           </figcaption>
           {share.content.trim() ? (
             <blockquote className={`min-w-0 break-words text-[var(--msg-assistant-text)] ${CHAT_BODY_CLASS}`}>
-              <MarkdownRenderer workingDir="" content={share.content} allowPrivilegedLinks={false} />
+              <MarkdownRenderer workingDir="" content={hasRichAnswer(share.content) ? richAnswerText(share.content) : share.content} allowPrivilegedLinks={false} />
             </blockquote>
           ) : null}
           {attachments}

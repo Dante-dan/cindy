@@ -5,6 +5,7 @@
  */
 import { useMemo, type ReactNode } from 'react';
 import { StyleSheet, View } from 'react-native';
+import { hasRichAnswer, richAnswerText } from '@cindy/maker-shared/rich-answer';
 import { splitBotGroupMentionSegments } from '@cindy/maker-shared/botGroupMentions';
 import { Text } from '@/components/AppText';
 import { fontWeight, monoFont, useThemedStyles, type ThemeColors } from '@/theme';
@@ -74,7 +75,7 @@ function renderBlock(block: MobileMarkdownBlock, styles: Styles): ReactNode {
 
 export function BotGroupMarkdownText({ content }: { content: string }) {
   const styles = useThemedStyles(makeStyles);
-  const blocks = useMemo(() => parseMobileMarkdown(content), [content]);
+  const blocks = useMemo(() => parseMobileMarkdown(hasRichAnswer(content) ? richAnswerText(content) : content), [content]);
   return <View style={styles.body}>{blocks.map((block) => renderBlock(block, styles))}</View>;
 }
 

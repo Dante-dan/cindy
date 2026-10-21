@@ -21,6 +21,7 @@ import { toast } from '@/lib/toast';
 import { editBotGroupSend, retryBotGroupSend, type BotGroupOutboxEntry } from './botGroupOutbox';
 
 import { formatBotTimelineClock, formatBotTimelineDate } from '@cindy/maker-shared/botTimeline';
+import { hasRichAnswer, richAnswerText } from '@cindy/maker-shared/rich-answer';
 import { MarkdownRenderer } from '@/components/chat/MarkdownRenderer';
 import { ShareMessageCheckbox } from '@/components/chat/ShareMessageCheckbox';
 import { Button } from '@/components/ui/button';
@@ -111,7 +112,8 @@ function collectMentionRanges(root: HTMLElement, labels: readonly string[]): Ran
 }
 
 /** Message text as Markdown, with `@名字` of known members highlighted like a chip. */
-function BotGroupMessageText({ content, mentionLabels }: { content: string; mentionLabels: readonly string[] }) {
+function BotGroupMessageText({ content: source, mentionLabels }: { content: string; mentionLabels: readonly string[] }) {
+  const content = hasRichAnswer(source) ? richAnswerText(source) : source;
   const ref = useRef<HTMLDivElement>(null);
   const labelsKey = mentionLabels.join('\u0000');
   useLayoutEffect(() => {

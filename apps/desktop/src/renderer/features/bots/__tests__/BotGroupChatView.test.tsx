@@ -347,6 +347,31 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe('BotGroupChatView', () => {
+  // Test value: real main/thread/share presentation (#6550); existing Markdown
+  // coverage only supplies plain strings. One text node exposed raw cindy-ui JSON.
+  // Unit tier, in-memory chat server; individual measured runtime in recovery report.
+  it('projects rich answers to readable Markdown in the main group, thread and shared reply', { timeout: 20_000 }, async () => {
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    const answer = (text: string) => '```cindy-ui\n' + [
+      { seq: 1, op: 'create', id: 'root', kind: 'stack' },
+      { seq: 2, op: 'create', id: 'title', parent: 'root', kind: 'heading', props: { text: 'Answer' } },
+      { seq: 3, op: 'create', id: 'body', parent: 'root', kind: 'markdown', props: { text } },
+    ].map(op => JSON.stringify(op)).join('\n') + '\n```';
+    mocks.getBotGroup.mockResolvedValue({ ok: true, group: detail({ serverBacked: true, messages: [
+      msg({ id: 'root', content: answer('**Main answer**'), authorKind: 'bot', authorBotId: 'xiaoman' }),
+      msg({ id: 'share', sequence: 2, threadShare: { messageId: 'reply-root', threadRootId: 'root', status: 'available', authorKind: 'bot', authorBotId: 'xiaoman', authorName: '小满', sharedByAuthor: false, content: answer('**Shared answer**'), attachments: [], createdAt: 1, edited: false } }),
+    ] }) });
+    mocks.thread.mockResolvedValue({ ok: true, root: msg({ id: 'root', content: answer('**Main answer**') }), replies: [msg({ id: 'reply-root', content: answer('**Thread answer**'), authorKind: 'bot', authorBotId: 'xiaoman' })], hasMore: false });
+    const user = userEvent.setup();
+    renderView();
+    expect(await screen.findByText(/^### Answer\s+\*\*Main answer\*\*$/)).toBeTruthy();
+    expect(await screen.findByText(/^### Answer\s+\*\*Shared answer\*\*$/)).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'bots.groupChat.server.thread.viewThread' }));
+    expect(await screen.findByText(/^### Answer\s+\*\*Thread answer\*\*$/)).toBeTruthy();
+    expect(document.body.textContent).not.toContain('cindy-ui');
+    expect(document.body.textContent).not.toContain('"op":"create"');
+  });
+
   it('clears the selected route when an authoritative personal hide unmounts settings', async () => {
     renderView();
     await screen.findByRole('textbox');

@@ -56,3 +56,30 @@ it('群聊不打开链接:强调里的链接只保留强调样式,不加下划�
   // 强调里的行内代码照常套代码样式。
   expect(styleOf('a.ts')).toMatchObject({ fontFamily: 'Menlo' });
 });
+
+// Test value: BotGroupMarkdownText must show a read-only text projection (#6550).
+// Existing coverage exercises only plain Markdown. One rich text node leaked JSON.
+// Unit tier; no native devices or network. Measured runtime in recovery report.
+it('renders rich-answer content as lightweight Markdown without showing protocol', async () => {
+  const content = 'Before\n```cindy-ui\n' + [
+    { seq: 1, op: 'create', id: 'root', kind: 'stack' },
+    { seq: 2, op: 'create', id: 'title', parent: 'root', kind: 'heading', props: { text: 'Answer' } },
+    { seq: 3, op: 'create', id: 'body', parent: 'root', kind: 'markdown', props: { text: '**Readable answer**\n\n- First item' } },
+  ].map(op => JSON.stringify(op)).join('\n') + '\n```\nAfter';
+  await act(async () => root.render(createElement(BotGroupMarkdownText, { content })));
+  expect(styleOf('Readable answer')).toMatchObject({ fontWeight: '600' });
+  expect(node.textContent).toContain('Answer');
+  expect(node.textContent).toContain('First item');
+  expect(node.textContent).toContain('Before');
+  expect(node.textContent).toContain('After');
+  expect(node.textContent).not.toContain('cindy-ui');
+  expect(node.textContent).not.toContain('"op":"create"');
+});
+
+it.each([
+  ['ordinary code', '```json\n{"op":"create"}\n```', '{"op":"create"}'],
+  ['nested protocol example', '````markdown\n```cindy-ui\n{"op":"create"}\n```\n````', '```cindy-ui'],
+])('preserves %s as literal code', async (_name, content, expected) => {
+  await act(async () => root.render(createElement(BotGroupMarkdownText, { content })));
+  expect(node.textContent).toContain(expected);
+});
