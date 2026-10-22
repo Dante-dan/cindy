@@ -3051,6 +3051,85 @@ async function sweepableRunsUnderRoot(
   return sweepable;
 }
 
+/**
+ * Complete command lines for the launcher's OS user/session, never a filtered
+ * "matching processes" query. A denied, truncated or partly unreadable listing
+ * cannot prove absence. No command line is persisted or logged.
+ */
+async function readRunnerProcessInventory(): Promise<string[] | null> {
+  try {
+    const options = { encoding: 'utf8' as const, timeout: KILL_PROBE_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 };
+    let rows: Array<{ pid: number; command: string }>;
+    if (process.platform === 'win32') {
+      const { stdout } = await execFileAsync('powershell.exe', [
+        '-NoProfile', '-NonInteractive', '-Command',
+        "$ErrorActionPreference='Stop'; "
+        + `$self = Get-CimInstance Win32_Process -Filter 'ProcessId=${process.pid}'; `
+        + "if ($null -eq $self) { throw 'missing current process' }; "
+        + "@(Get-CimInstance Win32_Process -Filter ('SessionId=' + $self.SessionId) "
+        + "| Select-Object ProcessId,CommandLine) | ConvertTo-Json -Compress",
+      ], { ...options, windowsHide: true });
+      const value: unknown = JSON.parse(stdout);
+      if (!Array.isArray(value)) return null;
+      rows = [];
+      for (const entry of value) {
+        if (!entry || typeof entry !== 'object') return null;
+        const row = entry as Record<string, unknown>;
+        if (typeof row.ProcessId !== 'number' || typeof row.CommandLine !== 'string') return null;
+        rows.push({ pid: row.ProcessId, command: row.CommandLine });
+      }
+    } else {
+      if (typeof process.getuid !== 'function') return null;
+      const { stdout } = await execFileAsync('ps', [
+        '-ww', '-U', String(process.getuid()), '-o', 'pid=', '-o', 'args=',
+      ], options);
+      rows = [];
+      for (const line of stdout.trim().split('\n')) {
+        const match = /^\s*(\d+)\s+(.+)$/u.exec(line);
+        if (!match) return null;
+        rows.push({ pid: Number(match[1]), command: match[2]! });
+      }
+    }
+    if (!rows.some((row) => row.pid === process.pid)) return null;
+    if (rows.some((row) => !Number.isSafeInteger(row.pid) || row.pid <= 0 || !row.command.trim())) return null;
+    return rows.map((row) => row.command);
+  } catch {
+    return null;
+  }
+}
+
+/** Recover legacy corrupt status only from independent process evidence. */
+async function confirmUnreadableRunExited(root: string, runId: string): Promise<boolean> {
+  try {
+    const runDir = path.resolve(root, runId);
+    const config = await readSmallJson(path.join(runDir, 'config.json'));
+    if (!isResumeConfig(config, runId)
+      || config.parentSessionId !== path.basename(root)
+      || typeof config.runDir !== 'string'
+      || !path.isAbsolute(config.runDir)
+      || path.resolve(config.runDir) !== runDir
+      || /[\r\n\0]/u.test(runDir)) return false;
+    const owner = piSubagentOwnerIdentity(config.runtimeOwnerId);
+    // An exited host alone says nothing about its detached runner. It only
+    // fences a late launch: the original launcher must no longer be able to
+    // spawn this UUID *after* we inspect the process inventory below.
+    if (!owner || isOwnerInstanceAlive(owner)) return false;
+    const realRunDir = await fs.realpath(runDir);
+    const commands = await readRunnerProcessInventory();
+    if (!commands) return false;
+    // Both original and canonical paths matter when agentHome uses a symlink.
+    // Match the whole UUID directory, also retaining any still-visible Pi child
+    // using its run-local config/session files. No disk PID is ever signalled.
+    const normalize = (value: string): string => process.platform === 'win32'
+      ? value.replaceAll('/', '\\').toLowerCase()
+      : value;
+    const paths = [runDir, realRunDir].map((directory) => normalize(directory + path.sep));
+    return commands.every((command) => !paths.some((directory) => normalize(command).includes(directory)));
+  } catch {
+    return false;
+  }
+}
+
 /** Resolve false if `work` has not settled within `ms`, without leaking a timer. */
 async function raceWithDeadline(work: Promise<boolean>, ms: number): Promise<boolean> {
   let timer: NodeJS.Timeout | undefined;
@@ -3109,13 +3188,13 @@ async function stopPiSubagentRunsUnderRoots(
         // In parallel: each reclaim is mostly waiting on its own process probe,
         // and serialising them multiplied the worst case by the number of
         // runners — enough to overrun a quit budget with only a few of them.
-        const outcomes = await Promise.all(work.map(async ({ status }) => {
+        const outcomes = await Promise.all(work.map(async ({ runId, status }) => {
           if (!status) {
-            // No readable status means no runner identity to verify, and the
-            // header forbids signalling a pid we cannot prove. So we cannot
-            // reclaim it — but the caller must not hear that the boundary is
-            // clean, or an account switch proceeds with this child still live.
-            return false;
+            // Never signal unknown disk PIDs. A legacy run may still be
+            // independently proven gone despite a destroyed status projection.
+            const remaining = killDeadline - Date.now();
+            if (remaining <= 0) return false;
+            return raceWithDeadline(confirmUnreadableRunExited(root, runId), remaining);
           }
           const remaining = killDeadline - Date.now();
           if (remaining <= 0) return false;
