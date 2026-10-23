@@ -1420,6 +1420,86 @@ describe('PI durable subagent run store', () => {
           .resolves.toBe(false);
       });
 
+      /**
+       * #6694: the public account-boundary sweep must recover an unreadable
+       * legacy status only with an exited launch owner and a complete process
+       * inventory. Existing cases cover unknown identity, never this proof.
+       * Minimal input is one UUID run, invalid status and its original config;
+       * unit tier uses the existing process probe fake, with no real signals.
+       */
+      it.each(cases)('recovers an exited legacy run when status %s', async (_label, write) => {
+        usePlatform('darwin');
+        stubKill();
+        const ownerPid = 987_654_321;
+        const agentHome = await homeWithUnreadableRun(async (dir) => {
+          await write(dir);
+          await writeFile(path.join(dir, 'config.json'), JSON.stringify({
+            version: 1, runId, runDir: dir, taskId: 'task-1', parentSessionId: 'session-1',
+            runtimeOwnerId: `${ownerPid}.1000:old`, cwd: dir, binary: 'pi', tasks: [{}],
+          }));
+          await writeFile(path.join(dir, 'result.json'), 'preserve-result');
+        });
+        childProcess.spawnSync.mockImplementation(() => ({
+          status: 0, stdout: `${process.pid} node current-host\n`,
+        }));
+        await expect(stopAllPiSubagentRunsForExit(agentHome, 0, { killUnresponsiveRunners: true }))
+          .resolves.toBe(true);
+        expect(await readFile(path.join(piSubagentRunRoot(agentHome, 'session-1'), runId, 'result.json'), 'utf8'))
+          .toBe('preserve-result');
+        expect(killSignals()).toEqual([]);
+      });
+
+      it.each([
+        ['a live launch owner', 'darwin', 'live-owner'],
+        ['a config pointing at another run', 'darwin', 'wrong-directory'],
+        ['a still-running UUID runner', 'darwin', 'live-runner'],
+        ['a failed process listing', 'darwin', 'failed-probe'],
+        ['a partial listing missing the current host', 'darwin', 'partial-probe'],
+        ['an unreadable Windows command line', 'win32', 'unreadable-command'],
+      ] as const)('keeps corrupt status fail-closed with %s', async (_label, platform, scenario) => {
+        usePlatform(platform);
+        stubKill();
+        const agentHome = await homeWithUnreadableRun(async (dir) => {
+          await writeFile(path.join(dir, 'status.json'), Buffer.alloc(72_506));
+          await writeFile(path.join(dir, 'config.json'), JSON.stringify({
+            version: 1, runId, taskId: 'task-1', parentSessionId: 'session-1',
+            runDir: scenario === 'wrong-directory' ? path.dirname(dir) : dir,
+            runtimeOwnerId: scenario === 'live-owner' ? `${process.pid}:live` : '987654321.1000:old',
+            cwd: dir, binary: 'pi', tasks: [{}],
+          }));
+          const runner = `node ${path.join(dir, 'runner.cjs')}`;
+          childProcess.spawnSync.mockImplementation(() => ({
+            status: scenario === 'failed-probe' ? 1 : 0,
+            stdout: platform === 'win32'
+              ? JSON.stringify([{ ProcessId: process.pid, CommandLine: null }])
+              : `${scenario === 'partial-probe' ? 123 : process.pid} node host\n`
+                + (scenario === 'live-runner' ? `424242 ${runner}\n` : ''),
+          }));
+        });
+        await expect(stopAllPiSubagentRunsForExit(agentHome, 0, { killUnresponsiveRunners: true }))
+          .resolves.toBe(false);
+        expect(killSignals()).toEqual([]);
+      });
+
+      it('recovers zero-filled legacy status from a complete Windows session inventory', async () => {
+        usePlatform('win32');
+        stubKill();
+        const agentHome = await homeWithUnreadableRun(async (dir) => {
+          await writeFile(path.join(dir, 'status.json'), Buffer.alloc(72_506));
+          await writeFile(path.join(dir, 'config.json'), JSON.stringify({
+            version: 1, runId, runDir: dir, taskId: 'task-1', parentSessionId: 'session-1',
+            // A reused owner PID is not the original launch incarnation.
+            runtimeOwnerId: `${process.pid}.1:old`, cwd: dir, binary: 'pi', tasks: [{}],
+          }));
+        });
+        childProcess.spawnSync.mockImplementation(() => ({ status: 0,
+          stdout: JSON.stringify([{ ProcessId: process.pid, CommandLine: 'current-host' }]),
+        }));
+        await expect(stopAllPiSubagentRunsForExit(agentHome, 0, { killUnresponsiveRunners: true }))
+          .resolves.toBe(true);
+        expect(killSignals()).toEqual([]);
+      });
+
       it('still reports success once every run is readable and reclaimed', async () => {
         usePlatform('linux');
         // Verifiable once, then reaped by the kill: a confirmed reclaim.
