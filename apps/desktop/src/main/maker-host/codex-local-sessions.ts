@@ -455,6 +455,67 @@ export function readCodexThreadStorageForArchive(threadId: string): {
 
 /** Ensure a Codex thread from another local CODEX_HOME is visible to xdt-maker's app-server. */
 export async function prepareExternalCodexSessionForResume(threadId: string): Promise<string | undefined> {
+  const targetHome = getDesktopCodexHome();
+  const prepared = await prepareExternalCodexSessionStorage(threadId);
+  if (!prepared) return prepared;
+  // Keep adoption hidden until the existing guarded transaction has selected
+  // its private inode. Newer app-server paginated resume also validates the
+  // basename even when a state row points directly at that inode (#6736).
+  const adoptedName = path.basename(prepared).match(/^rollout-cindy-adopted(?:-\d+)?-(rollout-.+)$/)?.[1];
+  if (!adoptedName || !isCanonicalCodexRolloutPath(adoptedName, threadId)) return prepared;
+  if (!samePath(targetHome, getDesktopCodexHome())) {
+    throw resumePreparationBlocked(threadId, 'the private Codex home changed during adoption');
+  }
+  return normalizeAdoptedCodexRolloutForResume(threadId, prepared, targetHome);
+}
+
+/** Normalize only the exact indexed private history, never another account's HOME. */
+export function normalizeAdoptedCodexRolloutForResume(
+  threadId: string,
+  prepared: string,
+  sqliteHome: string,
+): string {
+  const adoptedName = path.basename(prepared).match(/^rollout-cindy-adopted(?:-\d+)?-(rollout-.+)$/)?.[1];
+  if (!adoptedName || !isCanonicalCodexRolloutPath(adoptedName, threadId)) return prepared;
+  const targetHome = historyHomeForRollout(prepared);
+  const targetDbPath = findLatestStateDb(sqliteHome);
+  const snapshot = readPrivateNonEmptyRolloutSnapshot(targetHome, prepared);
+  if (!targetDbPath || !snapshot) {
+    throw resumePreparationBlocked(threadId, 'the adopted private rollout changed before canonical handoff');
+  }
+  const canonicalPath = path.join(path.dirname(prepared), adoptedName);
+  assertNoUnexpectedCanonicalRollouts(threadId, targetHome, [canonicalPath]);
+  // Publish another name for the SAME private inode, never copy authoritative
+  // private history: a writer already using the adopted path must stay attached.
+  // Keep the old name as a recoverable alias, including after a crash before CAS.
+  const published = publishStagedFullRolloutAtCanonical(
+    threadId, targetHome, { path: prepared, created: false, snapshot }, canonicalPath,
+  );
+  if (!published.staged || !sameRegularFileIdentity(prepared, canonicalPath)) {
+    throw resumePreparationBlocked(threadId, 'a different canonical rollout conflicts with adopted history');
+  }
+  const canonicalSnapshot = readPrivateNonEmptyRolloutSnapshot(targetHome, canonicalPath);
+  if (!canonicalSnapshot) {
+    throw resumePreparationBlocked(threadId, 'the canonical adopted rollout changed before state handoff');
+  }
+  const guard = () => {
+    assertSoleCanonicalPath(threadId, targetHome, canonicalPath, true);
+    if (!sameRegularFileIdentity(prepared, canonicalPath)) {
+      throw resumePreparationBlocked(threadId, 'the adopted rollout alias changed during canonical handoff');
+    }
+  };
+  if (!handoffThreadToCopiedRollout(
+    targetDbPath, threadId, targetHome, prepared,
+    { path: canonicalPath, created: published.created, snapshot: canonicalSnapshot }, guard,
+  )) {
+    throw resumePreparationBlocked(threadId, 'the adopted rollout pointer changed during canonical handoff');
+  }
+  return acceptStateBackedWinnerAfterRecovery(
+    targetDbPath, threadId, targetHome, canonicalPath, { beforeReturn: guard },
+  );
+}
+
+async function prepareExternalCodexSessionStorage(threadId: string): Promise<string | undefined> {
   if (!isLikelyThreadId(threadId)) return;
   const targetHome = getDesktopCodexHome();
   const targetDbPath = findLatestStateDb(targetHome);
