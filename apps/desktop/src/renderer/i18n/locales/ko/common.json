@@ -11485,6 +11485,8 @@
     "errorBanner": {
       "requestFormatError": "앱이 보낸 요청 형식에 문제가 있어 답변을 완료하지 못했습니다.",
       "replyFailed": "답변을 완료하지 못했습니다",
+      "routeProviderUnavailable": "선택한 제공자를 사용할 수 없습니다. 작업 또는 예약 작업 설정에서 사용 가능한 모델과 제공자를 다시 선택한 후 재시도하세요.",
+      "scheduledCodexRouteMismatch": "연결된 작업의 Codex 연결이 선택한 모델 및 제공자와 일치하지 않습니다. 예약 작업 설정을 확인하거나 새 작업을 연결한 후 재시도하세요.",
       "retryTitle": "마지막 메시지 다시 보내기",
       "cancelTitle": "오류 알림 닫기",
       "retry": "다시 시도",

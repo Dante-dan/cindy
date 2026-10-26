@@ -49,3 +49,14 @@ export const ERROR_REASON_I18N_KEYS: Record<string, string> = {
     'chat.errorBanner.claudeSubscriptionOpusPlanMismatch',
   [GATEWAY_PROXY_TOKEN_INVALID_REASON]: 'chat.errorBanner.gatewayProxyTokenInvalidNoRetry',
 };
+
+/** Legacy IPC and scheduler errors carry the local route diagnosis only in their message. */
+export function modelRouteErrorI18nKey(message: string): string | undefined {
+  if (/provider "[^"\r\n]*" is unavailable; select an available provider before sending/.test(message)) {
+    return 'chat.errorBanner.routeProviderUnavailable';
+  }
+  if (/queued heartbeat Codex thread provider identity does not match the (?:current|target) session route/.test(message)) {
+    return 'chat.errorBanner.scheduledCodexRouteMismatch';
+  }
+  return undefined;
+}

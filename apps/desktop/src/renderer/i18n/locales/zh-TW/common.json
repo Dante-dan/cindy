@@ -11484,6 +11484,8 @@
     "errorBanner": {
       "requestFormatError": "應用程式送出的請求格式有誤，本次回覆未能完成。",
       "replyFailed": "回覆未完成",
+      "routeProviderUnavailable": "所選供應商目前無法使用。請在任務或定時任務設定中重新選擇可用的模型和供應商，再重試。",
+      "scheduledCodexRouteMismatch": "綁定任務的 Codex 連線與目前模型、供應商設定不一致。請檢查定時任務設定，或綁定一個新任務後重試。",
       "retryTitle": "重新傳送最後一條訊息",
       "cancelTitle": "關閉錯誤提示",
       "retry": "重試",

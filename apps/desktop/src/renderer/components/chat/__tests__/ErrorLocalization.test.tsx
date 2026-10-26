@@ -75,6 +75,33 @@ it('appends the diagnosis prompt to an unsent new-task draft instead of replacin
 });
 
 describe.each(SUPPORTED_LOCALES)('error presentation in %s', locale => {
+  // Production: live/tail/persisted error components must expose local route recovery,
+  // not generic turn failure (#6709). Existing cases omit pre-provider/scheduler errors.
+  // Minimal inputs: an unavailable explicit provider or queued Codex route mismatch;
+  // unit tier, no IPC, provider call, relink or schedule mutation.
+  it.each(['live', 'tail', 'history'] as const)('explains route configuration failures in %s without dispatching recovery', async surface => {
+    const i18n = createInstance();
+    await i18n.init({ lng: locale, fallbackLng: 'en', resources: Object.fromEntries(Object.entries(locales).map(([lng, common]) => [lng, { translation: common }])) });
+    const retry = vi.fn();
+    const cases = [
+      { raw: '[INVALID_PARAMS] provider "private-provider" is unavailable; select an available provider before sending', key: 'routeProviderUnavailable' },
+      { raw: 'queued heartbeat Codex thread provider identity does not match the current session route (session "private-session")', key: 'scheduledCodexRouteMismatch' },
+    ];
+    for (const { raw, key } of cases) {
+      render(<I18nextProvider i18n={i18n}>{surface === 'live'
+        ? <ErrorBanner error={raw} errorReason="turn-failed" onRetry={retry} />
+        : surface === 'tail'
+          ? <ErrorTailErrorBanner errorText={raw} errorReason="turn-failed" onContinue={retry} onDismiss={vi.fn()} />
+          : <ErrorMessageCard message={raw} reason="turn-failed" />}</I18nextProvider>);
+      expect(screen.getByText(i18n.t(`chat.errorBanner.${key}`))).toBeTruthy();
+      expect(screen.queryByText(raw)).toBeNull();
+      expect(retry).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByText(i18n.t('chat.errorBanner.networkShowRaw')));
+      expect(screen.getByText(raw)).toBeTruthy();
+      cleanup();
+    }
+  });
+
   it('keeps the localized blocked-input fallback visible instead of a reply-failure summary', async () => {
     const i18n = createInstance();
     await i18n.init({ lng: locale, fallbackLng: 'en', resources: Object.fromEntries(Object.entries(locales).map(([lng, common]) => [lng, { translation: common }])) });

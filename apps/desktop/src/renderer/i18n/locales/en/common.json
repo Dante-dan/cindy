@@ -11529,6 +11529,8 @@
     "errorBanner": {
       "requestFormatError": "The app sent an invalid request, so this reply could not be completed.",
       "replyFailed": "Could not complete the reply",
+      "routeProviderUnavailable": "The selected provider is unavailable. Choose an available model and provider in the task or scheduled task settings, then retry.",
+      "scheduledCodexRouteMismatch": "The bound task’s Codex connection does not match the selected model and provider. Check the scheduled task settings or bind a new task, then retry.",
       "retryTitle": "Resend the last message",
       "cancelTitle": "Dismiss error",
       "retry": "Retry",

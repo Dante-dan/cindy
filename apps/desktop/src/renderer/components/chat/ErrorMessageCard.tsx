@@ -25,7 +25,7 @@ import {
 import { isStreamInterruptedErrorMessage } from '@/utils/streamInterruptError';
 import { chatRemoteErrorGuidanceKey } from '../../lib/autoReviewUnavailableGuidance';
 import { decodeRemoteErrorMessage, remoteErrorI18nKey } from '../../lib/makerChatStore';
-import { ERROR_REASON_I18N_KEYS } from './errorReasonI18n';
+import { ERROR_REASON_I18N_KEYS, modelRouteErrorI18nKey } from './errorReasonI18n';
 import { getToolLoopI18nKey } from './toolLoopI18n';
 import type { ToolLoopErrorDetails } from '@cindy/maker-core';
 
@@ -54,7 +54,8 @@ export function ErrorMessageCard({
     ? chatRemoteErrorGuidanceKey('AUTO_REVIEW_UNAVAILABLE', sessionSource)
     : parsedRemoteKey;
   const remoteGuidance = remoteKey && i18n.exists(remoteKey) ? t(remoteKey) : undefined;
-  const i18nKey = reason ? ERROR_REASON_I18N_KEYS[reason] : undefined;
+  const i18nKey = modelRouteErrorI18nKey(decoded)
+    ?? (reason ? ERROR_REASON_I18N_KEYS[reason] : undefined);
   const isStreamInterrupted = isStreamInterruptedErrorMessage(message, reason);
   const isGatewayProxyTokenInvalid = isCindyGatewayProxyTokenInvalidError({
     reason,

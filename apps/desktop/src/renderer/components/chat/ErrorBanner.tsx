@@ -54,7 +54,7 @@ import {
 import { isQuotaExhaustedErrorMessage } from '@/utils/quotaError';
 import { parseTerminalRateLimitRetryProgress } from '@/utils/rateLimitRetry';
 import type { UsageLimitRecoveryHint } from '@/lib/usageLimitRecovery';
-import { ERROR_REASON_I18N_KEYS } from './errorReasonI18n';
+import { ERROR_REASON_I18N_KEYS, modelRouteErrorI18nKey } from './errorReasonI18n';
 import { getToolLoopI18nKey } from './toolLoopI18n';
 import {
   CLAUDE_GATEWAY_OPUS_PLAN_MISMATCH_REASON,
@@ -349,7 +349,8 @@ export function ErrorBanner({
   const isOverloadError = isOverloadErrorMessage(error, undefined, errorReason);
   const isStreamInterrupted = isStreamInterruptedErrorMessage(error, errorReason);
   const overloadRetryProgress = parseOverloadRetryProgress(error);
-  const errorReasonI18nKey = errorReason ? ERROR_REASON_I18N_KEYS[errorReason] : undefined;
+  const errorReasonI18nKey = modelRouteErrorI18nKey(error)
+    ?? (errorReason ? ERROR_REASON_I18N_KEYS[errorReason] : undefined);
   const toolLoopI18nKey =
     errorReason === 'tool_use_loop_detected' ? getToolLoopI18nKey(toolLoop) : undefined;
   const localizedReasonError =
