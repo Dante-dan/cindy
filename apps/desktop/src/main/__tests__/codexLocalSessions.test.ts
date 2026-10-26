@@ -1514,10 +1514,12 @@ describe('prepareExternalCodexSessionForResume orphan rollout synthesis', () => 
   // Existing adoption fixtures use abbreviated dates and never enforce that RPC
   // contract. Minimal unit input: a canonical external rollout or its old private
   // adopted alias plus one thread row; all files live in the existing temp fixture.
-  it.each(['external', 'previously-adopted'])('returns a canonical resume path for %s history (#6736)', async (kind) => {
+  it.each(['external', 'previously-adopted', 'repeatedly-adopted'])('returns a canonical resume path for %s history (#6736)', async (kind) => {
     const name = `rollout-2026-10-22T01-00-00-${threadId}.jsonl`;
     const sourceHome = kind === 'external' ? externalHome : desktopHome();
-    const sourcePath = path.join(sourceHome, 'sessions', kind === 'external' ? name : `rollout-cindy-adopted-${name}`);
+    const sourcePath = path.join(sourceHome, 'sessions', kind === 'external' ? name
+      : kind === 'repeatedly-adopted' ? `rollout-cindy-adopted-2-rollout-cindy-adopted-${name}`
+        : `rollout-cindy-adopted-${name}`);
     const contents = `${JSON.stringify({ type: 'session_meta', payload: { id: threadId, cwd: '/tmp/project' } })}\n`;
     fs.mkdirSync(path.dirname(sourcePath), { recursive: true });
     fs.writeFileSync(sourcePath, contents);
@@ -1579,6 +1581,42 @@ describe('prepareExternalCodexSessionForResume orphan rollout synthesis', () => 
     expect(fs.readFileSync(canonical, 'utf8')).toBe('different native history');
     const db = new Database(dbPath, { readonly: true });
     expect(db.prepare('SELECT rollout_path AS path FROM threads WHERE id = ?').get(threadId)).toEqual({ path: adopted });
+    db.close();
+  });
+
+  // Greptile P1: an existing native writer may append between the SQLite CAS
+  // checks. Renaming that same inode must retain the append, not block resume.
+  // Unit gap: prior tests appended only after prepareResume had already returned.
+  it('keeps a native append during adopted-name state handoff (#6736)', () => {
+    const home = desktopHome();
+    const name = `rollout-2026-10-22T01-00-00-${threadId}.jsonl`;
+    const adopted = path.join(home, 'sessions', `rollout-cindy-adopted-${name}`);
+    const canonical = path.join(home, 'sessions', name);
+    fs.mkdirSync(path.dirname(adopted), { recursive: true });
+    fs.writeFileSync(adopted, 'authoritative history\n');
+    const dbPath = createStateDb(home);
+    insertThread(dbPath, threadId, adopted, { updatedAt: 2_000 });
+    const prepare = Database.prototype.prepare;
+    let appended = false;
+    const prepareSpy = vi.spyOn(Database.prototype, 'prepare').mockImplementation(function (this: Database.Database, ...args) {
+      const statement = prepare.apply(this, args);
+      if (!appended && args[0] === 'UPDATE threads SET rollout_path = ? WHERE id = ? AND rollout_path = ?') {
+        appended = true;
+        fs.appendFileSync(adopted, 'late native append\n');
+      }
+      return statement;
+    });
+
+    try {
+      expect(normalizeAdoptedCodexRolloutForResume(threadId, adopted, home)).toBe(canonical);
+      expect(appended).toBe(true);
+      expect(fs.readFileSync(canonical, 'utf8')).toBe('authoritative history\nlate native append\n');
+      expect(fs.statSync(canonical).ino).toBe(fs.statSync(adopted).ino);
+    } finally {
+      prepareSpy.mockRestore();
+    }
+    const db = new Database(dbPath, { readonly: true });
+    expect(db.prepare('SELECT rollout_path AS path FROM threads WHERE id = ?').get(threadId)).toEqual({ path: canonical });
     db.close();
   });
 
