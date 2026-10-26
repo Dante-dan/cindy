@@ -7,6 +7,7 @@ vi.mock('../../cindy-media/ledger.js', () => ({ sessionCanRead: f.canRead }));
 vi.mock('../../cindy-media/blobStore.js', async original => ({ ...await original<typeof import('../../cindy-media/blobStore.js')>(), resolveSafe: f.resolve }));
 vi.mock('../../localDb/client/current.js', () => ({ getDbClient: () => ({ drizzle: f.db }) }));
 import { prepareChatReplyImages } from '../chatServerReplyImages.js';
+import { mergeChatReplyAttachments } from '../chatServerReplyAttachments.js';
 const url = `cindy-media://blobs/${'a'.repeat(64)}.png`;
 // Unit: public preparation entry; fake ledger/files isolate authorization and
 // Markdown collection from settlement. Actual task importer has its own tests.
@@ -37,6 +38,23 @@ describe('generated reply image attachments', () => {
     expect(result.attachments).toEqual([expect.objectContaining({ url, category: 'image', path: null })]);
     expect(result.text).toBe(block);
     expect(f.canRead).toHaveBeenCalledExactlyOnceWith('a'.repeat(64), 'lane', f.db);
+  });
+  // Unit regression for review r4374366427 (#6892): preparation + merge must
+  // preserve visible attachment order. Existing cases only cover each image
+  // syntax separately; a component followed by Markdown/file is the minimum failure.
+  it.each([false, true])('keeps mixed component, Markdown and file order (import=%s)', async imported => {
+    const second = `cindy-media://blobs/${'b'.repeat(64)}.png`;
+    const local = 'xdt-image:///task/chart.png';
+    const block = '```cindy-ui\n' + JSON.stringify({ version: 1, seq: 1, op: 'create', id: 'image', kind: 'image', props: { src: url } }) + '\n```';
+    const markdown = `![chart](${imported ? local : second})`;
+    const source = imported ? `${markdown}\n${block}\nreport` : `${block}\n${markdown}\nreport`;
+    if (imported) f.materialize.mockResolvedValue({ text: source.replace(local, second), replacements: new Map([[local, second]]), failures: [] });
+    const result = await prepareChatReplyImages(source, 'lane', vi.fn());
+    const file = { id: 'report', name: 'report.pdf', category: 'file' as const, mimeType: 'application/pdf', size: 3,
+      url: null, path: null, sourceOffset: source.indexOf('report') };
+    expect(mergeChatReplyAttachments(result.attachments, [file]).map(a => a.id)).toEqual(imported
+      ? [second, url, 'report'] : [url, second, 'report']);
+    expect(result.attachments.find(a => a.url === url)?.sourceOffset).toBe(source.indexOf('```cindy-ui'));
   });
   it('does not collect component examples or non-image nodes', async () => {
     const node = JSON.stringify({ version: 1, seq: 1, op: 'create', id: 'image', kind: 'image', props: { src: url } });

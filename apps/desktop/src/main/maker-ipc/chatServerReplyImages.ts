@@ -18,6 +18,7 @@ export async function prepareChatReplyImages(text: string, sessionId: string, as
   authorizedFiles: ChatUploadAttachment[] = []) {
   assertCurrent();
   const originalImages = taskImageReferences(text);
+  const originalRichParts = splitRichAnswer(text);
   const localSources = new Map<string, string>();
   for (const ref of originalImages) {
     const local = localTaskImagePath(ref.url);
@@ -72,7 +73,7 @@ export async function prepareChatReplyImages(text: string, sessionId: string, as
   const attachments: ChatUploadAttachment[] = [];
   const delivered = new Map<string, string>();
   const urls = taskImageReferences(text).map(ref => ref.url);
-  for (const part of splitRichAnswer(text)) {
+  for (const part of originalRichParts) {
     if (part.kind !== 'rich') continue;
     const doc = new RichAnswerStream().update(part.source, true);
     if (doc.issues) continue;
@@ -80,7 +81,12 @@ export async function prepareChatReplyImages(text: string, sessionId: string, as
     const visit = (id: string) => {
       const node = doc.nodes.get(id);
       if (!node) return;
-      if (node.kind === 'image' && typeof node.props.src === 'string') urls.push(node.props.src);
+      if (node.kind === 'image' && typeof node.props.src === 'string') {
+        const url = node.props.src;
+        urls.push(url);
+        // Use the original fence position, before Markdown imports can change URL lengths.
+        positions.set(url, Math.min(positions.get(url) ?? Infinity, part.key));
+      }
       node.children.forEach(visit);
     };
     doc.roots.forEach(visit);
