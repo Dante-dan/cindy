@@ -26,6 +26,31 @@ describe('generated reply image attachments', () => {
     expect(result.attachments).toEqual([expect.objectContaining({ url, path: null, category: 'image', size: 3 })]);
     expect(f.canRead).toHaveBeenCalledExactlyOnceWith('a'.repeat(64), 'lane', f.db);
   });
+  // #6892: component images must reach the same authorized attachment path as Markdown.
+  it('delivers final component images and keeps component descriptions', async () => {
+    const block = '```cindy-ui\n' + [
+      { version: 1, seq: 1, op: 'create', id: 'root', kind: 'stack' },
+      { version: 1, seq: 2, op: 'create', id: 'image', parent: 'root', kind: 'image', props: { src: 'cindy-media://blobs/old.png', alt: 'Diagram' } },
+      { version: 1, seq: 3, op: 'patch', id: 'image', props: { src: url } },
+    ].map(node => JSON.stringify(node)).join('\n') + '\n```';
+    const result = await prepareChatReplyImages(block, 'lane', vi.fn());
+    expect(result.attachments).toEqual([expect.objectContaining({ url, category: 'image', path: null })]);
+    expect(result.text).toBe(block);
+    expect(f.canRead).toHaveBeenCalledExactlyOnceWith('a'.repeat(64), 'lane', f.db);
+  });
+  it('does not collect component examples or non-image nodes', async () => {
+    const node = JSON.stringify({ version: 1, seq: 1, op: 'create', id: 'image', kind: 'image', props: { src: url } });
+    const text = '````md\n```cindy-ui\n' + node + '\n```\n````\n' +
+      '```cindy-ui\n' + node.replace('"kind":"image"', '"kind":"video"') + '\n```';
+    expect(await prepareChatReplyImages(text, 'lane', vi.fn())).toEqual({ text, attachments: [] });
+    expect(f.canRead).not.toHaveBeenCalled();
+  });
+  it.each(['foreign', 'oversized'])('refuses %s component image delivery', async kind => {
+    if (kind === 'foreign') f.canRead.mockResolvedValue(false);
+    else f.stat.mockResolvedValue({ isFile: () => true, size: 100 * 1024 * 1024 + 1 });
+    const text = '```cindy-ui\n' + JSON.stringify({ version: 1, seq: 1, op: 'create', id: 'image', kind: 'image', props: { src: url } }) + '\n```';
+    await expect(prepareChatReplyImages(text, 'lane', vi.fn())).rejects.toThrow('ATTACHMENT_UNAVAILABLE');
+  });
   it('retains original positions when importing images changes URL lengths', async () => {
     const local = 'xdt-image:///task/chart.png';
     const second = `cindy-media://blobs/${'b'.repeat(64)}.png`;

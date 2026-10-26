@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { RichAnswerStream, splitRichAnswer } from '@cindy/maker-shared/rich-answer';
 import { BOT_GROUP_ATTACHMENTS_MAX } from '../../shared/botGroupChat.js';
 import { parseBlobUrl, resolveSafe } from '../cindy-media/blobStore.js';
 import { sessionCanRead } from '../cindy-media/ledger.js';
@@ -70,21 +71,35 @@ export async function prepareChatReplyImages(text: string, sessionId: string, as
   }
   const attachments: ChatUploadAttachment[] = [];
   const delivered = new Map<string, string>();
-  for (const ref of taskImageReferences(text)) {
-    if (!/^(cindy-media|xdt-image):\/\//.test(ref.url) || delivered.has(ref.url)) continue;
-    const blob = parseBlobUrl(ref.url);
+  const urls = taskImageReferences(text).map(ref => ref.url);
+  for (const part of splitRichAnswer(text)) {
+    if (part.kind !== 'rich') continue;
+    const doc = new RichAnswerStream().update(part.source, true);
+    if (doc.issues) continue;
+    // Only the final visible tree is delivered: patches and removals can replace images.
+    const visit = (id: string) => {
+      const node = doc.nodes.get(id);
+      if (!node) return;
+      if (node.kind === 'image' && typeof node.props.src === 'string') urls.push(node.props.src);
+      node.children.forEach(visit);
+    };
+    doc.roots.forEach(visit);
+  }
+  for (const url of urls) {
+    if (!/^(cindy-media|xdt-image):\/\//.test(url) || delivered.has(url)) continue;
+    const blob = parseBlobUrl(url);
     if (!blob || attachments.length >= BOT_GROUP_ATTACHMENTS_MAX
       || !await sessionCanRead(blob.hash, sessionId, getDbClient().drizzle)) throw new Error('ATTACHMENT_UNAVAILABLE');
     assertCurrent();
-    const image = resolveSafe(ref.url);
+    const image = resolveSafe(url);
     if (!image.mimeType.startsWith('image/')) throw new Error('ATTACHMENT_UNAVAILABLE');
     const stat = await fs.stat(image.absPath);
     assertCurrent();
     if (!stat.isFile() || stat.size <= 0 || stat.size > 100 * 1024 * 1024) throw new Error('ATTACHMENT_UNAVAILABLE');
-    attachments.push({ id: ref.url, sourceOffset: positions.get(ref.url), name: path.basename(image.absPath), category: 'image',
-      sourcePaths: [...sources.get(ref.url) ?? []],
-      mimeType: image.mimeType, size: stat.size, url: ref.url, path: null });
-    delivered.set(ref.url, ref.url);
+    attachments.push({ id: url, sourceOffset: positions.get(url), name: path.basename(image.absPath), category: 'image',
+      sourcePaths: [...sources.get(url) ?? []],
+      mimeType: image.mimeType, size: stat.size, url, path: null });
+    delivered.set(url, url);
   }
   return { attachments, text: rewriteTaskImageReferences(text, delivered, imageLabel) };
 }
