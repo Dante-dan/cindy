@@ -328,6 +328,40 @@ describe('Claude Code translator silent-stop observation (log only)', () => {
     expect(doneSilentStopFlag(events)).toBeUndefined();
   });
 
+  it.each([
+    { type: 'thinking', thinking: '', signature: 'sig' },
+    { type: 'redacted_thinking', data: 'redacted' },
+  ])(
+    'does NOT mark a tool turn that delivered an answer before trailing $type (#7222)',
+    async (block) => {
+      const tracker = new UsageTracker();
+      const queue = createAsyncQueue<AgentEvent>();
+      const ctx = createCtx(tracker);
+
+      pushToolUseMessage(queue, ctx);
+      translateSdkMessage(
+        { type: 'assistant', message: { content: [{ type: 'text', text: '任务已完成。' }] } },
+        queue,
+        ctx,
+      );
+      translateSdkMessage(
+        { type: 'assistant', message: { content: [block] } },
+        queue,
+        ctx,
+      );
+      translateSdkMessage(
+        { type: 'result', stop_reason: 'end_turn', total_cost_usd: 0.1, usage: NON_EMPTY_USAGE },
+        queue,
+        ctx,
+      );
+
+      const events = await drain(queue);
+      expect(events.some((event) => event.type === 'text' && (event.data as { text?: string }).text === '任务已完成。')).toBe(true);
+      expect(silentStopWarned(ctx)).toBe(false);
+      expect(doneSilentStopFlag(events)).toBeUndefined();
+    },
+  );
+
   it('treats unknown assistant blocks as substance instead of auto-resuming them', async () => {
     const tracker = new UsageTracker();
     const queue = createAsyncQueue<AgentEvent>();
