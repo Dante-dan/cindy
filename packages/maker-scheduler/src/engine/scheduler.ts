@@ -1511,6 +1511,9 @@ export class Scheduler extends EventEmitter {
           merged.intervalMs !== undefined
             ? now + merged.intervalMs
             : nextCronOrMonthlyFire(merged.cronExpr, now, merged.timezone);
+        // A new one-shot appointment must survive startup's consumed check.
+        // Run rows retain history; ordinary metadata edits do not re-arm it.
+        if (!merged.recurring) updates.lastFiredAt = undefined;
       }
       recomputeFromTo = { from: existing.nextFireAt, to: updates.nextFireAt };
     }
@@ -1584,6 +1587,9 @@ export class Scheduler extends EventEmitter {
       status: 'active',
       updatedAt: now,
       nextFireAt: next,
+      // Explicit resume starts a new one-shot; retaining the previous consumed
+      // marker would erase this appointment at the next cold start (#7173).
+      ...(!existing.recurring && !existing.manual ? { lastFiredAt: undefined } : {}),
     });
     if (!updated) throw new Error(`Schedule not found: ${id}`);
     this.invalidScheduleIds.delete(id);
