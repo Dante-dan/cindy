@@ -11851,6 +11851,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     clientId?: string;
     dispatcherSessionId?: string;
     title?: string;
+    /** Host-captured caller first line, before original-words wrapping. */
+    fallbackTitle?: string;
     useWorktree?: boolean;
     /** create 分支可选:新 session 的工作目录覆盖(绝对路径,须已存在;jump 忽略)。#811 */
     workingDir?: string;
@@ -12131,7 +12133,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           }
           inherited = createDefaults!;
         }
-        const newTitle = title?.trim() || message.split('\n')[0].slice(0, 60);
+        const newTitle = title?.trim() || (params.fallbackTitle ?? message.split('\n')[0].slice(0, 60));
         const createOpts = buildCreateOptsWithStderr({
           ...(handoffWorktree ? { id: handoffWorktree.sessionId } : {}),
           agentKind: inherited.agentKind,
@@ -17346,6 +17348,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     getSessionRuntime: (params) => sessionControlService.getSessionRuntime(params),
     setSessionRuntime: (params) => sessionControlService.setSessionRuntime(params),
     sendToSession: async (params) => {
+      const fallbackTitle = params.message.split('\n')[0].slice(0, 60);
       // A script follow-up may name a companion as its dispatcher while no
       // owner turn is active. Never quote that companion's stale last input.
       const request: CapturedAgentRequest = params[AUTO_REVIEW_DELEGATED_CONTINUATION]
@@ -17368,6 +17371,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       }
       return sendToSessionInternal({
         ...params,
+        fallbackTitle,
         autoReviewUserText: request.autoReviewUserText,
         ...(classification.delegatedContinuation || (params.targetSessionId && params[AUTO_REVIEW_DELEGATED_CONTINUATION])
           ? { autoReviewUserText: { ...request.autoReviewUserText, kind: 'delegated-continuation' as const } } : {}),
