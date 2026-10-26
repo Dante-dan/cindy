@@ -127,7 +127,7 @@ export function WechatBotSection({
       title={t('settings.wechatBot.title')}
       description={t('settings.wechatBot.description')}
       routeSummary={
-        companion ? (assigned === companion.id ? companion.name : null)
+        companion ? null
           : assigned ? t('settings.wechatBot.companion.assigned')
             : routeSummary ? `${t(`settings.imBot.defaults.agents.${routeSummary.agentKind}`)} · ${routeSummary.model}` : null
       }
