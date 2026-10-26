@@ -9,6 +9,7 @@ import { SessionTurnActivityTracker } from '../sessionTurnActivityTracker.js';
 import { ProductTurnWallClockTracker, ProductTurnUsageTargetTracker } from '../turnWallClock.js';
 import { ClaudeOutputLagTimingGuard } from '../../usage/modelUsageDelta.js';
 import { createWorkerTurnStartSequencer } from '../workerTurnStartSequencer.js';
+import { createOrcaTeamService, type OrcaTeamServiceDeps } from '../orcaTeamService.js';
 
 const effects = vi.hoisted(() => {
   const calls: string[] = [];
@@ -389,6 +390,60 @@ function ordered(...names: string[]) {
 }
 
 describe('production Session event pipeline', () => {
+  it.each([
+    ['actual worker output', 'actual worker output'],
+    ['', 'original terminal failure'],
+  ])('does not treat a runtime recovery notice as worker output (prior text=%j)', async (priorText, expectedText) => {
+    setMainLocale('en');
+    const recoveryText = 'Pi extensions could not be refreshed. Restart Cindy before using Pi again.';
+    const h = harness();
+    const worker = {
+      id: 'worker', sessionId: 'task', leadSessionId: 'lead', teamId: 'team',
+      status: 'idle', label: 'worker', role: 'worker', focused: false, idleSince: null,
+      session: { title: 'Worker', agentKind: 'pi', model: 'test', effort: 'medium', permissionMode: 'auto', fastMode: false },
+    };
+    const leadMessages: string[] = [];
+    const service = createOrcaTeamService({
+      getWorkerLinkBySessionId: async () => ({ workerId: 'worker', workerSessionId: 'task', leadSessionId: 'lead', teamId: 'team' }),
+      listWorkersByLead: async () => [worker], getLiveSession: () => null,
+      resumeWorkerSession: async () => {},
+      updateWorkerStatus: async (_id: string, status: string) => { worker.status = status; },
+      getManualInterrupt: () => null, clearManualInterrupt: () => {},
+      broadcastOrcaWorkerChanged: () => {},
+      dispatchWorkerMessage: async (params: { onAccepted?: () => Promise<void>; dispatchMeta: { source: string } }) => {
+        await params.onAccepted?.();
+        return { ok: true, mode: 'dispatched', clientId: 'input', dispatchOutcome: { kind: 'session-dispatch', source: params.dispatchMeta.source, dispatched: true }, targetTitle: 'Worker', targetLastUserSendAt: null };
+      },
+      sendAutoBridgeToLead: async (_lead: string, message: string) => { leadMessages.push(message); return { accepted: true }; },
+      log: h.deps.log,
+    } as unknown as OrcaTeamServiceDeps);
+    Object.assign(h.deps.orcaTeamServiceForEvents, service);
+    await service.sendToWorker({ callerLeadSessionId: 'lead', targetSessionId: 'task', message: 'task' });
+    const started = deferred();
+    h.deps.workerTurnStartSequencer.start('task', () => started.promise);
+    if (priorText) h.emit(event('text', { text: priorText, isFinal: true }));
+    h.emit(event('error', { message: 'original terminal failure', terminal: true }));
+    await microtasks();
+    expect(leadMessages).toEqual([]);
+    const progressCalls = h.deps.interruptedTurnAutoResumeGuard.noteProgress.mock.calls.length;
+    h.session.onRuntimeRecovery(h.emit);
+    vi.mocked(h.handle.close).mockRejectedValueOnce(new Error('injected retire failure'));
+    await expect(h.session.closeAfterCurrentTurn({
+      failureEvent: () => event('text', { text: 'host recovery notice', isFinal: true }, { source: 'pi' }),
+    })).rejects.toThrow('injected retire failure');
+    expect(h.deps.interruptedTurnAutoResumeGuard.noteProgress).toHaveBeenCalledTimes(progressCalls);
+    expect(effects.fn('onAssistantTextEvent')).toHaveBeenCalledWith(
+      'task', expect.objectContaining({ text: recoveryText }), null,
+    );
+    expect(h.deps.broadcastToAllWindows).toHaveBeenCalledWith(
+      expect.anything(), expect.objectContaining({ event: expect.objectContaining({ runtimeRecovery: true }) }),
+    );
+    started.resolve();
+    await microtasks();
+    expect(leadMessages).toEqual([`[Auto-bridged: worker 异常终止]\n\n${expectedText}`]);
+    h.activity.deleteSession('task');
+  });
+
   it.each([
     ['zh-CN', 'Pi 扩展未能完成刷新。请重启 Cindy 后再使用 Pi。'],
     ['zh-TW', 'Pi 擴充功能未能完成重新整理。請重新啟動 Cindy 後再使用 Pi。'],

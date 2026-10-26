@@ -34,7 +34,11 @@ export function persistSessionStreamEvent(
   let resolvedContent: string | undefined;
   if (event.type === 'text') {
     const td = event.data as { text?: unknown; isFinal?: unknown; isFullText?: unknown } | null;
-    if (typeof td?.text === 'string') {
+    // Host-owned recovery notices are assistant-visible and must still be
+    // persisted/broadcast, but they are not worker output. Capturing one here
+    // can replace the worker's real terminal result while auto-bridge waits
+    // for the turn-start sequencer to settle.
+    if (typeof td?.text === 'string' && event.runtimeRecovery !== true) {
       deps.orcaTeamServiceForEvents?.captureWorkerText(session.id, td.text, {
         isFinal: td.isFinal === true,
       });
