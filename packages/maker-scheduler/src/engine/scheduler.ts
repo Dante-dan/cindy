@@ -1512,8 +1512,14 @@ export class Scheduler extends EventEmitter {
             ? now + merged.intervalMs
             : nextCronOrMonthlyFire(merged.cronExpr, now, merged.timezone);
         // A new one-shot appointment must survive startup's consumed check.
-        // Run rows retain history; ordinary metadata edits do not re-arm it.
-        if (!merged.recurring) updates.lastFiredAt = undefined;
+        // Forms echo scheduling fields even for metadata edits. Only actual
+        // value changes re-arm it; run rows retain history.
+        const schedulingChanged =
+          merged.cronExpr !== existing.cronExpr ||
+          merged.timezone !== existing.timezone ||
+          merged.manual !== existing.manual ||
+          merged.intervalMs !== existing.intervalMs;
+        if (!merged.recurring && schedulingChanged) updates.lastFiredAt = undefined;
       }
       recomputeFromTo = { from: existing.nextFireAt, to: updates.nextFireAt };
     }

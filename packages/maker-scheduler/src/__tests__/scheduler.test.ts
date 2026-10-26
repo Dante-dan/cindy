@@ -668,6 +668,39 @@ describe('Scheduler', () => {
     },
   );
 
+  // PR #7190 P1: the desktop form echoes all scheduling fields on a prompt edit.
+  // Existing re-arm coverage changes cron/resumes; it does not cover unchanged
+  // full-form updates after runNow. Unit tier, public lifecycle + persisted state.
+  it.each([undefined, 60_000])(
+    'keeps a one-shot consumed after a full-form metadata edit (intervalMs=%s)',
+    async (intervalMs) => {
+      const sch = await h.scheduler.create({ ...baseInput, recurring: false, intervalMs });
+      await h.scheduler.runNow(sch.id);
+      const consumed = (await h.storage.get(sch.id))!;
+      const history = await h.scheduler.listRuns(sch.id);
+      await h.scheduler.update(sch.id, {
+        prompt: 'updated prompt',
+        cronExpr: consumed.cronExpr,
+        timezone: consumed.timezone,
+        manual: consumed.manual,
+        intervalMs: consumed.intervalMs,
+      });
+      expect((await h.storage.get(sch.id))?.lastFiredAt).toBe(consumed.lastFiredAt);
+      await h.scheduler.stop();
+      const restarted = makeHarness({ storage: h.storage, clock: h.clock });
+      await restarted.scheduler.start();
+      try {
+        expect((await h.storage.get(sch.id))?.nextFireAt).toBeUndefined();
+        h.clock.advance(120_000);
+        await restarted.scheduler.tick();
+        expect(restarted.runner.fire).not.toHaveBeenCalled();
+        expect(await restarted.scheduler.listRuns(sch.id)).toEqual(history);
+      } finally {
+        await restarted.scheduler.stop();
+      }
+    },
+  );
+
   it('paused schedule is not fired', async () => {
     const sch = await h.scheduler.create({ ...baseInput });
     await h.scheduler.pause(sch.id);
