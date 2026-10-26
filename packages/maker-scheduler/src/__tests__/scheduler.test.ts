@@ -631,6 +631,43 @@ describe('Scheduler', () => {
     expect(h.runner.fire).toHaveBeenCalledTimes(1);
   });
 
+  // #7173: existing resume coverage never consumed a one-shot before restart.
+  // Public lifecycle + persisted memory storage, fake clock and runner boundary.
+  it.each(['edit and resume', 'resume', 'edit after runNow'] as const)(
+    're-arms a consumed one-shot across restart via %s without losing run history',
+    async (mode) => {
+      const sch = await h.scheduler.create({ ...baseInput, recurring: false });
+      h.clock.setTo(Date.UTC(2026, 0, 1, 0, 1, 5));
+      if (mode === 'edit after runNow') await h.scheduler.runNow(sch.id);
+      else await h.scheduler.tick();
+      const history = await h.scheduler.listRuns(sch.id);
+      expect(history).toHaveLength(1);
+      if (mode !== 'resume') await h.scheduler.update(sch.id, { cronExpr: '3 * * * *' });
+      if (mode !== 'edit after runNow') await h.scheduler.resume(sch.id);
+      const next = (await h.storage.get(sch.id))!.nextFireAt!;
+      expect(next).toBeGreaterThan(h.clock.now());
+      await h.scheduler.stop();
+      const restarted = makeHarness({ storage: h.storage, clock: h.clock });
+      await restarted.scheduler.start();
+      try {
+        expect((await h.storage.get(sch.id))?.nextFireAt).toBe(next);
+        expect(await restarted.scheduler.listRuns(sch.id)).toEqual(history);
+        await restarted.scheduler.tick();
+        expect(restarted.runner.fire).not.toHaveBeenCalled();
+        h.clock.setTo(next);
+        await restarted.scheduler.tick();
+        expect(restarted.runner.fire).toHaveBeenCalledTimes(1);
+        expect((await h.storage.get(sch.id))?.status).toBe('expired');
+        h.clock.advance(60_000);
+        await restarted.scheduler.tick();
+        expect(restarted.runner.fire).toHaveBeenCalledTimes(1);
+        expect(await restarted.scheduler.listRuns(sch.id)).toHaveLength(2);
+      } finally {
+        await restarted.scheduler.stop();
+      }
+    },
+  );
+
   it('paused schedule is not fired', async () => {
     const sch = await h.scheduler.create({ ...baseInput });
     await h.scheduler.pause(sch.id);
