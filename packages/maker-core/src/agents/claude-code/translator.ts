@@ -1120,23 +1120,26 @@ function handleSystem(
     // 只透出已有本地化的过载与连接错误；没有 HTTP 状态的 SDK 重试
     // （包括 unknown / timeout）也走现有 connection error 文案，避免长回合静默。
     // 429、500 等其它 HTTP 错误保持静默，不能把裸 SDK 英文透给用户。
+    const overloadRetry =
+      parseOverloadError(`${sdkError} ${statusLabel}`, msg.error_status ?? undefined) !== null;
     const visibleRetry =
       typeof msg.attempt === 'number' &&
       typeof msg.max_retries === 'number' &&
       msg.attempt >= 2 &&
-      (msg.error_status == null ||
-        parseOverloadError(`${sdkError} ${statusLabel}`, msg.error_status) !== null);
+      (msg.error_status == null || overloadRetry);
     if (visibleRetry) {
       queue.push({
         type: 'error',
         data: {
-          // 进度用 `(auto-retry N/M)` 后缀编码，与 Codex 侧同一套跨 agent 协议，
-          // renderer 只需一份解析。原始状态留在正文里供分类与折叠查看。
-          message: formatOverloadRetryMessage(
-            `SDK API request failed: ${sdkError} (${statusLabel})`,
-            msg.attempt as number,
-            msg.max_retries as number,
-          ),
+          // Mobile / Telegram treat the auto-retry suffix as model overload.
+          // Non-overload SDK retries use the existing connection progress protocol.
+          message: overloadRetry
+            ? formatOverloadRetryMessage(
+                `SDK API request failed: ${sdkError} (${statusLabel})`,
+                msg.attempt as number,
+                msg.max_retries as number,
+              )
+            : `Reconnecting... ${msg.attempt}/${msg.max_retries}`,
           isTerminal: false,
           willRetry: true,
           ...(msg.error_status != null ? { errorStatus: msg.error_status } : {}),
