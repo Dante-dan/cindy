@@ -283,6 +283,32 @@ it('advances an accepted send_to_session with a dispatcher without touching huma
 // Execute that production closure with the real restore scope (unit behavior in
 // this existing guard fixture); assert the route used to send, not call strings.
 describe('companion internal delivery after automation', () => {
+  // #7209, guard: a host-authenticated room owner is explicit input, but an
+  // automatic Bot delivery must not silently release restored user drafts.
+  it('carries the cloud-room owner resume intent through the queued dispatch path', async () => {
+    const enqueue = vi.fn(async () => undefined);
+    const h = botTaskDispatchHarness({ child: { permissionMode: 'auto', planModeEnabled: false } }, {}, {
+      inputCoordinator: { ensureQueueRestored: async () => undefined, shouldQueueNewTurn: () => true },
+      enqueueSendToSessionMessage: enqueue,
+    });
+    const marker = 'deliverToCanonical: async (botId, text, clientId) => {';
+    const start = registerSource.indexOf(marker);
+    const end = registerSource.indexOf('\n      },\n    }),', start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const callback = registerSource.slice(start + 'deliverToCanonical: '.length, end) + '\n}';
+    const deliver = new Function('readDeviceLinkSettings', 'botDelegationServiceHolder', 'dispatchBotSessionMessage',
+      ts.transpileModule(`return (${callback});`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText)(
+      () => ({ remoteControlEnabled: true }),
+      { ensureCanonicalSession: async () => ({ ok: true, sessionId: 'child' }) }, h.dispatchBotSessionMessage,
+    ) as (botId: string, text: string, clientId: string) => Promise<{ ok: boolean }>;
+    expect(await deliver('companion', 'Resume with this owner message', 'cloud-room:owner')).toEqual({ ok: true });
+    expect(enqueue).toHaveBeenLastCalledWith(expect.objectContaining({ resumeRestorePausedQueue: true }));
+    enqueue.mockClear();
+    await h.dispatchBotSessionMessage({ targetSessionId: 'child', message: 'Automatic update', clientId: 'bot-dm:auto' });
+    expect(enqueue).toHaveBeenLastCalledWith(expect.objectContaining({ resumeRestorePausedQueue: undefined }));
+  });
+
   // #6895: rejected input must not bootstrap the old primary or consume its restore.
   it.each(['already-shadowed', 'shadowed-while-waiting'] as const)('preserves automation state when %s', async (timing) => {
     let shadowed = timing === 'already-shadowed';

@@ -11139,6 +11139,37 @@ describe('AgentInputCoordinator crash-recovery queue snapshots (issue #761)', ()
     expect(h.sendToAgent.mock.calls[0]?.[1]).toEqual({ type: 'user', content: 'first' });
   });
 
+  // #7209: execute the production Bot queue adapter against the real restored
+  // coordinator. This guard protects owner-input admission without allowing an
+  // automatic sender or an owner message after explicit Stop to resume drafts.
+  it.each(['owner', 'automatic', 'stopped'] as const)('restored Bot queue admission respects %s input', async (mode) => {
+    const h = createHarness(), sid = `bot-restored-${mode}`;
+    h.setLoadQueueSnapshot(async () => [makeItem('restored-draft', 'previous draft')]);
+    await h.coordinator.ensureQueueRestored(sid);
+    if (mode === 'stopped') h.coordinator.stop(sid, { keepQueue: true, pauseQueue: true });
+    const source = readFileSync(resolve(__dirname, '..', 'register.ts'), 'utf8');
+    const start = source.indexOf('  async function enqueueSendToSessionMessage(params: {');
+    const end = source.indexOf('  async function buildSessionControlInputItem(', start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const adapter = new Function('inputCoordinator', 'buildSessionControlInputItem', 'assertTaskActionCurrent', 'log',
+      transpileModule(`${source.slice(start, end)}; return enqueueSendToSessionMessage;`,
+        { compilerOptions: { target: ScriptTarget.ES2022 } }).outputText)(
+      h.coordinator, async () => makeItem('incoming', 'new message'), () => undefined, mocks.logger,
+    ) as (params: Record<string, unknown>) => Promise<void>;
+    await adapter({ targetSessionId: sid, clientId: 'incoming', resumeRestorePausedQueue: mode !== 'automatic' });
+    await flush();
+    const projection = latestProjection(h.projections);
+    expect(projection.queuePaused).toBe(mode !== 'owner');
+    if (mode === 'owner') {
+      expect(h.sendToAgent.mock.calls[0]?.[1]).toEqual({ type: 'user', content: 'previous draft' });
+      expect(projection.pendingQueue.map(q => q.clientId)).toEqual(['incoming']);
+    } else {
+      expect(h.sendToAgent).not.toHaveBeenCalled();
+      expect(projection.pendingQueue.map(q => q.clientId)).toEqual(['restored-draft', 'incoming']);
+    }
+  });
+
   it('releases a crash-restored paused queue on explicit user input (resumeRestorePausedQueue)', async () => {
     const h = createHarness();
     const sid = 'snapshot-restore-explicit-input-release';
