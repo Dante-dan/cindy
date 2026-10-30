@@ -285,7 +285,7 @@ The grayscale rule is near-absolute. The following are the **only** sanctioned n
 > - **Cindy Make source comparison** — the owner-approved source overview (2026-09-20, refined 2026-09-21) combines local main and the online target in one row, with personal below. Matching main hashes appear once in `--status-success`; differing hashes show the local value in `--text-secondary` → the verified online target in `--status-success`, with a `--text-tertiary` arrow. The online green identifies the official target even when local main is behind; difference counts remain explicit. Personal uses an icon-first label flush with the main row's left edge, without chip fill or inset padding: status icon, then `cindy-personal` with the localized status in parentheses, followed by the SHA and change count. The icon, name and parenthesized status inherit one color. Latest uses a check and `--status-success`; missing official updates use a download icon and the existing Light/Dark update foreground `--upgrade-banner-fg`; an inconclusive comparison uses a help icon and `--text-secondary`. The status stays visible; the shared hover/focus `Tip` may explain it further. This is informational, with no click action. During operations that replace the comparison, keep the name neutral and omit the status icon, suffix and tooltip. Personal-only changes do not invalidate latest; unavailable lookups never imply latest or an available update. Each source row wraps independently. Both modes use existing tokens; no other version surface inherits this treatment. Since 2026-10-01 (owner-approved plain-language Settings, [cindy-make-upstream.md](../cindy-make-upstream.md)), this hash comparison, the source path and its open/clear buttons sit inside the default-collapsed native `details` disclosure “Technical details (for developers)”; the visible overview is the plain-language `CindyMakeVersionSummary` (personal: official version + N changes; latest official: release/beta/dev label + included / not yet / can't confirm). The summary reuses the same verified comparison, the same check / download / help icons and `--status-success` / `--upgrade-banner-fg` / `--text-secondary` colors, shows no hash, branch or main, and is plain text because the technical comparison keeps the single live status region.
 > - **Shared-task mobile confirmations** — only the management page is full-screen. Remove, leave, close-current and close-all use compact confirmations. iOS retains `showConfirm` and the system Alert with supported Liquid Glass / older-system fallback. On 2026-09-20 the user rejected Android's default green-text system Alert: Android uses a centered content-height card, container radius 12, themed elevated surface, neutral outlined Cancel and pill-shaped solid danger action using `sharedTaskConfirmBackground/Foreground`. Reuse Mobile action primitives, minimum target 44, wrap actions when needed, and scroll long descriptions. Android Back cancels; the scrim does not dismiss. Cancellation preserves the task, page, tab and scroll position. An in-task guest exits directly from task details, without another management page. No native configuration changes or simulated iOS glass. Desktop retains the Plan B shared window.
 > - **CINDY checked Switch** — `--switch-track-on` uses blue `#417CDD` in CINDY Light and Dark (owner decision 2026-09-15, §15.17). This is an enabled-state signal, independently adjustable from focus, caret and Auto Approval despite sharing their current hue. Other themes retain their own checked-track colors.
-> - **Windows taskbar attention badge** — the native OS overlay uses a fixed red background (`#D91F37`) and white digits with no outline (`#FFFFFF`) in both Light and Dark taskbars. This is the app-wide count of active tasks needing attention, not an error-only status. The image-specific semantic pair lives in `apps/desktop/src/main/windowsBadgeIcon.ts`; it is not an in-app theme token. Keep a 16-logical-pixel transparent canvas and center the circle and digits at 80% of their original size (user refinement, 2026-09-16). Render using the highest connected display scale and pass that physical-size image directly to the Windows Shell through the native taskbar bridge (Electron 41 otherwise forces overlays to 16 physical pixels). Redraw after display/DPI changes and taskbar recreation; keep the multi-resolution Electron overlay as a failure fallback. Use a circle for one digit, a rounded square for multiple digits, and `99+` above 99. The accessibility description keeps the exact total. Only the OS image may use its fitted 8–12px system-font digits; web typography and status-dot color rules are unchanged.
+> - **Windows taskbar attention badge** — the native OS overlay uses a fixed red background (`#D91F37`) and white digits with no outline (`#FFFFFF`) in both Light and Dark taskbars. This is the count of local tasks needing attention, not an error-only status and not a literal total of every task. Device-link sessions owned by another machine are excluded, as are automation-generated sessions (scheduler source or a legacy Schedule title prefix) and a heartbeat completion (done with an unread run) bound to an ordinary task. A local learn session is not that exception: awaiting-review is a review the user must handle on this machine, using the same done / awaiting / error signals. Later awaiting or error attention on a heartbeat-bound ordinary task still counts. The image-specific semantic pair lives in `apps/desktop/src/main/windowsBadgeIcon.ts`; it is not an in-app theme token. Keep a 16-logical-pixel transparent canvas and center the circle and digits at 80% of their original size (user refinement, 2026-09-16). Render using the highest connected display scale and pass that physical-size image directly to the Windows Shell through the native taskbar bridge (Electron 41 otherwise forces overlays to 16 physical pixels). Redraw after display/DPI changes and taskbar recreation; keep the multi-resolution Electron overlay as a failure fallback. Use a circle for one digit, a rounded square for multiple digits, and `99+` above 99. The accessibility description keeps the exact total. Only the OS image may use its fitted 8–12px system-font digits; web typography and status-dot color rules are unchanged.
 > - **Toast Info / Success / Warning / Error** — `#417CDD` / `#2AAE5B` / `#F3A115` / `#D91F37`(finalized 2026-07-17; Toast exemption lifted) — used ONLY on the 16×16 lucide icon inside Toast pill notifications. The pill body (background, text, border, close icon) remains strictly grayscale. Info blue #417CDD equals the focus-ring / Auto Approval value (originally #3B82F6, added 2026-07-14, now finalized); success/warning/error equal the global status colors (done green / status error / warning foreground).
 > - **Usage History category color (owner-approved 2026-09-08, extended 2026-09-09).** The registered usage heatmap uses a blue intensity scale. Daily token bars and their corresponding model-table swatches/share marks use `--usage-model-1` … `--usage-model-5` as the seed palette; additional models receive theme-derived hues without a top-five cutoff. All model identities in the full history are included, even when absent from the last 30 days. Agent/harness swatches, share marks and the stacked share strip reuse the existing engine identity tokens: `--engine-badge-cc` (terracotta orange), `--engine-badge-codex` (blue), and `--usage-model-1` (owner-chosen teal for pi, to distinguish it from Codex blue). Claude/Codex retain their cross-mode fixed-value contract; pi follows the existing Light/Dark teal values. `--usage-heatmap-high` supplies the high end of the heatmap. The heatmap retains its process-blue alias; category colors do not inherit process/status semantics. Task marks, text and control frames stay neutral. **Extended 2026-10-17 (owner approved the prototype):** the provider「远程与分享」page reuses the same charts and tables for provider usage; there the same seed palette and derivation also colour the person and group-computer categories (bars stacked by person / computer / model, plus each table's swatches, share marks and share strip), ranked by a fixed order (people as listed, computers in group order, models by full-history tokens) that filters never reassign. No new tokens, shapes or status meaning. See [the component specification](./usage-history-charts.md); colors.ts remains the seed-value source, with runtime derivation under governance §3.4.
 > - **Resource Usage Process Categories** — the Resource Usage table may color only its 14px process-type glyphs so dense rows can be scanned by category (user-requested 2026-08-06). The six category pairs are task Agent blue `#2563EB / #60A5FA`, Agent service purple `#7C3AED / #A78BFA`, main-process pink `#DB2777 / #F472B6`, renderer cyan `#0891B2 / #22D3EE`, GPU amber `#D97706 / #F59E0B`, and utility green `#059669 / #34D399` (Light / Dark). These colors encode process category, **not health or status**; row backgrounds, labels, metrics, selection and actions remain on the neutral system. Direct use is confined to `resource-usage` process glyphs; the explicitly registered Usage History heatmap alias above may also reference the task-blue value. No other table or process UI inherits this permission. Tokens: `--process-agent-task-icon`, `--process-agent-service-icon`, `--process-main-icon`, `--process-renderer-icon`, `--process-gpu-icon`, `--process-utility-icon`.
@@ -622,6 +622,8 @@ Icon refinement reference (2026-10-18, macOS AppKit rendering; enlarged and actu
 - Size and density (owner request, 2026-10-12: lighter on small laptops, verified in every language): every page is 320–368pt wide by tube count, with a 20pt panel radius and 14pt tile radius. The panel never takes more than 86% of the screen's visible height; longer content scrolls between the fixed header and footer. When the visible height is under 1000pt (13–14" laptops at default scaling), the panel opens in a short layout: 82pt tubes instead of 104pt, 160pt rings instead of 188pt, and two task rows instead of three.
 - The usage page (owner-approved redesign, 2026-10-12) shares the panel width and slides in like a detail page instead of widening into a dashboard. Top to bottom it shows: back, title and a 7/30/90-day switch; one total with two caption lines (period, scope and value basis; daily average, paid and tokens); a 100pt stacked chart labeled only with its first day and Today, where hovering a day swaps the total for that day's amount and harness split; a thin harness bar with share and amount per harness; the top five models or today's tasks; and the value note. There is no amount/tokens switch and no scope switch: the scope follows Settings, and the caption names it.
 - Every row must fit in the longest supported language. A segmented control is used only where all its labels fit on one row in every language. The four menu bar text options are a two-column chip grid. Other controls fall back instead of overflowing: the usage-scope picker moves under its title. Screenshots for review cover English, Simplified and Traditional Chinese, Japanese and Korean, in Light and Dark.
+- Keep the main panel's original order: model quota first, tasks second, then the usage chart (owner correction, 2026-10-26). The task section uses three quiet text tabs: Unread, In progress and Today's usage. These are deliberately frameless, with no filled segment track; ink emphasis and a short underline identify selection. Each keeps a 28pt hit height and native keyboard/selected accessibility. Opening with attention selects Unread; otherwise it restores the last manually selected non-unread tab for this helper lifetime. Before any manual choice, prefer In progress when work exists, otherwise Today's usage. Updates never switch an already-open panel, including when the last unread item clears. Opening or switching tabs never acknowledges messages.
+- Unread and In progress reuse the island's full candidate projection before current-card clipping, including remote tasks and restored companion chats. Unread counts the exact attention candidates; In progress includes running and waiting-for-input tasks. Preserve the island's candidate order: waiting items come first in In progress, then the latest user/scheduler prompt; agent output and tool progress never reorder running rows (owner correction, 2026-10-27). Rows show identity, a single-line message/status preview with tail truncation, and time; no full-content hover tooltip (owner correction, 2026-10-27). Privacy mode masks both identity and preview. Clicking uses the island's existing device-aware navigation and read acknowledgement. Two rows on short screens, otherwise three, with an in-place All tasks / Collapse action; usage keeps its existing money ranking and usage-page link.
 
 ### Desktop chat and operation authorization (DS-9, 2026-09-11)
 
@@ -632,6 +634,10 @@ Chat prose and compact code use the existing `chatChrome.ts` presentation entry;
 **Android in-app update card (owner-approved HTML direction, registered 2026-10-16, #6199):** `AndroidUpdateSheet` is one content-height Material bottom sheet for discovery, install permission, download and install. Its paired actions are pills (secondary `surfaceChip` left, primary `cta` right). The only bare-text control is the centered browser-download fallback ("改用浏览器下载" / "Download in Browser Instead") shown under the pills while a decision is pending: frameless, `footnote` 13/18 medium in `textSecondary`, full-width 44pt hit height, pressed opacity 0.72. It is a secondary escape route rather than a commit action, so it stays out of the pill pair; this is not a general exemption for other sheet actions. In short windows the details region scrolls while the actions stay pinned. Floating compatibility presentations round all four container corners. The Light/Dark HTML previews are not Android device screenshots.
 
 **Desktop Permission decisions, user-approved 2026-09-11 after actual-component comparison:** Allow once remains the visual main action using `perm-allow-*`; deny and session-scoped allow remain secondary. Retain neutral operation information: Desktop has no trusted risk-level field, and `autoReviewUnavailable` is not a risk conclusion. No invented danger variant or command-based risk inference. Keep the request in the composer area with title → description → scrollable operation → right-aligned wrapping actions, at the existing density. Use Button with a narrow local-alias adaptation; apply §5's existing pill-button and keycap treatments. Keep long scoped rules bounded by the column and available in the Tip. Labels, order, shortcuts, IME/editable-focus guards, submitting and failure recovery remain owned by the existing permission flow. This decision does not cover permission mode selectors, account/plugin authorization lifecycles or Mobile layout; Mobile is deferred to its own phase.
+
+### Desktop chat threads
+
+Group and private threads share the same panel chrome, root message row and reply divider. The complete root message belongs to the replies’ scroll container; it has no independent height limit or scrollbar. Keep the header and reply composer visible outside that scrolling content. Private threads retain the ordinary task runtime for progress, approvals and stopping.
 
 ### Desktop group progress strip
 
@@ -672,10 +678,13 @@ all states use semantic colors in both Light and Dark.
 Claude Code and Codex use the same row, trigger and menu (`HarnessVersionMenuRow`), with only
 the Cindy-maintained version chain: update to the current channel's version (shown right-aligned,
 disabled unless strictly newer), check again, and the last successful check time. A later failed
-online check keeps that last version in the menu but disables Update: restart re-checks the
-manifest and cannot install from a stale result. There is no upstream source, restore or
-release-notes entry. Updating keeps the existing confirm → busy warning → restart flow; the
-download happens in the normal startup Splash, not in the row.
+online check keeps that last version in the menu but disables Update. There is no upstream
+source, restore or release-notes entry. Updating first prepares the selected version in the
+shared background cache, showing download status in the row, then follows the existing
+confirm → busy warning → restart flow. Startup installs only a complete cache matching the
+current manifest; if that target has changed or the cache is unavailable, it keeps a usable
+old runtime and retries in the background. First-install and repair downloads retain their
+existing startup fallback.
 
 
 ### User-attached long images
@@ -709,6 +718,36 @@ Decision: [#6796, maintainer confirmation](https://github.com/makecindy/cindy/is
 ### Desktop teammate sidebar
 
 The expanded teammate section previews five chats (local teammates, remote teammates, groups and the merged Cindy device row share this limit). Keep the current chat visible within those five rows. Use the task list’s “Show all N” footer style, with “Show less” after expansion. Collapsing the section to its existing avatar strip resets the preview; the strip’s +N button opens the full list. This limit applies to the Desktop sidebar; the Mobile task home section below previews three.
+
+### Desktop and Mobile task creator filters (2026-10-27)
+
+The sidebar's existing Filter submenu adds Teammates. Any source (不限来源) is the default and includes personal tasks and all teammates' tasks;
+choosing one teammate selects only its created tasks, then further choices add or remove teammates.
+Removing the last choice restores Any source. Reset Filters also clears this dimension, preserving task status,
+grouping and sorting. Pinned entries retain their existing exemption from content filters.
+Use the existing menu rows, avatar component and check marks; keep the menu open for multiple choices.
+Show a remote computer name only for device-scoped identities, to distinguish same-name teammates.
+Cindy and cloud companions use a single name row without a computer subtitle: their filters span computers. Persist selections
+per viewer account. Built-in Cindy is one choice across computers; choosing it includes every copy’s
+created tasks, including archived history. Identify it from preset/cloud identity, never its name; custom
+namesakes remain separate. Existing per-computer Cindy selections migrate to the unified choice.
+Cloud companions use their account identity across old and current computers; retired copies stay out
+of the choices, as in the teammate roster. Unlinked teammates remain keyed by computer and teammate ID.
+Creation attribution is distinct from following. Existing teammate routine and IM channel tasks also
+appear in the desktop task list and share this filter. Their exact linked owner supplies the avatar;
+the tooltip says “Belongs to” to distinguish ownership from delegation or following. Active/archived
+filters still apply; main chats, private threads and internal group lanes retain their dedicated entries.
+Task rows retain their creator avatar after archiving, on both local and remote computers. Prefer the
+creator's avatar when others follow the same task; the tooltip distinguishes creation from following.
+Two-line teammate rows grow with their content; align the avatar and check mark with the name line,
+keeping the computer name in the same text column and preserving vertical padding.
+Verify the menu in all five UI locales and both themes; long names retain the existing menu width.
+Mobile uses the same multi-selection semantics in the existing iOS native / Android display menus.
+The home (including the task drawer) and device task lists retain creation/ownership avatars after
+archiving and cold start. Read the existing teammate delegation and history APIs on older hosts;
+keep main chats and internal lanes out of these lists. Cache only portable ownership/avatar metadata
+in the account-scoped home snapshot. Late cloud/preset discovery canonicalizes existing selections
+without clearing the list or splitting Cindy by computer.
 
 ### Mobile task home teammate section (owner-approved “A+B”, 2026-10-24)
 
@@ -1181,7 +1220,8 @@ Known but deliberately-deferred cleanups are tracked in the decision log's backl
 
 Applies to submit-on-Enter fields: the chat composer, goal input, ask input, etc. **Not** ordinary single-line editors in Settings — there Enter must not submit.
 
-- **Enter = submit**, **Shift+Enter = newline**.
+- By default, **Enter = submit**, **Shift+Enter = newline**. The desktop chat composer also supports the existing **Cmd/Ctrl+Enter = submit** preference; when enabled, **Enter = newline**.
+- Composer list continuation follows newline intent: Enter in that preference, as well as Shift/Alt+Enter, continues a list or exits an empty item. Send shortcuts and IME confirmation must not edit lists; fenced code keeps native newline behavior. The shared key handler is `handleComposerListEnter` in `apps/desktop/src/renderer/components/new-chat/ComposerListNodes.ts`, covered by `apps/desktop/src/renderer/lib/__tests__/composerListContinuationEditor.test.ts`.
 - **Enter during IME composition must not submit** — check `event.nativeEvent.isComposing` (a CJK user confirming a candidate must not accidentally send).
 - Centralize this logic in code; do not re-implement it per field and let behavior drift (per "code-first determinism" in `docs/dev-rules/maker-core-and-agent-behavior.md`).
 
@@ -1200,24 +1240,6 @@ before activation. Recording/refinement, Stop, Queue and queue editing retain th
 existing actions. Other composers keep their existing behavior.
 
 #### Motion tokens (the only tier source)
-
-**Message arrival and delivery continuity (2026-10-25).** Keep the existing bubble
-colors, shape and typography. New timeline rows enter once with a subtle opacity /
-6px/pt translation while their occupied space grows continuously on mobile. Arrival
-comes from visible message identities, not the age of the first token. Initial
-history, older pages, replacement windows and recycled cells do not replay; streaming
-updates and delivery acknowledgement retain their row identity. Reduced motion shows
-the final state immediately, including when enabled during an entrance.
-
-Animate occupied space through streamed wrapping, thinking/work previews, action-row
-changes, recommendations and status removal. Retain exiting content until its space
-closes. Only one scroll owner follows the tail; keyboard and composer reservation must
-use the same evolving geometry as scroll compensation. A reader's drag/history position
-takes precedence. Keep native text selection and the existing message actions; pending
-sends retain the settled action-row space. Reserve streaming action space without
-exposing unfinished-message actions, and collapse intermediate replies' unused space
-continuously. Frame-rate claims require actual display/frame evidence, not interpolated
-recordings or an animation-duration setting.
 
 Global tokens live in `:root` of `apps/desktop/src/renderer/styles/globals.css`; mobile (`apps/mobile`) mirrors same-name same-value constants in `src/theme/tokens.ts` (dual-platform isomorphism, same policy as color tokens, landing with the mobile motion overhaul). **New transitions/animations must reference tokens — no hardcoded durations or cubic-beziers**; 5 interaction-duration tiers + 3 curves, the same philosophy as the §5 radius scale. Values outside the tiers require design review first. Narrow semantic exceptions are recorded directly below.
 
@@ -1429,7 +1451,12 @@ HTML 不提供复制文件、在文件列表中定位或选择应用。无侧边
 4. **候选判定:反引号不等于路径。** 行内 code 只接受真正的路径形状——带分隔符 / 绝对路径,
    或裸文件名;**不得**用「含斜杠或有个点后缀」兜底。显式 markdown 链接与正文裸路径不受此
    限(前者作者已声明,后者词法本就要求带分隔符)。
-5. **无法判定时的点亮门槛按形态分级。** 适用于任何存在「无法判定」中间态的链路:移动端
+5. **自动识别路径的点亮门槛按形态分级。** 显式 Markdown 文件链接（`[查看报告](路径)`）
+   在桌面和手机聊天中保留点击入口，不因尚未验证、文件缺失或断线退化为普通文字；点击时
+   通过原有文件访问通道打开或说明失败，保留复制目标的操作，不绕过权限、不猜搬迁位置。
+   已解析文件仍沿用原有预览与文件菜单。没有文件访问上下文或不允许特权链接的内容面不因此
+   获得文件访问能力。以下形态门槛仅适用于正文自动识别路径和行内 code。
+   适用于任何存在「无法判定」中间态的链路:移动端
    全部会话、以及桌面的**远程会话**(两者的 `fs:stat` 都会回 `unknown`)。桌面**本机**
    会话不适用 —— 那边走真实存在性检查,解析不到一律纯文本,没有中间态。
 
@@ -1543,12 +1570,13 @@ PR #1144 的两轮 review 各捉到一个**同族**缺陷:「有下划线却点�
 | ----------------------- | ------------------------------------------- | -------------------------------------- | ------------------------------------------- |
 | 桌面聊天正文            | 外链 / anchor / 本地图片 URL                | ✅                                     | ✅ `MARKDOWN_LINK_CLASS`                    |
 | 桌面聊天正文            | 已解析本地文件(chip / 散文 label)           | ✅                                     | ✅                                          |
-| 桌面聊天正文            | 未解析路径、行内 code                       | ❌                                     | ❌                                          |
+| 桌面聊天正文            | 未解析的显式文件链接                         | ✅（点击重验，失败提示）                 | ✅                                          |
+| 桌面聊天正文            | 未解析的自动识别路径、行内 code              | ❌                                     | ❌                                          |
 | 桌面聊天正文            | **远程**会话里 stat 回 `unknown` 的引用     | 仅非歧义形状                           | 由 `isAmbiguousPathShape` 门槛裁决          |
 | 桌面聊天正文 / 用户气泡 | 会话 / 项目深链 chip(`InlineReferenceChip`) | 取决于是否注入 onClick | **与 `interactive` 同源**                   |
 | 桌面用户气泡            | URL / 图片路径                              | ✅                                     | ✅（改前只有 hover 下划线）                 |
 | 手机聊天正文            | 外链 / 图片 chip / 会话 chip                | 取决于 handler 是否注入                | **与 handler 同源**(`clickableInlineStyle`) |
-| 手机聊天正文            | 路径 chip                                   | 取决于远端 verdict                     | 由 `ChatPathChipSpan.lit` 单点裁决          |
+| 手机聊天正文            | 路径 chip                                   | 显式链接保留，其余取决于远端 verdict    | 由 `ChatPathChipSpan.lit` 单点裁决          |
 | 手机文件阅读器          | http(s)                                     | ✅                                     | ✅                                          |
 | 手机文件阅读器          | 会话 chip / 图片 chip / 本地路径 / mailto   | ❌（无 bridge、只放行 http(s)）        | ❌                                          |
 
@@ -1649,19 +1677,16 @@ peek 有值 → 调用方跳过重验 → 链路恢复后也不再问。两端�
 > 数组;两端都要有。(第 10 轮重构只做对了桌面那一半,第 11 轮 review 实捉;这类 bug 的形状
 > 是「依赖数组漏了触发源」,没有类型保护,故两端各有源码级守卫。)
 
-> **不变量 B:点亮门槛(规则 5)对所有候选来源同口径。** 与候选门槛(规则 4)的来源豁免
-> **无关** —— 两者是两道独立的门,显式 markdown 链接只豁免前者。
+> **不变量 B（2026-10-27 更新）:显式链接保留作者声明的点击入口，自动识别引用仍需验证。**
 
-作者写下 `[配置](package.json)` 只声明了「我想让它可点」,并不能让远端在链路断时知道它是否
-存在;点亮了却点不开正是规则 1 要防的反例。判据在两端各只有一份、且**逐字同形**:桌面
-`markdownTarget.isAmbiguousPathShape`、移动 `chatPathCandidate.isAmbiguousChatPathShape`;
-所有入口都调它,**不得按来源硬写 `true` / `false`**(移动端曾对链接入口恒 `false`,与桌面
-不对称,review 实捉)。
+`[配置](package.json)` 的下划线表示可以尝试打开，不承诺文件仍然存在。文件移动、删除或
+暂时不可达时，点击后给出可理解的反馈。正文路径与行内 code 仍按原有形态门槛判断，避免
+把 `array.map` 等普通文本变成假链接。两端以来源标记区分，不放宽路径分类或文件访问权限。
 
 | 候选来源           | 桌面入口                      | 移动入口                          | 走门槛?                                    |
 | ------------------ | ----------------------------- | --------------------------------- | ------------------------------------------ |
 | 行内 code          | `classifyInlineCodeTarget`    | `classifyInlineCodePathCandidate` | ✅                                         |
-| 显式 markdown 链接 | `classifyMarkdownLinkTarget`  | `classifyChatPathLinkTarget`      | ✅                                         |
+| 显式 markdown 链接 | `classifyMarkdownLinkTarget`  | `classifyChatPathLinkTarget`      | 不以存在性决定可点；实际访问仍校验          |
 | 正文裸写路径       | `remarkLocalPathLinks` → 同上 | `matchBareFilePathLink` → 同上    | ✅(词法强制带扩展名 → 恒非歧义,实际无影响) |
 | 尾斜杠目录         | 回看 `originalHref` → 非歧义  | 同左                              | ✅                                         |
 | `file://` 绝对路径 | 单列为非歧义                  | 同左                              | ✅                                         |

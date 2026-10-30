@@ -1,4 +1,6 @@
 import { parseScheduledModelBaseline } from '../../shared/scheduledModelBaseline';
+import { ScheduledModelSelectionBusyError } from './scheduledModelSelection';
+import { getSessionRuntimeControlSnapshot } from './sessionRuntimeControl';
 import { throwIpcError } from '../utils/ipcValidate.js';
 import type { AgentKind } from '@cindy/maker-core';
 import { normalizeBotModelChain, type BotModelRoute } from '../../shared/botModelChain.js';
@@ -21,17 +23,24 @@ interface BotRouteState {
   next?: RuntimeRoute;
 }
 
+function configuredKey(state: BotRouteState, chain = state.chain): string {
+  // Restore defaults is a configuration change even when its routes are equal.
+  return JSON.stringify([chain, state.followsCindyDefault === true]);
+}
+
 function configuredRoute(
   state: BotRouteState,
   previous: string | undefined,
   chain = state.chain,
 ): RuntimeRoute | null {
-  const key = JSON.stringify(chain);
-  const isDraftChange = key !== JSON.stringify(state.chain);
+  const key = configuredKey(state, chain);
+  const isDraftChange = JSON.stringify(chain) !== JSON.stringify(state.chain);
   // An automation owns its temporary route until ordinary input restores it.
   // This also applies to companions following Cindy defaults and after restart.
   if (!isDraftChange && parseScheduledModelBaseline(state.scheduledModelBaseline) && (previous === undefined || previous === key)) return null;
-  if (!state.followsCindyDefault && !isDraftChange && state.hasRuntimeOverride && (previous === undefined || previous === key)) return null;
+  // Following defaults must not undo a working fallback on every send. Only a
+  // changed chain or an explicit save should supersede the accepted route.
+  if (!isDraftChange && state.hasRuntimeOverride && (previous === undefined || previous === key)) return null;
   const primary = chain[0];
   if (!primary) return null;
   return {
@@ -56,6 +65,26 @@ function savedRuntimeRoute(state: BotRouteState): RuntimeRoute | null {
 function sameRoute(a: RuntimeRoute, b: RuntimeRoute): boolean {
   return a.agentKind === b.agentKind && a.model === b.model && a.providerId === b.providerId
     && a.effort === b.effort && a.fastMode === b.fastMode && (a.agentDeviceId ?? null) === (b.agentDeviceId ?? null);
+}
+
+/** Apply through both runtime switch paths before retiring recovery state. */
+export function createBotModelRouteApplier(deps: {
+  stage(sessionId: string, route: RuntimeRoute, current: RuntimeRoute): Promise<void>;
+  isIdle(sessionId: string): boolean;
+  applyPendingSwitch(sessionId: string): Promise<void>;
+  hasPendingSwitch(sessionId: string): boolean;
+  onApplied(sessionId: string): Promise<void>;
+}) {
+  return async (sessionId: string, route: RuntimeRoute, current: RuntimeRoute): Promise<void> => {
+    await deps.stage(sessionId, route, current);
+    if (deps.isIdle(sessionId)) await deps.applyPendingSwitch(sessionId);
+    // Same-Harness choices wait in runtime control, not the Harness registry.
+    // Staging alone must not retire the durable recovery marker.
+    if (deps.hasPendingSwitch(sessionId) || getSessionRuntimeControlSnapshot(sessionId).pending) {
+      throw new ScheduledModelSelectionBusyError('Saved companion route is still pending');
+    }
+    await deps.onApplied(sessionId);
+  };
 }
 
 /** Apply the permanent profile through ordinary Session model/switch controls.
@@ -95,16 +124,15 @@ export function createBotModelRouteReconciler(deps: {
         if (deps.ownerEpoch() !== epoch) throw new Error('Bot model route owner changed');
         if ((revisions.get(sessionId) ?? 0) !== revision) continue;
         if (!state) {
-          // Paused profiles are absent from the apply reader. Keep an explicit
-          // save pending until resume can accept it and invalidate the scope.
-          if (configured.get(sessionId) !== '') configured.delete(sessionId);
+          // Paused profiles are absent from the apply reader. Retain the last
+          // known chain (or explicit-save marker) so resume can detect changes.
           return;
         }
         if (!state.chain.length) {
-          configured.delete(sessionId);
+          // A temporary loss of model visibility must not erase that baseline.
           throwIpcError('PRECONDITION_FAILED', '请先选择已开启的伙伴模型');
         }
-        const key = JSON.stringify(state.chain);
+        const key = configuredKey(state);
         const previous = parseScheduledModelBaseline(state.scheduledModelBaseline)?.pendingBotProfileVersion
           ? '' : configured.get(sessionId);
         const route = configuredRoute(state, previous);

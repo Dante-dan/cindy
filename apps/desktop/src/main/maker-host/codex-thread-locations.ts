@@ -12,7 +12,24 @@ type NormalizeResumeLocation = (threadId: string, rolloutPath: string, sqliteHom
 
 /** A native thread has one durable rollout, regardless of the account resuming it. */
 export class CodexThreadLocations {
-  constructor(private readonly directory: string) {}
+  constructor(
+    private readonly directory: string,
+    private readonly repairRollout?: (threadId: string, rolloutPath: string, sqliteHome: string) => string | Promise<string>,
+  ) {}
+
+  private async prepareLocation(value: ThreadLocation): Promise<ThreadLocation> {
+    if (!this.repairRollout) return value;
+    const sqliteHome = value.sqliteHome ?? historyHomeForRollout(value.path);
+    const repaired = await this.repairRollout(value.threadId, value.path, sqliteHome);
+    const current = await this.readLocation(value.threadId);
+    if (current?.path !== value.path || current.sqliteHome !== value.sqliteHome) {
+      throw new Error('Codex thread location changed during history repair');
+    }
+    // Repair retains the old name as a hard link. Return the native name without
+    // writing a stale index over another process's archive/account update.
+    // The normal native thread-started callback records its resulting location.
+    return { ...value, path: repaired };
+  }
 
   private file(threadId: string): string {
     if (!/^[a-zA-Z0-9-]{1,100}$/.test(threadId)) throw new Error('Invalid Codex thread id');
@@ -67,8 +84,12 @@ export class CodexThreadLocations {
   ): Promise<string | undefined> {
     const value = await this.readLocation(threadId);
     if (!value) return prepareLegacy(threadId);
+<<<<<<< HEAD
     if (!await this.rolloutExists(value.path)) return;
     return (await this.normalizeResumeLocation(value, normalize)).path;
+=======
+    return await this.rolloutExists(value.path) ? (await this.prepareLocation(value)).path : undefined;
+>>>>>>> origin/main
   }
 
   async readStorage(
@@ -84,7 +105,13 @@ export class CodexThreadLocations {
       await this.record(threadId, legacyRollout, legacy.home);
       return { historyHome: historyHomeForRollout(legacyRollout), sqliteHome: legacy.home, rolloutPath: legacyRollout };
     }
+<<<<<<< HEAD
     value = await this.normalizeResumeLocation(value, legacy?.normalize);
+=======
+    // No legacy preparation argument means a read-only lookup (archive/export).
+    // Resolve repairs before account-host startup, while retaining sqliteHome.
+    if (legacy) value = await this.prepareLocation(value);
+>>>>>>> origin/main
     const historyHome = historyHomeForRollout(value.path);
     // thread/start returns a future path before the first turn materializes it.
     // Keep storage ownership even then, so native resume can distinguish an unused
@@ -110,11 +137,15 @@ export class CodexThreadLocations {
 
   async record(threadId: string, rolloutPath: string, sqliteHome?: string): Promise<void> {
     if (!path.isAbsolute(rolloutPath)) throw new Error('Invalid Codex rollout path');
-    const file = this.file(threadId);
+    await this.writeLocation({ threadId, path: rolloutPath, sqliteHome });
+  }
+
+  private async writeLocation(value: ThreadLocation): Promise<void> {
+    const file = this.file(value.threadId);
     await fs.mkdir(this.directory, { recursive: true, mode: 0o700 });
     const temporary = `${file}.${randomUUID()}.tmp`;
     try {
-      await fs.writeFile(temporary, JSON.stringify({ threadId, path: rolloutPath, sqliteHome }), {
+      await fs.writeFile(temporary, JSON.stringify(value), {
         mode: 0o600,
       });
       await fs.rename(temporary, file);
